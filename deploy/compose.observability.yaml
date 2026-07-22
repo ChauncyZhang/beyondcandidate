@@ -1,0 +1,107 @@
+services:
+  minio:
+    environment:
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+
+  observability-role-provision:
+    image: postgres:16.9-alpine@sha256:7c688148e5e156d0e86df7ba8ae5a05a2386aaec1e2ad8e6d11bdf10504b1fb7
+    environment:
+      PGHOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      QUEUE_METRICS_DB_USER: ${QUEUE_METRICS_DB_USER:?Set QUEUE_METRICS_DB_USER to the queue metrics login}
+      QUEUE_METRICS_DB_PASSWORD: ${QUEUE_METRICS_DB_PASSWORD:?Set QUEUE_METRICS_DB_PASSWORD to the queue metrics password}
+      POSTGRES_EXPORTER_DB_USER: ${POSTGRES_EXPORTER_DB_USER:?Set POSTGRES_EXPORTER_DB_USER to the postgres exporter login}
+      POSTGRES_EXPORTER_DB_PASSWORD: ${POSTGRES_EXPORTER_DB_PASSWORD:?Set POSTGRES_EXPORTER_DB_PASSWORD to the postgres exporter password}
+    volumes:
+      - ./observability/provision-roles.sh:/opt/ux09/provision-observability-roles.sh:ro
+    command: ["sh", "/opt/ux09/provision-observability-roles.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks: [private]
+
+  queue-exporter:
+    image: "${APP_IMAGE:?Set APP_IMAGE to the application repository}@${APP_IMAGE_DIGEST:?Set APP_IMAGE_DIGEST to its sha256 digest}"
+    command: ["python", "-m", "server.app.observability.exporter"]
+    environment:
+      OBSERVABILITY_DATABASE_URL: postgresql://${QUEUE_METRICS_DB_USER:?Set QUEUE_METRICS_DB_USER to the queue metrics login}:${QUEUE_METRICS_DB_PASSWORD:?Set QUEUE_METRICS_DB_PASSWORD to the queue metrics password}@postgres:5432/${POSTGRES_DB}
+      OBSERVABILITY_EXPORTER_PORT: "9108"
+    depends_on:
+      observability-role-provision:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    networks: [private]
+
+  prometheus:
+    image: prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+      queue-exporter:
+        condition: service_started
+      alertmanager:
+        condition: service_started
+    restart: unless-stopped
+    networks: [private]
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1@sha256:27c475db5fb156cab31d5c18a4251ac7ed567746a2483ff264516437a39b15ba
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    restart: unless-stopped
+    networks: [private]
+
+  node-exporter:
+    image: prom/node-exporter:v1.9.1@sha256:d00a542e409ee618a4edc67da14dd48c5da66726bbd5537ab2af9c1dfc442c8a
+    command:
+      - --path.rootfs=/host/root
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+      - --collector.textfile.directory=/var/lib/node_exporter/textfile_collector
+    volumes:
+      - type: bind
+        source: /
+        target: /host/root
+        read_only: true
+        bind:
+          propagation: rslave
+      - type: bind
+        source: ${BACKUP_STATE_DIR:-/var/lib/ux09-backup}/metrics
+        target: /var/lib/node_exporter/textfile_collector
+        read_only: true
+        bind:
+          create_host_path: false
+    pid: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    networks: [private]
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.17.1@sha256:38606faa38c54787525fb0ff2fd6b41b4cfb75d455c1df294927c5f611699b17
+    environment:
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_EXPORTER_DB_USER:?Set POSTGRES_EXPORTER_DB_USER to the postgres exporter login}:${POSTGRES_EXPORTER_DB_PASSWORD:?Set POSTGRES_EXPORTER_DB_PASSWORD to the postgres exporter password}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    depends_on:
+      observability-role-provision:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks: [private]
+
+volumes:
+  prometheus-data:
+  alertmanager-data:

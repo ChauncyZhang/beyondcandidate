@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="BeyondCandidate">
+  <rect width="48" height="48" rx="9" fill="#0f6fae"/>
+  <path d="M15 13v22h8.5c5 0 8-2.4 8-6.1 0-2.7-1.6-4.6-4.2-5.4 2.1-.9 3.4-2.6 3.4-4.9 0-3.5-2.8-5.6-7.4-5.6H15Zm5 4h3c1.8 0 2.8.8 2.8 2.2 0 1.5-1 2.3-2.8 2.3h-3V17Zm0 8.5h3.7c1.9 0 2.9.9 2.9 2.6s-1 2.6-2.9 2.6H20v-5.2Z" fill="#fff"/>
+  <path d="M38 16.5a9 9 0 1 0 0 15" fill="none" stroke="#56d4bd" stroke-width="3.5" stroke-linecap="round"/>
+  <circle cx="38" cy="16.5" r="2.2" fill="#56d4bd"/>
+  <circle cx="38" cy="31.5" r="2.2" fill="#56d4bd"/>
+</svg>

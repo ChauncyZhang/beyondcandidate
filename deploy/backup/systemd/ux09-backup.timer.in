@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the UX-09 paired backup schedule
+
+[Timer]
+OnCalendar=@ON_CALENDAR@
+Persistent=true
+RandomizedDelaySec=@RANDOMIZED_DELAY_SECONDS@
+AccuracySec=60
+Unit=ux09-backup.service
+
+[Install]
+WantedBy=timers.target

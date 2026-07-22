@@ -1,0 +1,15 @@
+.env
+deploy/.env
+frontend/node_modules/
+frontend/dist/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+.tmp/

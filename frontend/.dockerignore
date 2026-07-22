@@ -1,0 +1,10 @@
+*
+!package.json
+!package-lock.json
+!index.html
+!vite.config.js
+!vite.config.mjs
+!public
+!public/**
+!src
+!src/**

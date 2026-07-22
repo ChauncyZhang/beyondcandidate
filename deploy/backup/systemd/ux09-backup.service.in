@@ -1,0 +1,19 @@
+[Unit]
+Description=UX-09 restore-aware paired backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=@ENV_FILE@
+WorkingDirectory=@DEPLOY_ROOT@
+ExecStartPre=/usr/bin/install -d -o 10001 -g 10001 -m 0700 /var/lib/ux09-backup
+ExecStart=/usr/bin/docker compose --env-file @ENV_FILE@ --project-name ux09-backup-scheduler -f @DEPLOY_ROOT@/deploy/compose.backup.yaml run --rm backup-tool
+TimeoutStartSec=@TIMEOUT_SECONDS@
+UMask=0077
+StateDirectory=ux09-backup
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict

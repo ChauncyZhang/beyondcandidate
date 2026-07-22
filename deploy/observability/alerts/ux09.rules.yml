@@ -1,0 +1,162 @@
+groups:
+  - name: ux09-api
+    rules:
+      - alert: ApiHigh5xxRateWarning
+        expr: sum(rate(ux09_http_requests_total{status_class="5xx"}[5m])) / clamp_min(sum(rate(ux09_http_requests_total[5m])), 0.001) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: API 5xx ratio is above 5 percent
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#apihigh5xxratewarning
+      - alert: ApiHigh5xxRateCritical
+        expr: sum(rate(ux09_http_requests_total{status_class="5xx"}[5m])) / clamp_min(sum(rate(ux09_http_requests_total[5m])), 0.001) > 0.20
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: API 5xx ratio is above 20 percent
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#apihigh5xxratecritical
+      - alert: ApiHighLatencyWarning
+        expr: histogram_quantile(0.95, sum by (le) (rate(ux09_http_request_duration_seconds_bucket[10m]))) > 1
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: API p95 latency is above one second
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#apihighlatencywarning
+      - alert: ApiHighLatencyCritical
+        expr: histogram_quantile(0.95, sum by (le) (rate(ux09_http_request_duration_seconds_bucket[5m]))) > 3
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: API p95 latency is above three seconds
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#apihighlatencycritical
+      - alert: ApiReadinessFailure
+        expr: sum by (dependency) (rate(ux09_readiness_checks_total{result=~"failed|cancelled"}[5m])) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: A required API dependency is failing readiness checks
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#apireadinessfailure
+
+  - name: ux09-queues
+    rules:
+      - alert: QueueCollectorDown
+        expr: ux09_queue_collector_up == 0 or absent(ux09_queue_collector_up)
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: Queue exporter cannot collect a database snapshot
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#queuecollectordown
+      - alert: QueueOldestReadyTooOldWarning
+        expr: max(ux09_job_oldest_ready_age_seconds) > 300
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: A runnable job has waited over five minutes
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#queueoldestreadytoooldwarning
+      - alert: QueueOldestReadyTooOldCritical
+        expr: max(ux09_job_oldest_ready_age_seconds) > 900
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: A runnable job has waited over fifteen minutes
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#queueoldestreadytoooldcritical
+      - alert: QueueExpiredLeases
+        expr: sum(ux09_expired_leases) > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Queue leases remain expired
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#queueexpiredleases
+      - alert: QueueDeadLetters
+        expr: sum(ux09_job_dead_letters) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Dead-letter jobs require operator review
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#queuedeadletters
+      - alert: OutboxOldestReadyTooOld
+        expr: max(ux09_outbox_oldest_ready_age_seconds) > 300
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: An outbox event has waited over five minutes
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#outboxoldestreadytooold
+      - alert: ParseFailureRateHigh
+        expr: sum(rate(ux09_job_attempts_total{job_type="screening.parse_item",result="failed"}[15m])) / clamp_min(sum(rate(ux09_job_attempts_total{job_type="screening.parse_item"}[15m])), 0.001) > 0.10
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: Resume parse failure ratio is above 10 percent
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#parsefailureratehigh
+      - alert: LlmFailureRateHigh
+        expr: sum(rate(ux09_job_attempts_total{job_type="screening.llm_score_item",result="failed"}[15m])) / clamp_min(sum(rate(ux09_job_attempts_total{job_type="screening.llm_score_item"}[15m])), 0.001) > 0.10
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: LLM scoring failure ratio is above 10 percent
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#llmfailureratehigh
+
+  - name: ux09-capacity
+    rules:
+      - alert: HostStorageLowWarning
+        expr: min(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) < 0.20
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: Host filesystem free capacity is below 20 percent
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#hoststoragelowwarning
+      - alert: HostStorageLowCritical
+        expr: min(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) < 0.10
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: Host filesystem free capacity is below 10 percent
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#hoststoragelowcritical
+      - alert: PostgresConnectionsHighWarning
+        expr: sum(pg_stat_activity_count) / clamp_min(max(pg_settings_max_connections), 1) > 0.80
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: PostgreSQL connection utilization is above 80 percent
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#postgresconnectionshighwarning
+      - alert: PostgresConnectionsHighCritical
+        expr: sum(pg_stat_activity_count) / clamp_min(max(pg_settings_max_connections), 1) > 0.90
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: PostgreSQL connection utilization is above 90 percent
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#postgresconnectionshighcritical
+      - alert: MinioMetricsUnavailable
+        expr: up{job="minio"} == 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Private MinIO capacity metrics are unavailable
+          runbook_url: https://github.com/ChauncyZhang/beyondcandidate/blob/main/deploy/observability/runbook.md#miniometricsunavailable
+
+  - name: ux09-backup-freshness
+    rules:
+      - record: ux09_backup_last_success_age_seconds
+        expr: clamp_min(time() - ux09_backup_last_valid_restore_point_unixtime_seconds, 0)
+      - alert: BackupRestorePointFreshnessWarning
+        expr: ux09_backup_last_success_age_seconds > ux09_backup_freshness_warning_threshold_seconds and ux09_backup_last_success_age_seconds <= ux09_backup_rpo_page_threshold_seconds
+        labels: {severity: warning}
+        annotations:
+          summary: Latest validated restore point is older than 18 hours
+      - alert: BackupRestorePointFreshnessCritical
+        expr: ux09_backup_last_success_age_seconds > ux09_backup_rpo_page_threshold_seconds
+        labels: {severity: critical}
+        annotations:
+          summary: Latest validated restore point has breached the 24 hour RPO
+      - alert: BackupRestorePointSignalMissing
+        expr: absent(ux09_backup_last_valid_restore_point_unixtime_seconds) or absent(ux09_backup_valid_restore_points) or absent(ux09_backup_freshness_warning_threshold_seconds) or absent(ux09_backup_rpo_page_threshold_seconds)
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: Backup restore-point freshness evidence is missing
+      - alert: BackupRestorePointRedundancyCritical
+        expr: ux09_backup_valid_restore_points < 2
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: Fewer than two remotely validated restore points remain

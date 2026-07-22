@@ -1,0 +1,190 @@
+name: ${BACKUP_DRILL_PROJECT:-ux09-backup-drill-local}
+
+services:
+  postgres:
+    image: postgres:16.9-alpine@sha256:7c688148e5e156d0e86df7ba8ae5a05a2386aaec1e2ad8e6d11bdf10504b1fb7
+    environment:
+      POSTGRES_DB: ux09_recovery
+      POSTGRES_USER: ux09_recovery_owner
+      POSTGRES_PASSWORD_FILE: /run/secrets/recovery_postgres_password
+    secrets:
+      - source: recovery_postgres_password
+        target: recovery_postgres_password
+        mode: 0400
+    volumes:
+      - type: volume
+        source: recovery-postgres-data
+        target: /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ux09_recovery_owner -d ux09_recovery"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks: [recovery]
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z@sha256:d249d1fb6966de4d8ad26c04754b545205ff15a62e4fd19ebd0f26fa5baacbc0
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/recovery_minio_access_key
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/recovery_minio_secret_key
+    secrets:
+      - source: recovery_minio_access_key
+        target: recovery_minio_access_key
+        mode: 0400
+      - source: recovery_minio_secret_key
+        target: recovery_minio_secret_key
+        mode: 0400
+    volumes:
+      - type: volume
+        source: recovery-minio-data
+        target: /data
+    networks: [recovery]
+
+  backup-tool:
+    image: "${BACKUP_IMAGE:?Set BACKUP_IMAGE to the backup repository}@${BACKUP_IMAGE_DIGEST:?Set BACKUP_IMAGE_DIGEST to sha256 digest}"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["trap : TERM INT; sleep infinity & wait"]
+    environment:
+      COMPOSE_PROJECT_NAME: ${BACKUP_DRILL_PROJECT:-ux09-backup-drill-local}
+      DISPOSABLE_RECOVERY_CONFIRMED: ${DISPOSABLE_RECOVERY_CONFIRMED:-0}
+      RECOVERY_VOLUME_NAMES: ${BACKUP_DRILL_PROJECT:-ux09-backup-drill-local}-postgres-data,${BACKUP_DRILL_PROJECT:-ux09-backup-drill-local}-minio-data
+      BACKUP_IMAGE: ${BACKUP_IMAGE:?Set BACKUP_IMAGE to the backup repository}
+      BACKUP_IMAGE_DIGEST: ${BACKUP_IMAGE_DIGEST:?Set BACKUP_IMAGE_DIGEST to sha256 digest}
+      BACKUP_CATALOG_FILE: /work/verified-backup-catalog.json
+      BACKUP_WINDOW_DAYS: ${BACKUP_WINDOW_DAYS:-}
+      PGPASSFILE: /run/secrets/recovery_pgpass
+      BUSINESS_RESTORE_CONFIG_FILE: /run/secrets/business_restore_config
+      BACKUP_RESTORE_CONFIG_FILE: /run/secrets/backup_restore_config
+      LEDGER_RESTORE_CONFIG_FILE: /run/secrets/ledger_restore_config
+      BACKUP_MANIFEST_SIGNING_KEY_FILE: /run/secrets/backup_manifest_signing_key
+      LEDGER_MANIFEST_SIGNING_KEY_FILE: /run/secrets/ledger_manifest_signing_key
+      LEDGER_SIGNING_KEY_HISTORY_FILE: /run/secrets/ledger_signing_key_history
+      B2B3_EVIDENCE_VERIFY_KEY_FILE: /run/secrets/b2b3_evidence_verify_key
+      B2B3_CLI_COMMAND: /released/b2b3-cli
+      B2B3_WORKER_COMMAND: /released/b2b3-worker
+      APPLICATION_HOST: ${APPLICATION_HOST:-recovery.invalid}
+      BACKUP_DESTINATION: ${BACKUP_DESTINATION:-s3://offhost.invalid/ux09-business}
+      LEDGER_ARCHIVE_DESTINATION: ${LEDGER_ARCHIVE_DESTINATION:-s3://ledger.invalid/ux09-ledger}
+      BUSINESS_BUCKETS: ${BUSINESS_BUCKETS:-resumes}
+      MINIO_ALIAS: ${MINIO_ALIAS:-recovery}
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${RECOVERY_PGUSER:-ux09_recovery_owner}
+      PGDATABASE: ${RECOVERY_PGDATABASE:-ux09_recovery}
+      RESTORE_STAGING_ROOT: /work/restore
+      BACKUP_DESTINATION_CLIENT: ${BACKUP_DESTINATION_CLIENT:-/released/backup-destination-client}
+      LEDGER_ARCHIVE_CLIENT: ${LEDGER_ARCHIVE_CLIENT:-/released/ledger-archive-client}
+      LEDGER_RESTORE_PROOF_CLIENT: ${LEDGER_RESTORE_PROOF_CLIENT:-/released/ledger-restore-proof-client}
+      BUSINESS_RESTORE_CLIENT: ${BUSINESS_RESTORE_CLIENT:-/opt/ux09-backup/minio-business.sh}
+      RESTORE_EVIDENCE_FILE: /work/restore-evidence.json
+      B2B3_EVIDENCE_FILE: /work/b2b3-evidence.json
+      B2B3_EVIDENCE_SIGNATURE_FILE: /work/b2b3-evidence.sig
+      DRILL_EVIDENCE_FILE: /work/drill-evidence.json
+      TRAFFIC_CLOSED_MARKER_FILE: /work/TRAFFIC_CLOSED
+      TRAFFIC_OPEN_MARKER_FILE: /work/TRAFFIC_OPEN
+    secrets:
+      - source: recovery_pgpass
+        target: recovery_pgpass
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: business_restore_config
+        target: business_restore_config
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: backup_restore_config
+        target: backup_restore_config
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: ledger_restore_config
+        target: ledger_restore_config
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: backup_manifest_signing_key
+        target: backup_manifest_signing_key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: ledger_manifest_signing_key
+        target: ledger_manifest_signing_key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: ledger_signing_key_history
+        target: ledger_signing_key_history
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: b2b3_evidence_verify_key
+        target: b2b3_evidence_verify_key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+    volumes:
+      - type: volume
+        source: recovery-work
+        target: /work
+      - type: bind
+        source: ${B2B3_CLI_RELEASE_FILE:?Set B2B3_CLI_RELEASE_FILE to the released B2B3 CLI executable}
+        target: /released/b2b3-cli
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${B2B3_WORKER_RELEASE_FILE:?Set B2B3_WORKER_RELEASE_FILE to the released B2B3 Worker executable}
+        target: /released/b2b3-worker
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    read_only: true
+    tmpfs:
+      - /tmp:mode=0700
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [recovery, offhost-egress]
+
+networks:
+  recovery:
+    internal: true
+  offhost-egress:
+
+volumes:
+  recovery-postgres-data:
+    name: ${BACKUP_DRILL_PROJECT:-ux09-backup-drill-local}-postgres-data
+  recovery-minio-data:
+    name: ${BACKUP_DRILL_PROJECT:-ux09-backup-drill-local}-minio-data
+  recovery-work:
+    name: ${BACKUP_DRILL_PROJECT:-ux09-backup-drill-local}-work
+
+secrets:
+  recovery_postgres_password:
+    file: ${RECOVERY_POSTGRES_PASSWORD_FILE:-./backup/secrets/recovery-postgres-password}
+  recovery_minio_access_key:
+    file: ${RECOVERY_MINIO_ACCESS_KEY_FILE:-./backup/secrets/recovery-minio-access-key}
+  recovery_minio_secret_key:
+    file: ${RECOVERY_MINIO_SECRET_KEY_FILE:-./backup/secrets/recovery-minio-secret-key}
+  recovery_pgpass:
+    file: ${RECOVERY_PGPASS_FILE:-./backup/secrets/recovery-pgpass}
+  business_restore_config:
+    file: ${BUSINESS_RESTORE_CONFIG_FILE:-./backup/secrets/business-restore-config}
+  backup_restore_config:
+    file: ${BACKUP_RESTORE_CONFIG_FILE:-./backup/secrets/backup-restore-config}
+  ledger_restore_config:
+    file: ${LEDGER_RESTORE_CONFIG_FILE:-./backup/secrets/ledger-restore-config}
+  backup_manifest_signing_key:
+    file: ${BACKUP_MANIFEST_SIGNING_KEY_FILE:-./backup/secrets/backup-manifest-signing-key}
+  ledger_manifest_signing_key:
+    file: ${LEDGER_MANIFEST_SIGNING_KEY_FILE:-./backup/secrets/ledger-manifest-signing-key}
+  ledger_signing_key_history:
+    file: ${LEDGER_SIGNING_KEY_HISTORY_FILE:-./backup/secrets/ledger-signing-key-history.json}
+  b2b3_evidence_verify_key:
+    file: ${B2B3_EVIDENCE_VERIFY_KEY_FILE:-./backup/secrets/b2b3-evidence-verify-key}

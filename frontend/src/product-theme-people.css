@@ -1,0 +1,475 @@
+/* Candidate and talent-pool surfaces. Loaded after the shared product theme. */
+.candidate-page,
+.talent-page {
+  --people-row-line: #e7e7eb;
+  --people-subtle: #f7f7f9;
+  --people-control-height: 42px;
+  min-width: 0;
+  padding: 18px 24px 32px;
+  color: var(--ink);
+}
+
+.candidate-page-heading,
+.talent-page-heading {
+  min-height: 68px;
+  margin-bottom: 14px;
+  align-items: flex-start;
+}
+
+.candidate-page-heading h2,
+.talent-page-heading h2,
+.candidate-profile h2,
+.pool-detail-hero h2 {
+  color: var(--ink);
+  font-weight: 700;
+  letter-spacing: -.02em;
+}
+
+.candidate-page-heading h2,
+.talent-page-heading h2 { font-size: 23px; }
+.candidate-page-heading p,
+.talent-page-heading p { margin-top: 5px; color: var(--muted); font-size: 14px; }
+
+.candidate-list-panel,
+.candidate-detail-panel,
+.candidate-context section,
+.candidate-detail-hero,
+.pool-list-panel,
+.pool-detail-panel,
+.pool-detail-hero,
+.pool-metrics {
+  border-color: var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.candidate-list-panel,
+.pool-list-panel,
+.pool-detail-panel { overflow: hidden; box-shadow: var(--shadow-card); }
+
+.candidate-filters,
+.pool-toolbar,
+.pool-detail-toolbar {
+  min-height: 64px;
+  padding: 10px 14px;
+  gap: 8px;
+  background: #fff;
+}
+
+.candidate-page .candidate-filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.6fr) minmax(110px, .9fr) minmax(105px, .8fr) minmax(140px, 1.1fr) minmax(110px, .9fr) auto;
+  align-items: center;
+}
+
+.candidate-page .candidate-filters label,
+.candidate-page .candidate-filters .candidate-search { width: 100%; min-width: 0; }
+
+.candidate-filters label,
+.pool-search,
+.pool-select {
+  min-height: var(--people-control-height);
+  height: var(--people-control-height);
+  border-color: var(--line);
+  border-radius: 7px;
+  background: #fff;
+}
+
+.candidate-filters label:focus-within,
+.pool-search:focus-within,
+.pool-select:focus-within {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(0, 102, 230, .09);
+}
+
+.candidate-filters label select,
+.candidate-search input,
+.pool-search input,
+.pool-select select { font-size: 14px; }
+
+.candidate-table,
+.pool-table,
+.talent-table { scrollbar-color: #c9c9cf transparent; }
+
+.candidate-page .candidate-table-head,
+.candidate-page .candidate-table-row {
+  min-width: 1100px;
+  grid-template-columns: minmax(180px, 1.25fr) minmax(120px, .9fr) 168px 76px 86px 82px minmax(120px, .8fr) 88px;
+  column-gap: 12px;
+}
+
+.talent-page .pool-table-head,
+.talent-page .pool-table-row {
+  min-width: 920px;
+  grid-template-columns: minmax(180px, 1.3fr) minmax(120px, .9fr) minmax(100px, .8fr) minmax(130px, 1fr) 68px 88px minmax(130px, 1fr) 20px;
+  gap: 8px;
+}
+
+.candidate-table-head,
+.pool-table-head,
+.talent-table-head {
+  min-height: 44px;
+  border-color: var(--people-row-line);
+  color: var(--muted);
+  background: var(--people-subtle);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.candidate-table-row,
+.pool-table-row,
+.talent-table-row {
+  border-color: var(--people-row-line);
+  color: var(--ink-secondary);
+  background: #fff;
+  font-size: 14px;
+}
+
+.candidate-table-row { min-height: 78px; }
+.pool-table-row { min-height: 82px; }
+.talent-table-row { min-height: 84px; }
+.candidate-table-row:hover,
+.pool-table-row:hover,
+.talent-table-row:hover { background: #fafafa; }
+
+.candidate-table-row strong,
+.pool-table-row strong,
+.talent-table-row strong,
+.candidate-name-cell strong,
+.talent-person strong { color: var(--ink); font-size: 15px; font-weight: 600; }
+
+.candidate-table-row small,
+.pool-table-row small,
+.talent-table-row small,
+.candidate-name-cell small,
+.talent-person small { color: var(--muted); font-size: 14px; }
+
+.candidate-name-cell > span:first-child,
+.candidate-profile > span,
+.talent-person > span:first-child,
+.talent-member-drawer > header > div > span {
+  color: #4f5660;
+  background: #e8e8ec;
+}
+
+.candidate-stage,
+.pool-visibility,
+.candidate-skill-tags span,
+.context-tags span,
+.talent-row-tags small,
+.member-tags > span {
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.candidate-page .candidate-stage-cell { min-width: 0; padding-right: 8px; }
+.candidate-page .candidate-stage { max-width: 100%; color: var(--blue-dark); background: var(--blue-soft); }
+.candidate-page .candidate-stage.terminal { color: var(--ink-secondary); background: #eeeeF1; }
+.candidate-page .candidate-score { min-width: 0; padding-left: 4px; justify-self: start; color: var(--blue); font-size: 19px; font-weight: 650; white-space: nowrap; }
+.next-cell { color: var(--blue); font-weight: 600; }
+
+.governance-process-note {
+  margin: 12px 0 0;
+  padding: 10px 11px;
+  border: 1px solid #d8e5f4;
+  border-radius: 6px;
+  color: var(--ink-secondary);
+  background: #f4f8fd;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.candidate-bulk-bar {
+  min-height: 50px;
+  padding: 8px 14px;
+  border-color: #cfe1f7;
+  background: var(--blue-soft);
+}
+
+.candidate-pagination,
+.talent-load-more { min-height: 60px; padding: 10px 14px; border-color: var(--people-row-line); }
+
+.candidate-empty,
+.candidate-list-state,
+.talent-empty,
+.candidate-detail-state {
+  min-height: 270px;
+  padding: 32px 20px;
+  color: var(--muted);
+  background: #fff;
+}
+
+.candidate-empty strong,
+.candidate-list-state strong,
+.talent-empty strong,
+.candidate-detail-state strong { color: var(--ink); font-size: 16px; }
+.candidate-empty span,
+.candidate-list-state span,
+.talent-empty span { font-size: 14px; }
+
+.candidate-detail-page > .back-link,
+.pool-detail-page > .back-link {
+  min-height: 38px;
+  margin: 0 0 10px;
+  color: var(--blue);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.candidate-detail-hero,
+.pool-detail-hero {
+  min-height: 112px;
+  margin-bottom: 14px;
+  padding: 18px 20px;
+  box-shadow: var(--shadow-card);
+}
+
+.candidate-profile h2,
+.pool-detail-hero h2 { font-size: 22px; }
+.candidate-profile p,
+.pool-detail-hero p { color: var(--ink-secondary); font-size: 15px; }
+.masked-contacts,
+.pool-detail-hero small { color: var(--muted); font-size: 14px; }
+
+.candidate-detail-layout { grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; }
+.candidate-detail-panel { min-height: 620px; }
+.candidate-detail-tabs {
+  height: 54px;
+  padding: 0 18px;
+  gap: 28px;
+  border-color: var(--people-row-line);
+}
+.candidate-detail-tabs button { min-width: max-content; color: var(--ink-secondary); font-size: 14px; }
+.candidate-detail-tabs button.active { color: var(--blue); border-bottom-color: var(--blue); }
+.candidate-tab-content { padding: 22px; }
+.candidate-tab-content h3,
+.profile-tab section h3,
+.candidate-context h3 { color: var(--ink); font-size: 16px; }
+.profile-tab section p { color: var(--ink-secondary); font-size: 15px; }
+.profile-facts { gap: 12px; }
+.profile-facts > div { min-height: 84px; padding: 14px; border-color: var(--people-row-line); border-radius: 8px; }
+.profile-facts strong,
+.profile-facts small { font-size: 14px; }
+.candidate-context { gap: 12px; }
+.candidate-context section { padding: 16px; box-shadow: var(--shadow-card); }
+.candidate-context dl div { grid-template-columns: 82px minmax(0, 1fr); font-size: 14px; }
+.candidate-context textarea,
+.inline-add { border-color: var(--line); border-radius: 7px; font-size: 14px; }
+
+.pool-metrics { margin-bottom: 14px; overflow: hidden; box-shadow: var(--shadow-card); }
+.pool-metrics > div { min-height: 94px; padding: 15px 18px; border-color: var(--people-row-line); }
+.pool-metrics span { color: var(--ink-secondary); font-size: 14px; }
+.pool-metrics strong { color: var(--ink); font-size: 25px; font-weight: 650; }
+.pool-metrics small { color: var(--muted); font-size: 13px; }
+.pool-name-cell > span:first-child,
+.pool-detail-hero > div > span { color: var(--blue); background: var(--blue-soft); border-radius: 8px; }
+.pool-detail-hero > strong { color: var(--ink); }
+
+.talent-person { color: var(--ink); }
+.talent-row-tags small { color: var(--ink-secondary); background: #f0f0f3; }
+.retention-warning { color: var(--orange); }
+
+.candidate-dialog-backdrop,
+.talent-dialog-backdrop {
+  padding: 20px;
+  background: rgba(0, 0, 0, .32);
+  backdrop-filter: blur(3px);
+}
+
+.candidate-dialog,
+.talent-dialog {
+  border: 1px solid rgba(255,255,255,.7);
+  border-radius: 12px;
+  box-shadow: var(--shadow-float);
+}
+
+.candidate-dialog > header,
+.talent-dialog > header,
+.candidate-dialog > footer,
+.talent-dialog > footer { border-color: var(--people-row-line); }
+.candidate-dialog h3,
+.talent-dialog h3 { color: var(--ink); font-size: 18px; }
+.candidate-dialog header p,
+.talent-dialog header p { color: var(--muted); font-size: 14px; }
+.candidate-dialog-body label,
+.talent-dialog-body label,
+.talent-member-body label,
+.reactivate-body > label { color: var(--ink-secondary); font-size: 14px; }
+.candidate-dialog-body select,
+.candidate-dialog-body textarea,
+.talent-dialog-body input,
+.talent-dialog-body select,
+.talent-dialog-body textarea,
+.talent-member-body input,
+.talent-member-body select,
+.reactivate-body select { min-height: 42px; border-color: var(--line); border-radius: 7px; font-size: 14px; }
+
+.talent-member-drawer,
+.reactivate-drawer,
+.resume-preview-drawer {
+  border-left: 1px solid var(--line);
+  color: var(--ink);
+  background: #fff;
+  box-shadow: -18px 0 50px rgba(0, 0, 0, .10);
+}
+
+.talent-member-drawer > header,
+.reactivate-drawer > header,
+.resume-preview-drawer > header,
+.talent-member-drawer > footer,
+.reactivate-drawer > footer,
+.resume-preview-drawer > footer { border-color: var(--people-row-line); background: #fff; }
+
+.talent-member-body { background: var(--people-subtle); }
+.talent-member-body section,
+.reactivate-summary,
+.reactivate-preview,
+.reactivation-success dl {
+  border-color: var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: none;
+}
+.talent-member-body h3,
+.reactivate-body h3,
+.reactivation-success h3 { color: var(--ink); font-size: 16px; }
+.talent-member-body p,
+.talent-member-body dl,
+.reactivate-body,
+.reactivation-success p { color: var(--ink-secondary); font-size: 14px; }
+
+.resume-file-actions { min-width: 0; }
+.resume-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resume-preview-body { background: #ededf0; }
+.resume-preview-page { border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+.resume-preview-page pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+
+.resume-preview-backdrop { background: rgba(0, 0, 0, .32); backdrop-filter: blur(3px); }
+.resume-preview-modal {
+  border: 1px solid rgba(255,255,255,.7);
+  border-radius: 12px;
+  background: #ededf0;
+  box-shadow: var(--shadow-float);
+}
+.resume-preview-modal > header,
+.resume-preview-modal > footer { border-color: var(--people-row-line); }
+.resume-preview-modal h2 { color: var(--ink); font-size: 18px; }
+.resume-preview-modal header p { color: var(--muted); font-size: 14px; }
+.pdf-resume-viewer { border-color: var(--line); border-radius: 8px; }
+
+@media (max-width: 1100px) {
+  .candidate-detail-layout { grid-template-columns: 1fr; }
+  .candidate-context { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pool-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pool-metrics > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--people-row-line); }
+  .pool-metrics > div:nth-child(4) { border-top: 1px solid var(--people-row-line); }
+}
+
+@media (max-width: 1100px) and (min-width: 641px) {
+  .candidate-page .candidate-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .candidate-page .candidate-filters .candidate-search { grid-column: 1 / -1; }
+  .candidate-page .candidate-filters .button { grid-column: 1 / -1; justify-self: start; }
+}
+
+@media (max-width: 640px) {
+  .candidate-page,
+  .talent-page { width: 100%; padding: 14px 12px 24px; overflow-x: hidden; }
+
+  .candidate-page-heading,
+  .talent-page-heading,
+  .candidate-detail-hero,
+  .pool-detail-hero { align-items: stretch; flex-direction: column; }
+
+  .candidate-page-heading,
+  .talent-page-heading { min-height: 0; gap: 12px; }
+  .candidate-page-heading > .button,
+  .talent-page-heading > .button { width: 100%; }
+
+  .candidate-filters,
+  .pool-toolbar,
+  .pool-detail-toolbar { display: grid; grid-template-columns: 1fr; padding: 12px; }
+  .candidate-filters label,
+  .candidate-filters .candidate-search,
+  .pool-search,
+  .pool-select { width: 100%; min-width: 0; }
+  .candidate-filters .button { width: 100%; }
+
+  .candidate-table-head,
+  .pool-table-head,
+  .talent-table-head { display: none; }
+
+  .candidate-table,
+  .pool-table,
+  .talent-table { overflow: visible; border-top: 1px solid var(--people-row-line); }
+
+  .candidate-table-row,
+  .pool-table-row,
+  .talent-table-row {
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    padding: 15px 14px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px 12px;
+    align-items: start;
+  }
+
+  .candidate-table-row > *,
+  .pool-table-row > *,
+  .talent-table-row > * { min-width: 0; overflow-wrap: anywhere; }
+
+  .talent-table-row > [role="cell"]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .candidate-detail-hero,
+  .pool-detail-hero { padding: 16px; }
+  .candidate-profile { align-items: flex-start; }
+  .candidate-profile > div > div:first-child,
+  .masked-contacts,
+  .candidate-detail-actions,
+  .pool-detail-hero > div > div > div { flex-wrap: wrap; }
+  .candidate-detail-actions { width: 100%; justify-content: stretch; }
+  .candidate-detail-actions .button { flex: 1 1 140px; }
+
+  .candidate-detail-tabs { width: 100%; height: 52px; padding: 0 14px; gap: 22px; overflow-x: auto; overscroll-behavior-inline: contain; }
+  .candidate-tab-content { padding: 16px; }
+  .profile-facts,
+  .candidate-context,
+  .pool-metrics,
+  .talent-form-grid { grid-template-columns: 1fr; }
+  .pool-metrics > div { border-left: 0; border-top: 1px solid var(--people-row-line); }
+  .pool-metrics > div:first-child { border-top: 0; }
+
+  .candidate-dialog-backdrop,
+  .talent-dialog-backdrop { padding: 10px; align-items: end; }
+  .candidate-dialog,
+  .talent-dialog { width: 100%; max-height: calc(100dvh - 20px); border-radius: 12px 12px 8px 8px; }
+  .candidate-dialog > footer,
+  .talent-dialog > footer { position: sticky; bottom: 0; background: #fff; }
+  .candidate-dialog > footer .button,
+  .talent-dialog > footer .button { flex: 1; }
+
+  .talent-member-drawer,
+  .reactivate-drawer,
+  .resume-preview-drawer { width: 100%; max-width: 100%; }
+  .talent-member-drawer > footer,
+  .reactivate-drawer > footer,
+  .resume-preview-drawer > footer { padding: 10px 12px max(10px, env(safe-area-inset-bottom)); }
+  .talent-member-drawer > footer .button,
+  .reactivate-drawer > footer .button,
+  .resume-preview-drawer > footer .button { flex: 1; min-width: 0; }
+  .resume-file-actions { flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .candidate-page *,
+  .talent-page * { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}

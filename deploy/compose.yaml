@@ -1,0 +1,229 @@
+name: ux09
+
+x-app-environment: &app-environment
+  APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}
+  DATABASE_URL: postgresql+asyncpg://${APP_DB_USER}:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  OBJECT_STORAGE_ENDPOINT: minio:9000
+  OBJECT_STORAGE_ACCESS_KEY: ${APP_OBJECT_STORAGE_ACCESS_KEY}
+  OBJECT_STORAGE_SECRET_KEY: ${APP_OBJECT_STORAGE_SECRET_KEY}
+  OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-resumes}
+  CONTACT_ENCRYPTION_KEY: ${CONTACT_ENCRYPTION_KEY}
+  CONTACT_LOOKUP_SECRET: ${CONTACT_LOOKUP_SECRET}
+  LLM_CONFIG_ENCRYPTION_KEY: ${LLM_CONFIG_ENCRYPTION_KEY}
+  FEISHU_CONFIG_ENCRYPTION_KEY: ${FEISHU_CONFIG_ENCRYPTION_KEY}
+  LLM_PROVIDER_ALLOWLIST_JSON: ${LLM_PROVIDER_ALLOWLIST_JSON:-{}}
+  OBJECT_STORAGE_CONNECT_TIMEOUT_SECONDS: ${OBJECT_STORAGE_CONNECT_TIMEOUT_SECONDS:-1}
+  OBJECT_STORAGE_READ_TIMEOUT_SECONDS: ${OBJECT_STORAGE_READ_TIMEOUT_SECONDS:-3}
+  OBJECT_STORAGE_TOTAL_TIMEOUT_SECONDS: ${OBJECT_STORAGE_TOTAL_TIMEOUT_SECONDS:-4}
+  CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:8080"]}
+  READINESS_TIMEOUT_SECONDS: ${READINESS_TIMEOUT_SECONDS:-5}
+  WORKER_ID: ${WORKER_ID:-worker-1}
+  WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-60}
+  WORKER_HEARTBEAT_SECONDS: ${WORKER_HEARTBEAT_SECONDS:-20}
+  WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-1}
+  WORKER_SHUTDOWN_TIMEOUT_SECONDS: ${WORKER_SHUTDOWN_TIMEOUT_SECONDS:-30}
+  WORKER_CANCEL_TIMEOUT_SECONDS: ${WORKER_CANCEL_TIMEOUT_SECONDS:-5}
+  CLAMAV_HOST: clamav
+  CLAMAV_PORT: 3310
+  CLAMAV_CONNECT_TIMEOUT_SECONDS: ${CLAMAV_CONNECT_TIMEOUT_SECONDS:-2}
+  CLAMAV_READ_TIMEOUT_SECONDS: ${CLAMAV_READ_TIMEOUT_SECONDS:-10}
+  CLAMAV_TOTAL_TIMEOUT_SECONDS: ${CLAMAV_TOTAL_TIMEOUT_SECONDS:-15}
+  PARSER_HARD_TIMEOUT_SECONDS: ${PARSER_HARD_TIMEOUT_SECONDS:-15}
+
+x-app-service: &app-service
+  build:
+    context: ..
+    dockerfile: server/Dockerfile
+    target: runtime
+  environment: *app-environment
+  depends_on:
+    postgres:
+      condition: service_healthy
+    minio-provision:
+      condition: service_completed_successfully
+    clamav:
+      condition: service_healthy
+  restart: unless-stopped
+  networks: [private, provider-egress]
+
+services:
+  proxy:
+    image: beyondcandidate-frontend:local
+    build:
+      context: ..
+      dockerfile: deploy/nginx/Dockerfile
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks: [edge, private]
+
+  api:
+    <<: *app-service
+    command: ["uvicorn", "server.app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *app-environment
+      DEFAULT_ORGANIZATION_SLUG: ${DEFAULT_ORGANIZATION_SLUG:-}
+      DEFAULT_ORGANIZATION_NAME: ${DEFAULT_ORGANIZATION_NAME:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  worker:
+    <<: *app-service
+    command: ["python", "-m", "server.app.worker.main"]
+    environment:
+      <<: *app-environment
+      DATABASE_URL: postgresql+asyncpg://${APP_DB_USER}:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      GOVERNANCE_DATABASE_URL: postgresql+psycopg://${GOVERNANCE_DB_USER}:${GOVERNANCE_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      GOVERNANCE_STORAGE_ENDPOINT: minio:9000
+      GOVERNANCE_DELETE_ACCESS_KEY: ${GOVERNANCE_DELETE_ACCESS_KEY}
+      GOVERNANCE_DELETE_SECRET_KEY: ${GOVERNANCE_DELETE_SECRET_KEY}
+      GOVERNANCE_RESUME_BUCKET: ${GOVERNANCE_RESUME_BUCKET:-resumes}
+      GOVERNANCE_RESUME_PREFIX: ${GOVERNANCE_RESUME_PREFIX:-clean/}
+      GOVERNANCE_EXPORT_BUCKET: ${GOVERNANCE_EXPORT_BUCKET:-${OBJECT_STORAGE_BUCKET:-resumes}}
+      GOVERNANCE_EXPORT_PREFIX: ${GOVERNANCE_EXPORT_PREFIX:-exports/}
+      GOVERNANCE_LEDGER_ACCESS_KEY: ${GOVERNANCE_LEDGER_ACCESS_KEY}
+      GOVERNANCE_LEDGER_SECRET_KEY: ${GOVERNANCE_LEDGER_SECRET_KEY}
+      GOVERNANCE_LEDGER_BUCKET: ${GOVERNANCE_LEDGER_BUCKET:-governance-ledger}
+      GOVERNANCE_LEDGER_PREFIX: ${GOVERNANCE_LEDGER_PREFIX:-deletions/}
+      GOVERNANCE_LEDGER_SIGNING_KEY: ${GOVERNANCE_LEDGER_SIGNING_KEY}
+      GOVERNANCE_RETENTION_SWEEP_BATCH_SIZE: ${GOVERNANCE_RETENTION_SWEEP_BATCH_SIZE:-100}
+      GOVERNANCE_RECOVERY_MAX_LEDGERS: ${GOVERNANCE_RECOVERY_MAX_LEDGERS:-10000}
+    stop_grace_period: ${WORKER_STOP_GRACE_PERIOD:-40s}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  postgres:
+    image: postgres:16.9-alpine@sha256:7c688148e5e156d0e86df7ba8ae5a05a2386aaec1e2ad8e6d11bdf10504b1fb7
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      GOVERNANCE_DB_USER: ${GOVERNANCE_DB_USER}
+      GOVERNANCE_DB_PASSWORD: ${GOVERNANCE_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/provision-app-role.sh:/docker-entrypoint-initdb.d/10-provision-app-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [private]
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z@sha256:d249d1fb6966de4d8ad26c04754b545205ff15a62e4fd19ebd0f26fa5baacbc0
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [private]
+
+  minio-provision:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z@sha256:d249d1fb6966de4d8ad26c04754b545205ff15a62e4fd19ebd0f26fa5baacbc0
+    entrypoint: ["/bin/sh", "/provision/provision.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      APP_OBJECT_STORAGE_ACCESS_KEY: ${APP_OBJECT_STORAGE_ACCESS_KEY}
+      APP_OBJECT_STORAGE_SECRET_KEY: ${APP_OBJECT_STORAGE_SECRET_KEY}
+      OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-resumes}
+      GOVERNANCE_DELETE_ACCESS_KEY: ${GOVERNANCE_DELETE_ACCESS_KEY}
+      GOVERNANCE_DELETE_SECRET_KEY: ${GOVERNANCE_DELETE_SECRET_KEY}
+      GOVERNANCE_RESUME_BUCKET: ${GOVERNANCE_RESUME_BUCKET:-resumes}
+      GOVERNANCE_RESUME_PREFIX: ${GOVERNANCE_RESUME_PREFIX:-clean/}
+      GOVERNANCE_EXPORT_BUCKET: ${GOVERNANCE_EXPORT_BUCKET:-${OBJECT_STORAGE_BUCKET:-resumes}}
+      GOVERNANCE_EXPORT_PREFIX: ${GOVERNANCE_EXPORT_PREFIX:-exports/}
+      GOVERNANCE_LEDGER_ACCESS_KEY: ${GOVERNANCE_LEDGER_ACCESS_KEY}
+      GOVERNANCE_LEDGER_SECRET_KEY: ${GOVERNANCE_LEDGER_SECRET_KEY}
+      GOVERNANCE_LEDGER_BUCKET: ${GOVERNANCE_LEDGER_BUCKET:-governance-ledger}
+      GOVERNANCE_LEDGER_PREFIX: ${GOVERNANCE_LEDGER_PREFIX:-deletions/}
+      PREVIOUS_GOVERNANCE_DELETE_ACCESS_KEY: ${PREVIOUS_GOVERNANCE_DELETE_ACCESS_KEY:-}
+      PREVIOUS_GOVERNANCE_LEDGER_ACCESS_KEY: ${PREVIOUS_GOVERNANCE_LEDGER_ACCESS_KEY:-}
+    volumes:
+      - ./minio:/provision:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    networks: [private]
+
+  clamav:
+    image: clamav/clamav:1.4.3@sha256:75fb5fd95fcbe1d7e6d240c369c1572b686ee2c95949d1042b5148de8eddebb4
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+    networks: [private]
+
+  backup:
+    image: postgres:16.9-alpine@sha256:7c688148e5e156d0e86df7ba8ae5a05a2386aaec1e2ad8e6d11bdf10504b1fb7
+    profiles: [local-backup]
+    environment:
+      PGHOST: postgres
+      PGDATABASE: ${POSTGRES_DB}
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command:
+      - sh
+      - -c
+      - >-
+        set -eu; while true; do
+        timestamp=$$(date +%Y%m%d-%H%M%S);
+        temporary=/backups/.ux09-$$timestamp.dump.tmp;
+        pg_dump -Fc -f $$temporary;
+        test -s $$temporary;
+        mv $$temporary /backups/ux09-$$timestamp.dump;
+        sleep 86400;
+        done
+    volumes:
+      - backup-data:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "find /backups -maxdepth 1 -type f -name 'ux09-*.dump' -mmin -1500 -size +0c | grep -q ."]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks: [private]
+
+networks:
+  edge:
+  provider-egress:
+  private:
+    internal: true
+
+volumes:
+  postgres-data:
+  minio-data:
+  backup-data:

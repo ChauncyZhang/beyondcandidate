@@ -1,0 +1,156 @@
+name: ${BACKUP_COMPOSE_PROJECT:-ux09-backup-scheduler}
+
+services:
+  backup-tool:
+    image: "${BACKUP_IMAGE:?Set BACKUP_IMAGE to the backup repository}@${BACKUP_IMAGE_DIGEST:?Set BACKUP_IMAGE_DIGEST to its sha256 digest}"
+    entrypoint: ["python3", "/opt/ux09-backup/scheduled-backup.py"]
+    command: ["run"]
+    environment:
+      BACKUP_STATE_DIR: /var/lib/ux09-backup
+      BACKUP_FRESHNESS_THRESHOLD_SECONDS: ${BACKUP_FRESHNESS_THRESHOLD_SECONDS:-64800}
+      BACKUP_RPO_PAGE_SECONDS: ${BACKUP_RPO_PAGE_SECONDS:-86400}
+      BACKUP_MAX_FUTURE_SKEW_SECONDS: ${BACKUP_MAX_FUTURE_SKEW_SECONDS:-300}
+      BACKUP_WINDOW_DAYS: ${BACKUP_WINDOW_DAYS:?Set BACKUP_WINDOW_DAYS from the approved retention policy}
+      BACKUP_IMAGE: ${BACKUP_IMAGE:?Set BACKUP_IMAGE to the backup repository}
+      BACKUP_IMAGE_DIGEST: ${BACKUP_IMAGE_DIGEST:?Set BACKUP_IMAGE_DIGEST to its sha256 digest}
+      APPLICATION_HOST: ${APPLICATION_HOST:?Set APPLICATION_HOST to the application hostname}
+      FORBIDDEN_DATA_PATHS: ${FORBIDDEN_DATA_PATHS:-}
+      BUSINESS_BUCKETS: ${BUSINESS_BUCKETS:?Set BUSINESS_BUCKETS to the approved non-ledger buckets}
+      MINIO_ALIAS: ${MINIO_ALIAS:?Set MINIO_ALIAS from the protected source config}
+      PGHOST: ${BACKUP_PGHOST:-postgres}
+      PGPORT: ${BACKUP_PGPORT:-5432}
+      PGUSER: ${BACKUP_PGUSER:?Set BACKUP_PGUSER to the least-privilege backup role}
+      PGDATABASE: ${BACKUP_PGDATABASE:?Set BACKUP_PGDATABASE}
+      PGPASSFILE: /run/secrets/backup_pgpass
+      BUSINESS_SOURCE_CONFIG_FILE: /run/secrets/business_source_config
+      BUSINESS_SNAPSHOT_CLIENT: /opt/ux09-backup/minio-business.sh
+      BACKUP_DESTINATION: ${BACKUP_DESTINATION:?Set BACKUP_DESTINATION to the off-host business destination}
+      BACKUP_DESTINATION_CONFIG_FILE: /run/secrets/backup_destination_config
+      BACKUP_DESTINATION_CLIENT: /opt/ux09-backup/destination-rclone.sh
+      BACKUP_VERIFY_CONFIG_FILE: /run/secrets/backup_verify_config
+      BACKUP_ATOMIC_PUBLISHER: /opt/ux09-backup/s3-atomic-publisher.py
+      BACKUP_MANIFEST_SIGNING_KEY_FILE: /run/secrets/backup_manifest_signing_key
+      BACKUP_MANIFEST_VERIFY_KEY_FILE: /run/secrets/backup_manifest_verify_key
+      BACKUP_STAGING_ROOT: /var/lib/ux09-backup/staging/business
+      RETENTION_POLICY_VERSION: ${RETENTION_POLICY_VERSION:?Set RETENTION_POLICY_VERSION}
+      LEDGER_BUCKET: ${LEDGER_BUCKET:?Set LEDGER_BUCKET}
+      LEDGER_ARCHIVE_DESTINATION: ${LEDGER_ARCHIVE_DESTINATION:?Set LEDGER_ARCHIVE_DESTINATION to the independent off-host destination}
+      LEDGER_ARCHIVE_CLIENT: /released/ledger-archive-client
+      LEDGER_SOURCE_CONFIG_FILE: /run/secrets/ledger_source_config
+      LEDGER_ARCHIVE_CONFIG_FILE: /run/secrets/ledger_archive_config
+      LEDGER_VERIFY_CONFIG_FILE: /run/secrets/ledger_verify_config
+      LEDGER_ATOMIC_PUBLISHER: /opt/ux09-backup/s3-atomic-publisher.py
+      LEDGER_MANIFEST_SIGNING_KEY_FILE: /run/secrets/ledger_manifest_signing_key
+      LEDGER_MANIFEST_VERIFY_KEY_FILE: /run/secrets/ledger_manifest_verify_key
+      LEDGER_SIGNING_KEY_HISTORY_FILE: /run/secrets/ledger_signing_key_history
+      LEDGER_STAGING_ROOT: /var/lib/ux09-backup/staging/ledger
+      LEDGER_LIFECYCLE_POLICY_VERSION: ${LEDGER_LIFECYCLE_POLICY_VERSION:?Set LEDGER_LIFECYCLE_POLICY_VERSION}
+    secrets:
+      - source: backup_pgpass
+        target: backup_pgpass
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: business_source_config
+        target: business_source_config
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: backup_destination_config
+        target: backup_destination_config
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: backup_verify_config
+        target: backup_verify_config
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: backup_manifest_signing_key
+        target: backup_manifest_signing_key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: backup_manifest_verify_key
+        target: backup_manifest_verify_key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: ledger_source_config
+        target: ledger_source_config
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: ledger_archive_config
+        target: ledger_archive_config
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: ledger_verify_config
+        target: ledger_verify_config
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: ledger_manifest_signing_key
+        target: ledger_manifest_signing_key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: ledger_manifest_verify_key
+        target: ledger_manifest_verify_key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: ledger_signing_key_history
+        target: ledger_signing_key_history
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+    volumes:
+      - type: bind
+        source: /var/lib/ux09-backup
+        target: /var/lib/ux09-backup
+      - type: bind
+        source: ${LEDGER_ARCHIVE_CLIENT_FILE:?Set LEDGER_ARCHIVE_CLIENT_FILE to the released executable}
+        target: /released/ledger-archive-client
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:mode=0700
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [application-private, offhost-egress]
+
+networks:
+  application-private:
+    external: true
+    name: ${UX09_PRIVATE_NETWORK:-ux09_private}
+  offhost-egress:
+
+secrets:
+  backup_pgpass:
+    file: ${BACKUP_PGPASSFILE:?Set BACKUP_PGPASSFILE}
+  business_source_config:
+    file: ${BUSINESS_SOURCE_CONFIG_FILE:?Set BUSINESS_SOURCE_CONFIG_FILE}
+  backup_destination_config:
+    file: ${BACKUP_DESTINATION_CONFIG_FILE:?Set BACKUP_DESTINATION_CONFIG_FILE}
+  backup_verify_config:
+    file: ${BACKUP_VERIFY_CONFIG_FILE:?Set BACKUP_VERIFY_CONFIG_FILE}
+  backup_manifest_signing_key:
+    file: ${BACKUP_MANIFEST_SIGNING_KEY_FILE:?Set BACKUP_MANIFEST_SIGNING_KEY_FILE}
+  backup_manifest_verify_key:
+    file: ${BACKUP_MANIFEST_VERIFY_KEY_FILE:?Set BACKUP_MANIFEST_VERIFY_KEY_FILE}
+  ledger_source_config:
+    file: ${LEDGER_SOURCE_CONFIG_FILE:?Set LEDGER_SOURCE_CONFIG_FILE}
+  ledger_archive_config:
+    file: ${LEDGER_ARCHIVE_CONFIG_FILE:?Set LEDGER_ARCHIVE_CONFIG_FILE}
+  ledger_verify_config:
+    file: ${LEDGER_VERIFY_CONFIG_FILE:?Set LEDGER_VERIFY_CONFIG_FILE}
+  ledger_manifest_signing_key:
+    file: ${LEDGER_MANIFEST_SIGNING_KEY_FILE:?Set LEDGER_MANIFEST_SIGNING_KEY_FILE}
+  ledger_manifest_verify_key:
+    file: ${LEDGER_MANIFEST_VERIFY_KEY_FILE:?Set LEDGER_MANIFEST_VERIFY_KEY_FILE}
+  ledger_signing_key_history:
+    file: ${LEDGER_SIGNING_KEY_HISTORY_FILE:?Set LEDGER_SIGNING_KEY_HISTORY_FILE}

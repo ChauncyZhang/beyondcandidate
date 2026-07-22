@@ -1,0 +1,651 @@
+/* Interview family: compact, operational Apple-style surfaces. */
+.interview-page {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.interview-page button,
+.interview-page input,
+.interview-page select,
+.interview-page textarea,
+.interview-feedback-workspace button {
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.interview-page-heading {
+  min-height: 68px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+
+.interview-page-heading h2,
+.schedule-heading h2,
+.feedback-candidate h2 {
+  color: var(--ink);
+  font-size: 22px;
+  line-height: 1.25;
+  font-weight: 700;
+}
+
+.interview-page-heading p,
+.schedule-heading p,
+.feedback-candidate p {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.interview-list-panel,
+.schedule-section,
+.schedule-aside section,
+.feedback-header,
+.feedback-material,
+.feedback-form-section,
+.feedback-aside section,
+.pdf-resume-viewer {
+  border-color: var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.interview-list-panel,
+.schedule-section,
+.feedback-form-section,
+.pdf-resume-viewer {
+  overflow: hidden;
+}
+
+.interview-toolbar {
+  min-height: 64px;
+  padding: 10px 12px;
+  border-bottom: 0;
+  gap: 8px;
+}
+
+.interview-toolbar .segmented-control {
+  flex: 0 0 auto;
+  min-height: 40px;
+  border-color: var(--line);
+  border-radius: 7px;
+  grid-template-columns: repeat(2, minmax(74px, 1fr));
+  background: #f2f2f4;
+}
+
+.interview-toolbar .segmented-control button {
+  min-height: 32px;
+  padding: 0 12px;
+  color: var(--ink-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.interview-toolbar .segmented-control button.active {
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .09);
+}
+
+.interview-search {
+  min-width: 260px;
+  flex: 1 1 320px;
+}
+
+.interview-search,
+.interview-select {
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+}
+
+.interview-search {
+  padding: 0 11px;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.interview-search input,
+.interview-select select {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+}
+
+.interview-search input { width: 100%; }
+.interview-select { position: relative; min-width: 132px; }
+.interview-select select { width: 100%; min-height: 38px; padding: 0 30px 0 10px; appearance: none; }
+.interview-select svg { position: absolute; right: 9px; pointer-events: none; color: var(--muted); }
+
+.interview-search:focus-within,
+.interview-select:focus-within {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(0, 102, 230, .1);
+}
+
+.mine-toggle {
+  min-height: 40px;
+  padding: 0 8px;
+  color: var(--ink-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.mine-toggle input { width: 16px; height: 16px; accent-color: var(--blue); }
+
+.interview-table { border-top-color: var(--line); }
+.interview-table-head,
+.interview-table-row {
+  min-width: 1150px;
+  grid-template-columns: minmax(150px, 1.05fr) minmax(135px, .9fr) minmax(170px, 1.12fr) minmax(145px, .95fr) 142px 168px 118px;
+  gap: 12px;
+}
+
+.interview-table-head {
+  min-height: 46px;
+  padding: 0 16px;
+  color: var(--muted);
+  background: #f7f7f9;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.interview-table-row {
+  min-height: 86px;
+  padding: 10px 16px;
+  border-top-color: var(--line);
+  color: var(--ink-secondary);
+  background: var(--surface);
+  font-size: 14px;
+}
+
+.interview-table-row:hover { background: #fafafa; }
+.interview-table-row strong { color: var(--ink); font-size: 14px; font-weight: 600; }
+.interview-table-row small { margin-top: 4px; color: var(--muted); font-size: 14px; }
+
+.interview-person {
+  min-height: 44px;
+  margin-left: -5px;
+  padding: 5px;
+  border-radius: 7px;
+  gap: 9px;
+}
+
+.interview-person:hover { color: var(--blue); background: var(--blue-soft); }
+.interview-person > span:first-child { width: 34px; height: 34px; background: #d7d7dc; color: var(--ink-secondary); }
+.interview-person strong { color: inherit; }
+
+.interview-status {
+  min-height: 26px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.interview-status.info { color: #245f9f; background: var(--blue-soft); }
+.interview-status.success { color: var(--green); background: var(--green-soft); }
+.interview-status.warning { color: var(--orange); background: var(--orange-soft); }
+.interview-status.danger { color: var(--red); background: var(--red-soft); }
+.interview-state-stack,
+.interview-row-actions { gap: 6px; }
+
+.interview-row-actions button,
+.interview-calendar-action,
+.feedback-material header button,
+.invitation-preview button {
+  min-height: 28px;
+  color: var(--blue);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.interview-row-actions .interview-primary-action { font-weight: 700; }
+.interview-calendar-action { margin-top: 4px; color: var(--ink-secondary); }
+.interview-row-actions button.danger-link { color: var(--red); }
+
+.workbench-status,
+.interview-empty,
+.calendar-loading {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.interview-empty { min-height: 300px; }
+.interview-empty strong { color: var(--ink); font-size: 16px; }
+.interview-pagination { padding: 12px; border-top-color: var(--line); }
+
+/* Week calendar */
+.calendar-workspace { border-top-color: var(--line); }
+.calendar-navigation {
+  min-height: 58px;
+  padding: 10px 12px;
+  gap: 8px;
+}
+
+.calendar-navigation > button,
+.calendar-navigation input {
+  min-height: 38px;
+  border-color: var(--line);
+  border-radius: 7px;
+  color: var(--ink-secondary);
+  background: var(--surface);
+}
+
+.calendar-navigation > button:hover { border-color: var(--line-strong); background: #fafafa; }
+.calendar-navigation > strong { color: var(--ink); font-size: 16px; }
+.calendar-navigation label { color: var(--muted); font-size: 14px; }
+.mobile-date-strip { display: none; }
+
+.week-calendar {
+  min-height: 610px;
+  padding: 10px;
+  border-top-color: var(--line);
+  grid-template-columns: repeat(7, minmax(156px, 1fr));
+  gap: 8px;
+  background: #fafafa;
+}
+
+.week-calendar > section {
+  min-width: 156px;
+  border-color: var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.week-calendar > section > header {
+  min-height: 58px;
+  padding: 10px;
+  border-bottom-color: var(--line);
+  background: var(--surface);
+}
+
+.week-calendar header strong { color: var(--ink); font-size: 15px; }
+.week-calendar header span { color: var(--muted); font-size: 14px; }
+.week-calendar > section > div { padding: 7px; gap: 7px; }
+
+.calendar-interview {
+  min-height: 142px;
+  padding: 10px;
+  border-color: #b9d7fb;
+  border-left: 3px solid var(--blue);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.calendar-interview:hover { border-color: #7cb4f8; background: #fbfdff; }
+.calendar-interview.complete { border-left-color: var(--green); }
+.calendar-interview.failed { border-left-color: var(--red); }
+.calendar-interview > span,
+.calendar-interview > small { color: var(--muted); font-size: 14px; }
+.calendar-interview > strong { margin-top: 7px; font-size: 15px; }
+.calendar-empty-slot { min-height: 70px; border-color: var(--line); border-radius: 7px; color: var(--muted); font-size: 14px; }
+
+/* Four-step scheduling */
+.schedule-page > .back-link,
+.feedback-page > .back-link {
+  min-height: 34px;
+  margin-bottom: 8px;
+  color: var(--blue);
+  font-size: 14px;
+}
+
+.schedule-heading { min-height: 76px; margin-bottom: 12px; align-items: center; }
+.schedule-steps { min-width: 620px; }
+.schedule-steps span { color: var(--muted); font-size: 14px; gap: 8px; }
+.schedule-steps i { width: 28px; height: 28px; border-color: var(--line-strong); background: var(--surface); }
+.schedule-steps span::after { left: 25px; right: -10px; top: 14px; background: var(--line); }
+.schedule-steps span.active { color: var(--ink); }
+.schedule-steps span.active i { border-color: var(--blue); background: var(--blue); }
+.schedule-layout { grid-template-columns: minmax(0, 1fr) 280px; gap: 12px; }
+.schedule-section { min-height: 590px; }
+
+.schedule-section > header,
+.feedback-form-section > header {
+  min-height: 70px;
+  padding: 14px 16px;
+  border-bottom-color: var(--line);
+}
+
+.schedule-section > header > svg { color: var(--blue); }
+.schedule-section h3,
+.feedback-form-section h3,
+.feedback-material h3,
+.schedule-aside h3,
+.feedback-aside h3 { color: var(--ink); font-size: 16px; }
+.schedule-section header p,
+.feedback-form-section header p { color: var(--muted); font-size: 14px; }
+
+.schedule-grid { padding: 16px; gap: 16px; }
+.schedule-grid label,
+.schedule-full-field,
+.feedback-form-section label { color: var(--ink-secondary); font-size: 14px; font-weight: 500; }
+
+.schedule-grid input,
+.schedule-grid select,
+.schedule-full-field input,
+.edit-reason input,
+.feedback-form-section textarea {
+  min-height: 42px;
+  border-color: var(--line);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.schedule-grid input:focus,
+.schedule-grid select:focus,
+.schedule-full-field input:focus,
+.edit-reason input:focus,
+.feedback-form-section textarea:focus {
+  border-color: var(--blue);
+  outline: 0;
+  box-shadow: 0 0 0 3px rgba(0, 102, 230, .1);
+}
+
+.schedule-section > footer { min-height: 66px; padding: 12px 16px; border-top-color: var(--line); }
+.interviewer-picker { padding: 16px; }
+.interviewer-picker > strong { color: var(--ink); font-size: 14px; }
+.interviewer-picker > div { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+
+.interviewer-picker label {
+  min-height: 72px;
+  border-color: var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.interviewer-picker label:hover { border-color: var(--line-strong); }
+.interviewer-picker label.selected { border-color: #8dbcf7; background: var(--blue-soft); }
+.interviewer-picker label > strong,
+.interviewer-picker label > small { font-size: 14px; }
+
+.availability-toolbar { margin-bottom: 12px; }
+.availability-toolbar > button:not(.button),
+.availability-toolbar input { min-height: 38px; border-color: var(--line); border-radius: 7px; background: var(--surface); }
+.availability-toolbar > strong { color: var(--ink); font-size: 15px; }
+.availability-legend { margin-bottom: 10px; }
+.availability-legend span,
+.availability-timeline section > span { min-height: 26px; padding: 3px 8px; border-radius: 6px; font-size: 14px; }
+.available { color: var(--green); background: var(--green-soft); }
+.conflict, .busy { color: var(--red); background: var(--red-soft); }
+.buffer { color: var(--orange); background: var(--orange-soft); }
+.unknown { color: var(--ink-secondary); background: #eeeeF1; }
+
+.availability-timeline {
+  min-height: 178px;
+  padding: 10px;
+  border-color: var(--line);
+  border-radius: var(--radius);
+  background: #fafafa;
+}
+.availability-timeline > p,
+.availability-timeline section { font-size: 14px; }
+.availability-timeline section { border-bottom-color: var(--line); }
+
+.schedule-slot-grid { padding: 10px; gap: 8px; background: #fafafa; }
+.schedule-slot-grid > section { border-color: var(--line); border-radius: var(--radius); background: var(--surface); }
+.schedule-slot-grid > section > header { padding: 10px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.schedule-slot-grid > section > header strong { color: var(--ink); font-size: 15px; }
+.schedule-slot-grid > section > header span { color: var(--muted); font-size: 14px; }
+.schedule-slot-grid button { min-height: 46px; border-radius: 7px; padding: 0 8px; font-size: 14px; }
+.schedule-slot-grid button span { font-size: 14px; }
+.schedule-slot-grid button.available { border-color: #99d1b3; color: var(--green); background: var(--green-soft); }
+.schedule-slot-grid button.conflict { color: var(--red); background: var(--red-soft); }
+.schedule-slot-grid button.buffer { color: var(--orange); background: var(--orange-soft); }
+.schedule-slot-grid button.unknown { color: var(--muted); background: #f2f2f4; }
+
+.schedule-summary { border-color: var(--line); border-radius: var(--radius); overflow: hidden; }
+.schedule-summary > div { border-color: var(--line); }
+.schedule-summary span { color: var(--muted); font-size: 14px; }
+.schedule-summary strong { color: var(--ink); font-size: 14px; }
+.invitation-preview { gap: 10px; }
+.invitation-preview section { border-color: var(--line); border-radius: var(--radius); }
+.invitation-preview header { min-height: 42px; background: #f7f7f9; }
+.invitation-preview header strong,
+.invitation-preview textarea { color: var(--ink); font-size: 14px; }
+
+.schedule-aside,
+.feedback-aside { gap: 10px; }
+.schedule-aside section,
+.feedback-aside section { padding: 16px; }
+.schedule-aside h3,
+.feedback-aside h3 { margin-bottom: 12px; }
+.schedule-aside p,
+.feedback-aside p,
+.schedule-aside dl div,
+.feedback-aside dl div { color: var(--ink-secondary); font-size: 14px; }
+
+/* Resume + feedback workspace */
+.feedback-header {
+  min-height: 90px;
+  margin-bottom: 12px;
+  padding: 14px 16px;
+}
+.feedback-candidate > span { width: 44px; height: 44px; background: #d7d7dc; color: var(--ink-secondary); }
+.feedback-header-actions > span { color: var(--muted); font-size: 14px; }
+
+.interview-feedback-workspace {
+  height: calc(100dvh - 244px);
+  min-height: 620px;
+  grid-template-columns: minmax(0, 56fr) minmax(0, 44fr);
+  gap: 12px;
+}
+
+.interview-workspace-pane { scrollbar-color: #c7c7cc transparent; }
+.evaluation-pane { padding-right: 1px; }
+.evaluation-pane .feedback-main { gap: 12px; }
+.pdf-resume-viewer { border-radius: var(--radius); background: #ececef; }
+.pdf-viewer-toolbar { min-height: 54px; border-bottom-color: var(--line); background: var(--surface); }
+.pdf-file-title { color: var(--ink-secondary); font-size: 14px; }
+.pdf-page-controls button,
+.pdf-zoom-controls button { min-width: 34px; height: 34px; border-color: var(--line); border-radius: 7px; color: var(--ink-secondary); font-size: 14px; }
+.pdf-page-controls button:hover:not(:disabled),
+.pdf-zoom-controls button:hover:not(:disabled),
+.pdf-zoom-controls button.active { border-color: #9fc7f8; color: var(--blue); background: var(--blue-soft); }
+.pdf-page-controls > span,
+.pdf-zoom-controls > span,
+.pdf-viewer-state span { color: var(--muted); font-size: 14px; }
+.pdf-viewer-state strong { color: var(--ink); font-size: 15px; }
+.safe-text-preview { color: var(--ink); background: var(--surface); font-size: 14px; }
+
+.feedback-material { padding: 16px; }
+.feedback-material > header { align-items: center; gap: 12px; }
+.feedback-priorities span { border-radius: 6px; color: #245f9f; background: var(--blue-soft); font-size: 14px; }
+.feedback-material > p,
+.feedback-material details { color: var(--ink-secondary); font-size: 14px; }
+
+.rating-row {
+  min-height: 68px;
+  padding: 11px 16px;
+  border-bottom-color: var(--line);
+  grid-template-columns: 112px 1fr;
+  gap: 10px;
+}
+.rating-row > strong,
+.feedback-conclusion > strong { color: var(--ink); font-size: 14px; }
+.rating-row button,
+.feedback-conclusion button { min-height: 38px; border-color: var(--line); border-radius: 7px; color: var(--ink-secondary); font-size: 14px; }
+.rating-row button:hover:not(:disabled),
+.feedback-conclusion button:hover:not(:disabled) { border-color: #9fc7f8; background: var(--blue-soft); }
+.rating-row button.active,
+.feedback-conclusion button.active { border-color: var(--blue); color: #fff; background: var(--blue); }
+.feedback-form-section > label,
+.feedback-conclusion { margin: 16px; }
+.feedback-form-section textarea { padding: 10px 11px; }
+.feedback-form-section textarea:disabled { color: var(--ink-secondary); background: #f5f5f7; }
+.feedback-form-section > footer { min-height: 66px; padding: 12px 16px; border-top-color: var(--line); }
+.feedback-form-section > footer > span { color: var(--muted); font-size: 14px; }
+
+.submitted-feedback-card { padding: 0 16px 16px; border-bottom-color: var(--line); }
+.submitted-feedback-card > header { border-bottom-color: var(--line); }
+.submitted-feedback-card > p { color: var(--ink-secondary); font-size: 14px; }
+.submitted-feedback-card > p strong { color: var(--ink); }
+.feedback-aside .permission-note { color: var(--orange); background: var(--orange-soft); }
+
+.feedback-submit-error,
+.workspace-download-error,
+.workbench-inline-error {
+  border-color: #f0afb6;
+  border-radius: var(--radius);
+  color: var(--red);
+  background: var(--red-soft);
+  font-size: 14px;
+}
+
+/* Dialogs */
+.interview-page .modal-backdrop { padding: 20px; background: rgba(29, 29, 31, .38); backdrop-filter: blur(5px); }
+.interview-page .modal,
+.resume-preview-modal {
+  border: 1px solid rgba(255, 255, 255, .72);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-float);
+}
+.interview-page .modal-header,
+.interview-page .modal-footer,
+.resume-preview-modal > header,
+.resume-preview-modal > footer { border-color: var(--line); }
+.interview-page .modal-header h2,
+.resume-preview-modal h2 { color: var(--ink); font-size: 19px; }
+.interview-page .modal-body label,
+.interview-page .modal-body textarea { font-size: 14px; }
+
+@media (max-width: 1180px) {
+  .schedule-layout { grid-template-columns: minmax(0, 1fr) 250px; }
+  .schedule-steps { min-width: 540px; }
+  .interviewer-picker > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 900px) {
+  .interview-page { padding: 14px 16px 24px; }
+  .schedule-heading { align-items: flex-start; }
+  .schedule-steps { min-width: 0; }
+  .schedule-layout { grid-template-columns: 1fr; }
+  .schedule-aside { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .interview-feedback-workspace { height: auto; min-height: 0; display: block; }
+  .interview-workspace-tabs {
+    min-height: 44px;
+    margin-bottom: 10px;
+    padding: 3px;
+    border-color: var(--line);
+    border-radius: 7px;
+    background: #f2f2f4;
+  }
+  .interview-workspace-tabs button { min-height: 36px; border-radius: 5px; color: var(--muted); font-size: 14px; }
+  .interview-workspace-tabs button.active { color: var(--ink); background: var(--surface); }
+}
+
+@media (max-width: 600px) {
+  .interview-page { padding: 10px 8px 20px; }
+  .interview-page-heading { min-height: 62px; align-items: flex-start; gap: 10px; }
+  .interview-page-heading h2,
+  .schedule-heading h2,
+  .feedback-candidate h2 { font-size: 20px; }
+  .interview-page-heading .button { width: auto; min-width: 40px; padding: 0 10px; font-size: 14px !important; white-space: nowrap; }
+
+  .interview-toolbar { padding: 8px; align-items: stretch; }
+  .interview-toolbar .segmented-control,
+  .interview-search { width: 100%; min-width: 100%; }
+  .interview-select { width: calc(50% - 4px); min-width: 0; }
+  .mine-toggle { width: 100%; padding-inline: 2px; }
+
+  .interview-table { padding: 8px; gap: 8px; background: #fafafa; }
+  .interview-table-row {
+    min-width: 0;
+    min-height: 0;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "person status"
+      "position state"
+      "time state"
+      "interviewers interviewers"
+      "action action";
+    gap: 10px 12px;
+    background: var(--surface);
+  }
+  .interview-table-row > .interview-person { grid-area: person; }
+  .interview-table-row > span:nth-of-type(1) { grid-area: position; }
+  .interview-table-row > span:nth-of-type(2) { grid-area: time; }
+  .interview-table-row > span:nth-of-type(3) { grid-area: interviewers; }
+  .interview-table-row > span:nth-of-type(4) { grid-area: status; justify-self: end; }
+  .interview-table-row > span:nth-of-type(5) { grid-area: state; align-items: flex-end; }
+  .interview-table-row > span:nth-of-type(6) { grid-area: action; }
+  .interview-row-actions { width: 100%; padding-top: 8px; border-top: 1px solid var(--line); flex-direction: row; flex-wrap: wrap; gap: 8px 16px; }
+  .interview-row-actions button { min-height: 34px; }
+
+  .calendar-navigation > strong { order: -1; width: 100%; margin: 0; }
+  .calendar-navigation label { margin-left: auto; font-size: 0; }
+  .mobile-date-strip { padding: 8px; border-top-color: var(--line); gap: 4px; }
+  .mobile-date-strip button { min-height: 58px; border-color: var(--line); border-radius: 7px; color: var(--muted); font-size: 14px; }
+  .mobile-date-strip button span,
+  .mobile-date-strip button strong { font-size: 14px; }
+  .mobile-date-strip button.active { border-color: #9fc7f8; color: var(--blue); background: var(--blue-soft); }
+  .week-calendar.full-week { min-height: 420px; padding: 8px; background: #fafafa; }
+  .week-calendar.full-week > section { width: 100%; }
+
+  .schedule-heading { min-height: 0; gap: 14px; }
+  .schedule-steps { width: 100%; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .schedule-steps span { min-width: 0; align-items: center; text-align: center; font-size: 14px; overflow-wrap: anywhere; }
+  .schedule-steps span::after { left: calc(50% + 14px); right: calc(-50% + 14px); top: 14px; }
+  .schedule-steps i { flex: 0 0 auto; }
+  .schedule-section { min-height: 0; }
+  .schedule-section > header { padding: 13px; }
+  .schedule-grid { grid-template-columns: 1fr; padding: 13px; gap: 13px; }
+  .interviewer-picker { padding: 13px; }
+  .interviewer-picker > div { grid-template-columns: 1fr; }
+  .availability-toolbar,
+  .availability-legend,
+  .availability-timeline,
+  .schedule-full-field,
+  .schedule-summary,
+  .invitation-preview { margin-left: 13px; margin-right: 13px; }
+  .availability-toolbar > strong { width: 100%; }
+  .availability-toolbar .button { width: 100%; }
+  .availability-timeline section { align-items: flex-start; }
+  .schedule-slot-grid { display: grid; grid-template-columns: 1fr; overflow: visible; }
+  .schedule-slot-grid > section,
+  .schedule-slot-grid > section:has(button.available) { display: block; min-width: 0; margin-bottom: 0; }
+  .schedule-slot-grid > section > div { max-height: 260px; }
+  .schedule-summary,
+  .invitation-preview { grid-template-columns: 1fr; }
+  .schedule-summary > div { border-right: 0; }
+  .schedule-section > footer { align-items: stretch; flex-direction: column-reverse; }
+  .schedule-section > footer .button { width: 100%; }
+  .schedule-aside { grid-template-columns: 1fr; }
+
+  .feedback-header { align-items: flex-start; flex-direction: column; }
+  .feedback-candidate { min-width: 0; align-items: flex-start; }
+  .feedback-candidate > div { min-width: 0; }
+  .feedback-candidate > div > div { flex-wrap: wrap; }
+  .feedback-candidate p { overflow-wrap: anywhere; }
+  .feedback-header-actions { width: 100%; justify-content: space-between; flex-wrap: wrap; }
+  .interview-workspace-pane { height: calc(100dvh - 330px); min-height: 500px; }
+  .feedback-layout { display: block; }
+  .feedback-aside { grid-template-columns: 1fr; }
+  .rating-row { grid-template-columns: 1fr; }
+  .rating-row > div,
+  .feedback-conclusion > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .feedback-form-section > footer { align-items: stretch; flex-direction: column; }
+  .feedback-form-section > footer .button { width: 100%; }
+
+  .interview-page .modal-backdrop { padding: 0; }
+  .interview-page .modal,
+  .resume-preview-modal { width: 100%; max-width: none; height: 100dvh; max-height: none; border-radius: 0; }
+  .interview-transition-modal { height: auto !important; align-self: end; }
+}
