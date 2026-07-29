@@ -184,7 +184,9 @@ test("organization settings load real data, restrict invite roles, and show the 
     await page.goto(baseUrl);
     await page.getByRole("button", { name: "设置", exact: true }).click();
     await page.getByRole("heading", { name: "组织与权限", exact: true }).waitFor();
-    assert.equal(await page.locator(".organization-settings .users-table").getByText("Admin", { exact: true }).count(), 1);
+    const adminRow = page.locator(".organization-settings .users-table").getByText("Admin", { exact: true });
+    await adminRow.waitFor();
+    assert.equal(await adminRow.count(), 1);
     await page.getByRole("button", { name: "邀请成员", exact: true }).click();
     const drawer = page.getByRole("dialog", { name: "邀请成员", exact: true });
     await drawer.getByLabel("姓名", { exact: true }).fill("周宁");
