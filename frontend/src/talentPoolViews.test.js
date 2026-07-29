@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const source = readFileSync(new URL("./TalentPoolViews.jsx", import.meta.url), "utf8");
+const appSource = readFileSync(new URL("./App.jsx", import.meta.url), "utf8");
 
 test("talent members select recommended jobs from real positions instead of entering free text", () => {
   assert.match(source, /aria-label="推荐岗位"/);
@@ -104,6 +105,25 @@ test("member drawer confirms manual moves and excludes system pools", () => {
   assert.match(source, /item\.id !== pool\.id && !item\.systemKey/);
   assert.match(source, /sourcePool\.systemKey \|\| targetPool\.systemKey/);
   assert.match(source, /controller\.moveMembership\(member, targetPoolId\)/);
+  assert.doesNotMatch(source, /setSelectedPoolId\(targetPoolId\)/);
+  assert.match(source, /memberships: current\.memberships\.map\(\(item\) => item\.id === saved\.id \? saved : item\)/);
+});
+
+test("ordinary talent rows expose a direct move-to-pool workflow", () => {
+  assert.match(source, /function MoveMembershipDialog/);
+  assert.match(source, /<ArrowRightLeft size=\{14\} \/>移动人才库/);
+  assert.match(source, /aria-label="选择目标人才库"/);
+  assert.match(source, /item\.id !== pool\.id && !item\.systemKey/);
+  assert.match(source, /await onMove\(member, targetPoolId\)/);
+  assert.match(source, /只调整所在人才库/);
+  assert.match(source, /roleMismatch && !mismatchConfirmed/);
+});
+
+test("adding a candidate requires confirmation when the job does not match the pool", () => {
+  assert.match(appSource, /talentAddHasRoleMismatch/);
+  assert.match(appSource, /岗位与人才库不一致/);
+  assert.match(appSource, /我确认仍要加入该人才库/);
+  assert.match(appSource, /talentAddHasRoleMismatch && !talentAddDialog\.mismatchConfirmed/);
 });
 
 test("empty suitable roles render as not configured and role inputs support semicolons", () => {

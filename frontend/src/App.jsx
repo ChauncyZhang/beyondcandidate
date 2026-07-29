@@ -60,6 +60,7 @@ import { workbenchController as defaultWorkbenchController } from "./workbenchCo
 import { deriveCandidateInterviews, interviewController as defaultInterviewController, selectSchedulableCandidates } from "./interviewController.js";
 import { mergeScheduleCandidateOptions } from "./interviewViewState.js";
 import {
+  isTalentPoolRoleMismatch,
   selectExactTalentPool,
   selectServerTalentCandidates,
   talentController as defaultTalentController,
@@ -930,6 +931,14 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
     return result.application;
   }
 
+  const talentAddSelectedPool = talentAddDialog?.selectedPoolId
+    ? selectExactTalentPool(talentAddDialog.pools, talentAddDialog.selectedPoolId)
+    : null;
+  const talentAddSelectedCandidates = talentAddDialog
+    ? selectServerTalentCandidates([...candidateRecords, selectedCandidate].filter(Boolean), talentAddDialog.candidateIds)
+    : [];
+  const talentAddHasRoleMismatch = Boolean(talentAddSelectedPool && talentAddSelectedCandidates.some((candidate) => isTalentPoolRoleMismatch(talentAddSelectedPool, [candidate.position])));
+
   return (
     <div className="app-shell">
       <aside
@@ -1175,11 +1184,11 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
         <Modal
           title="加入人才库"
           onClose={() => setTalentAddDialog(null)}
-          footer={<><button className="button secondary" type="button" onClick={() => setTalentAddDialog(null)}>取消</button><button className="button primary" type="button" disabled={talentAddDialog.status !== "ready" || !talentAddDialog.selectedPoolId} onClick={async () => { setTalentAddDialog((current) => ({ ...current, status: "submitting" })); const added = await addCandidatesToTalentPool(talentAddDialog.candidateIds, talentAddDialog.selectedPoolId); if (added) setTalentAddDialog(null); else setTalentAddDialog((current) => current ? ({ ...current, status: "ready" }) : current); }}>确认加入</button></>}
+          footer={<><button className="button secondary" type="button" onClick={() => setTalentAddDialog(null)}>取消</button><button className="button primary" type="button" disabled={talentAddDialog.status !== "ready" || !talentAddDialog.selectedPoolId || (talentAddHasRoleMismatch && !talentAddDialog.mismatchConfirmed)} onClick={async () => { setTalentAddDialog((current) => ({ ...current, status: "submitting" })); const added = await addCandidatesToTalentPool(talentAddDialog.candidateIds, talentAddDialog.selectedPoolId); if (added) setTalentAddDialog(null); else setTalentAddDialog((current) => current ? ({ ...current, status: "ready" }) : current); }}>确认加入</button></>}
         >
           {talentAddDialog.status === "loading" && <p role="status">正在加载可用人才库...</p>}
           {talentAddDialog.status === "error" && <p className="field-error" role="alert">{talentAddDialog.error}</p>}
-          {(talentAddDialog.status === "ready" || talentAddDialog.status === "submitting") && <label>目标人才库<select aria-label="目标人才库" value={talentAddDialog.selectedPoolId} disabled={talentAddDialog.status === "submitting"} onChange={(event) => setTalentAddDialog((current) => ({ ...current, selectedPoolId: event.target.value }))}><option value="">请选择人才库</option>{talentAddDialog.pools.map((pool) => <option key={pool.id} value={pool.id}>{pool.name}</option>)}</select></label>}
+          {(talentAddDialog.status === "ready" || talentAddDialog.status === "submitting") && <><label>目标人才库<select aria-label="目标人才库" value={talentAddDialog.selectedPoolId} disabled={talentAddDialog.status === "submitting"} onChange={(event) => setTalentAddDialog((current) => ({ ...current, selectedPoolId: event.target.value, mismatchConfirmed: false }))}><option value="">请选择人才库</option>{talentAddDialog.pools.map((pool) => <option key={pool.id} value={pool.id}>{pool.name}</option>)}</select></label>{talentAddHasRoleMismatch && <label className="talent-pool-mismatch"><span><CircleAlert size={17} /><strong>岗位与人才库不一致</strong></span><small>候选人的来源岗位不在“{talentAddSelectedPool.name}”的适合岗位中，可能放错人才库。</small><span><input type="checkbox" checked={Boolean(talentAddDialog.mismatchConfirmed)} disabled={talentAddDialog.status === "submitting"} onChange={(event) => setTalentAddDialog((current) => ({ ...current, mismatchConfirmed: event.target.checked }))} />我确认仍要加入该人才库</span></label>}</>}
         </Modal>
       )}
 

@@ -12,7 +12,14 @@ import {
   parseSuitableRoles,
   selectExactTalentPool,
   selectServerTalentCandidates,
+  isTalentPoolRoleMismatch,
 } from "./talentController.js";
+
+test("talent pool role mismatch tolerates equivalent role names but detects wrong pools", () => {
+  assert.equal(isTalentPoolRoleMismatch({ suitableRoles: ["出纳"] }, ["出纳（兼财务体系搭建）"]), false);
+  assert.equal(isTalentPoolRoleMismatch({ suitableRoles: ["采购专员"] }, ["出纳（兼财务体系搭建）"]), true);
+  assert.equal(isTalentPoolRoleMismatch({ suitableRoles: [] }, ["出纳"]), false);
+});
 
 test("suitable roles discard punctuation-only values and parse Chinese or English semicolons", () => {
   assert.deepEqual(cleanSuitableRoles(["；", "...", " AI 工程师 ", "AI 工程师", "产品经理"]), ["AI 工程师", "产品经理"]);

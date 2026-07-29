@@ -123,6 +123,17 @@ export function selectServerTalentCandidates(candidates, candidateIds) {
   return selected;
 }
 
+function comparableRole(value) {
+  return safeString(value).toLocaleLowerCase().replace(/[\s()（）【】_\-—·,，、/\\]+/g, "");
+}
+
+export function isTalentPoolRoleMismatch(pool, roles) {
+  const poolRoles = safeArray(pool?.suitableRoles).map(comparableRole).filter(Boolean);
+  const candidateRoles = safeArray(roles).map(comparableRole).filter(Boolean);
+  if (poolRoles.length === 0 || candidateRoles.length === 0) return false;
+  return !candidateRoles.some((candidateRole) => poolRoles.some((poolRole) => candidateRole.includes(poolRole) || poolRole.includes(candidateRole)));
+}
+
 function dateOnly(value) {
   const raw = safeString(value);
   return /^\d{4}-\d{2}-\d{2}/.test(raw) ? raw.slice(0, 10) : "";
