@@ -157,10 +157,13 @@ export function createOrganizationSettingsController({ client = apiClient, creat
           error.code = "RECRUITING_DEPARTMENT_REQUIRED";
           throw error;
         }
-        const updatedUser = normalizeUser(await client.updateRecruitingScope(userId, {
+        const body = {
           recruiting_scope_type: recruitingScopeType,
           recruiting_department_ids: recruitingScopeType === "departments" ? recruitingDepartmentIds : [],
-        }));
+        };
+        const role = safeString(form?.role);
+        if (role) body.role = role;
+        const updatedUser = normalizeUser(await client.updateRecruitingScope(userId, body));
         patchState({
           actionStatus: "success",
           users: state.users.map((user) => user.id === updatedUser.id ? updatedUser : user),

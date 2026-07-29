@@ -20,7 +20,7 @@ before(async () => {
   browser = await chromium.launch({ headless: true });
 });
 
-async function openAuthenticatedPage(viewport) {
+async function openAuthenticatedPage(viewport, { currentRole = "recruiting_admin" } = {}) {
   const context = await browser.newContext({ viewport });
   let users = [
     { id: "user-1", display_name: "Admin", email: "admin@example.test", department_id: "dep-1", department_name: "技术部", roles: ["recruiting_admin"], status: "active", recruiting_scope_type: "organization", recruiting_department_ids: [] },
@@ -34,7 +34,7 @@ async function openAuthenticatedPage(viewport) {
         status: 200,
         contentType: "application/json",
         headers: { "x-csrf-token": "settings-regression" },
-        body: JSON.stringify({ data: { id: "user-1", display_name: "Admin", roles: ["recruiting_admin"] } }),
+        body: JSON.stringify({ data: { id: "current-user", display_name: "Current User", roles: [currentRole] } }),
       });
       return;
     }
@@ -61,6 +61,13 @@ async function openAuthenticatedPage(viewport) {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: users.find((user) => user.id === "user-2") }) });
       return;
     }
+    if (pathname === "/api/v1/settings/users/user-1/recruiting-scope" && route.request().method() === "PATCH") {
+      const body = route.request().postDataJSON();
+      assert.deepEqual(body, { role: "recruiter", recruiting_scope_type: "departments", recruiting_department_ids: ["dep-1"] });
+      users = users.map((user) => user.id === "user-1" ? { ...user, ...body, roles: [body.role] } : user);
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: users.find((user) => user.id === "user-1") }) });
+      return;
+    }
     if (pathname === "/api/v1/settings/integrations/feishu") {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { enabled: false, configured: false, app_id: "", redirect_uri: "", calendar_id: "" } }) });
       return;
@@ -69,7 +76,7 @@ async function openAuthenticatedPage(viewport) {
   });
   const page = await context.newPage();
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-  await page.getByRole("heading", { name: "工作台", exact: true }).waitFor();
+  await page.getByRole("heading", { name: currentRole === "system_admin" ? "设置" : "工作台", exact: true }).waitFor();
   return { context, page };
 }
 
@@ -334,6 +341,25 @@ test("recruiting scope renders conditionally, validates departments, and refresh
     await scopeDrawer.getByRole("button", { name: "保存招聘范围", exact: true }).click();
     await scopeDrawer.waitFor({ state: "detached" });
     assert.match(await rows.filter({ hasText: "林岚" }).innerText(), /全公司/);
+  } finally {
+    await context.close();
+  }
+});
+
+test("system administrator can configure an existing member role and recruiting scope", { timeout: 60_000 }, async () => {
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, { currentRole: "system_admin" });
+  try {
+    const adminRow = page.locator(".users-table .settings-table-row").filter({ hasText: "Admin" });
+    await adminRow.waitFor();
+    await adminRow.getByRole("button", { name: "配置成员", exact: true }).click();
+    const drawer = page.getByRole("dialog", { name: "配置成员", exact: true });
+    await drawer.getByLabel("成员角色", { exact: true }).selectOption("recruiter");
+    await drawer.getByLabel(/^指定部门/).check();
+    await drawer.getByLabel("技术部", { exact: true }).check();
+    await drawer.getByRole("button", { name: "保存成员配置", exact: true }).click();
+    await drawer.waitFor({ state: "detached" });
+    assert.match(await adminRow.innerText(), /HR 招聘专员/);
+    assert.match(await adminRow.innerText(), /1 个部门/);
   } finally {
     await context.close();
   }

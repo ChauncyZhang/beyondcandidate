@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from server.app.identity.models import (
     AuditLog,
@@ -81,6 +82,106 @@ def test_historical_user_defaults_to_jobs_scope_in_user_listing(management_app) 
     row = next(item for item in response.json()["data"] if item["id"] == str(historical.user_id))
     assert row["recruiting_scope_type"] == "jobs"
     assert row["recruiting_department_ids"] == []
+
+
+def test_system_admin_can_convert_existing_admin_to_department_scoped_recruiter(
+    management_app,
+) -> None:
+    app, client, _ = management_app
+    actor = seed_user(app, role="system_admin", email="admin@example.test")
+    target = seed_user(app, role="recruiting_admin", email="hr@example.test")
+    engineering = _add_department(app, actor.organization_id, "Engineering")
+    headers = login(client, "admin@example.test")
+
+    response = client.patch(
+        f"/api/v1/settings/users/{target.user_id}/recruiting-scope",
+        json={
+            "role": "recruiter",
+            "recruiting_scope_type": "departments",
+            "recruiting_department_ids": [str(engineering)],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["roles"] == ["recruiter"]
+    assert response.json()["data"]["recruiting_scope_type"] == "departments"
+    assert response.json()["data"]["recruiting_department_ids"] == [
+        str(engineering)
+    ]
+    with app.state.identity_store.sync_session() as db:
+        stored = db.scalar(
+            select(User)
+            .options(
+                selectinload(User.roles),
+                selectinload(User.recruiting_department_scopes),
+            )
+            .where(User.id == target.user_id)
+        )
+        assert [role.role for role in stored.roles] == ["recruiter"]
+        assert stored.authorization_version == 2
+        audit = db.query(AuditLog).filter_by(
+            event_type="identity.user_access_updated"
+        ).one()
+        assert audit.metadata_json["previous_roles"] == ["recruiting_admin"]
+        assert audit.metadata_json["roles"] == ["recruiter"]
+
+
+def test_member_role_changes_require_system_admin_and_cannot_change_self(
+    management_app,
+) -> None:
+    app, client, _ = management_app
+    system_admin = seed_user(app, role="system_admin", email="system@example.test")
+    recruiter = seed_user(app, role="recruiter", email="recruiter@example.test")
+    recruiting_admin = seed_user(
+        app, role="recruiting_admin", email="recruiting-admin@example.test"
+    )
+
+    system_headers = login(client, "system@example.test")
+    self_change = client.patch(
+        f"/api/v1/settings/users/{system_admin.user_id}/recruiting-scope",
+        json={
+            "role": "recruiter",
+            "recruiting_scope_type": "organization",
+            "recruiting_department_ids": [],
+        },
+        headers=system_headers,
+    )
+    assert self_change.status_code == 409
+    assert self_change.json()["code"] == "self_role_change_forbidden"
+
+    recruiting_admin_headers = login(client, "recruiting-admin@example.test")
+    forbidden = client.patch(
+        f"/api/v1/settings/users/{recruiter.user_id}/recruiting-scope",
+        json={
+            "role": "interviewer",
+            "recruiting_scope_type": "jobs",
+            "recruiting_department_ids": [],
+        },
+        headers=recruiting_admin_headers,
+    )
+    assert forbidden.status_code == 403
+    assert forbidden.json()["code"] == "role_assignment_forbidden"
+
+
+def test_system_admin_can_save_an_unchanged_member_role(management_app) -> None:
+    app, client, _ = management_app
+    seed_user(app, role="system_admin", email="system@example.test")
+    target = seed_user(app, role="recruiting_admin", email="hr@example.test")
+    headers = login(client, "system@example.test")
+
+    response = client.patch(
+        f"/api/v1/settings/users/{target.user_id}/recruiting-scope",
+        json={
+            "role": "recruiting_admin",
+            "recruiting_scope_type": "jobs",
+            "recruiting_department_ids": [],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["roles"] == ["recruiting_admin"]
 
 
 def test_job_predicate_unions_explicit_multiple_departments_and_organization_scope(

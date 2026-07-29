@@ -184,6 +184,13 @@ class UserInvite(StrictModel):
 
 
 class RecruitingScopeUpdate(StrictModel):
+    role: Literal[
+        "system_admin",
+        "recruiting_admin",
+        "recruiter",
+        "hiring_manager",
+        "interviewer",
+    ] | None = None
     recruiting_scope_type: Literal["jobs", "departments", "organization"]
     recruiting_department_ids: list[UUID] = Field(default_factory=list)
 
@@ -840,6 +847,22 @@ def update_user_recruiting_scope(
         if user is None:
             return problem(request, 404, "user_not_found", "The user was not found.")
         target_roles = {role.role for role in user.roles}
+        if payload.role is not None:
+            if "system_admin" not in principal.roles:
+                return problem(
+                    request,
+                    403,
+                    "role_assignment_forbidden",
+                    "The role cannot be assigned.",
+                )
+            if user.id == principal.user_id:
+                return problem(
+                    request,
+                    409,
+                    "self_role_change_forbidden",
+                    "The current user's role cannot be changed.",
+                )
+        requested_roles = {payload.role} if payload.role is not None else target_roles
         if (
             "system_admin" not in principal.roles
             and target_roles & {"system_admin", "recruiting_admin"}
@@ -852,7 +875,7 @@ def update_user_recruiting_scope(
             )
         if (
             payload.recruiting_scope_type != "jobs"
-            and "recruiter" not in target_roles
+            and "recruiter" not in requested_roles
         ):
             return problem(
                 request,
@@ -874,10 +897,13 @@ def update_user_recruiting_scope(
             )
 
         previous_scope_type = user.recruiting_scope_type
+        previous_roles = sorted(target_roles)
         previous_department_ids = sorted(
             str(scope.department_id)
             for scope in user.recruiting_department_scopes
         )
+        if payload.role is not None and requested_roles != target_roles:
+            user.roles = [UserRole(role=payload.role)]
         _set_recruiting_scope(user, payload.recruiting_scope_type, departments)
         user.authorization_version += 1
         db.add(
@@ -885,12 +911,18 @@ def update_user_recruiting_scope(
                 organization_id=principal.organization_id,
                 actor_user_id=principal.user_id,
                 category="system",
-                event_type="identity.user_recruiting_scope_updated",
+                event_type=(
+                    "identity.user_access_updated"
+                    if payload.role is not None
+                    else "identity.user_recruiting_scope_updated"
+                ),
                 outcome="success",
                 resource_type="user",
                 resource_id=user.id,
                 trace_id=request.state.trace_id,
                 metadata_json={
+                    "previous_roles": previous_roles,
+                    "roles": sorted(requested_roles),
                     "previous_recruiting_scope_type": previous_scope_type,
                     "previous_recruiting_department_ids": previous_department_ids,
                     "recruiting_scope_type": payload.recruiting_scope_type,

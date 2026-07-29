@@ -173,7 +173,7 @@ function OrganizationSettings({
     recruitingDepartmentIds: [],
   });
   const [scopeMember, setScopeMember] = useState(null);
-  const [scopeForm, setScopeForm] = useState({ recruitingScopeType: "jobs", recruitingDepartmentIds: [] });
+  const [scopeForm, setScopeForm] = useState({ role: "", recruitingScopeType: "jobs", recruitingDepartmentIds: [] });
   const [departmentName, setDepartmentName] = useState("");
   const [copied, setCopied] = useState(false);
   const inviteRoles = getInviteRoleOptions(role);
@@ -235,12 +235,18 @@ function OrganizationSettings({
     }
   }
   async function submitRecruitingScope() {
-    if (!scopeMember || !isRecruitingScopeValid(scopeForm.recruitingScopeType, scopeForm.recruitingDepartmentIds) || busy) return;
+    const scopeValid = scopeForm.role !== "recruiter" || isRecruitingScopeValid(scopeForm.recruitingScopeType, scopeForm.recruitingDepartmentIds);
+    if (!scopeMember || !scopeForm.role || !scopeValid || busy) return;
     try {
-      await controller.updateRecruitingScope(scopeMember.id, scopeForm);
+      await controller.updateRecruitingScope(scopeMember.id, {
+        ...scopeForm,
+        role: role === "系统管理员" ? scopeForm.role : "",
+        recruitingScopeType: scopeForm.role === "recruiter" ? scopeForm.recruitingScopeType : "jobs",
+        recruitingDepartmentIds: scopeForm.role === "recruiter" ? scopeForm.recruitingDepartmentIds : [],
+      });
       setDrawer(null);
       setScopeMember(null);
-      onNotify("招聘范围已更新");
+      onNotify(role === "系统管理员" ? "成员权限已更新" : "招聘范围已更新");
     } catch {
       /* safe controller message is rendered */
     }
@@ -292,7 +298,7 @@ function OrganizationSettings({
   function openRecruitingScope(user) {
     controller.dismissInvitation();
     setScopeMember(user);
-    setScopeForm({ recruitingScopeType: user.recruitingScopeType, recruitingDepartmentIds: [...user.recruitingDepartmentIds] });
+    setScopeForm({ role: user.roleValues[0] || "", recruitingScopeType: user.recruitingScopeType, recruitingDepartmentIds: [...user.recruitingDepartmentIds] });
     setDrawer("recruiting-scope");
   }
   return (
@@ -398,7 +404,7 @@ function OrganizationSettings({
                   {user.status}
                 </span>
                 <span className="member-row-action">
-                  {editable && user.roleValues.includes("recruiter") && <button className="text-button" type="button" onClick={() => openRecruitingScope(user)}>配置招聘范围</button>}
+                  {editable && (user.roleValues.includes("recruiter") || (role === "系统管理员" && !user.roleValues.includes("system_admin"))) && <button className="text-button" type="button" onClick={() => openRecruitingScope(user)}>{role === "系统管理员" ? "配置成员" : "配置招聘范围"}</button>}
                 </span>
               </div>
             ))}
@@ -557,17 +563,19 @@ function OrganizationSettings({
       )}
       {drawer === "recruiting-scope" && scopeMember && (
         <OrganizationDrawer
-          title="配置招聘范围"
-          description={`为 ${scopeMember.name || scopeMember.email} 设置负责的招聘数据范围。所属部门不会因此改变。`}
+          title={role === "系统管理员" ? "配置成员" : "配置招聘范围"}
+          description={role === "系统管理员" ? `为 ${scopeMember.name || scopeMember.email} 设置角色及招聘数据范围。所属部门不会因此改变。` : `为 ${scopeMember.name || scopeMember.email} 设置负责的招聘数据范围。所属部门不会因此改变。`}
           busy={busy}
           onClose={closeDrawer}
           footer={<>
             <button className="button secondary" type="button" disabled={busy} onClick={closeDrawer}>取消</button>
-            <button className="button primary" type="button" disabled={busy || !isRecruitingScopeValid(scopeForm.recruitingScopeType, scopeForm.recruitingDepartmentIds)} onClick={submitRecruitingScope}>{busy ? "保存中…" : "保存招聘范围"}</button>
+            <button className="button primary" type="button" disabled={busy || !scopeForm.role || (scopeForm.role === "recruiter" && !isRecruitingScopeValid(scopeForm.recruitingScopeType, scopeForm.recruitingDepartmentIds))} onClick={submitRecruitingScope}>{busy ? "保存中…" : role === "系统管理员" ? "保存成员配置" : "保存招聘范围"}</button>
           </>}
         >
           {state.actionError && <div className="settings-error" role="alert"><AlertTriangle size={17} />{state.actionError}</div>}
-          <RecruitingScopeFields value={scopeForm} departments={activeDepartments} onChange={setScopeForm} />
+          {role === "系统管理员" && <label>角色<select data-dialog-initial-focus aria-label="成员角色" value={scopeForm.role} onChange={(event) => setScopeForm({ role: event.target.value, recruitingScopeType: event.target.value === "recruiter" && scopeMember.roleValues.includes("recruiter") ? scopeMember.recruitingScopeType : "jobs", recruitingDepartmentIds: event.target.value === "recruiter" && scopeMember.roleValues.includes("recruiter") ? [...scopeMember.recruitingDepartmentIds] : [] })}>{getInviteRoleOptions(role).map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
+          {scopeForm.role === "recruiter" && <RecruitingScopeFields value={scopeForm} departments={activeDepartments} onChange={setScopeForm} />}
+          {scopeForm.role === "recruiting_admin" && <div className="form-help">招聘管理员默认负责全公司职位，无需另行设置招聘范围。</div>}
         </OrganizationDrawer>
       )}
       {drawer === "department-create" && (

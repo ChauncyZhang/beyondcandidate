@@ -114,8 +114,8 @@ test("rejects an empty department scope before sending and updates the member li
   await assert.rejects(() => controller.inviteMember({ role: "recruiter", recruitingScopeType: "departments", recruitingDepartmentIds: [] }), { code: "RECRUITING_DEPARTMENT_REQUIRED" });
   assert.equal(controller.getSnapshot().actionError, "负责招聘部门至少选择一项");
 
-  await controller.updateRecruitingScope("user-1", { recruitingScopeType: "organization", recruitingDepartmentIds: ["dep-1"] });
-  assert.deepEqual(updateBody, { recruiting_scope_type: "organization", recruiting_department_ids: [] });
+  await controller.updateRecruitingScope("user-1", { role: "recruiter", recruitingScopeType: "organization", recruitingDepartmentIds: ["dep-1"] });
+  assert.deepEqual(updateBody, { role: "recruiter", recruiting_scope_type: "organization", recruiting_department_ids: [] });
   assert.equal(getRecruitingScopeLabel(controller.getSnapshot().users[0]), "全公司");
 });
 
