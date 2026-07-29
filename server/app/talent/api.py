@@ -90,6 +90,13 @@ def _is_active_application_conflict(error: IntegrityError) -> bool:
     return getattr(getattr(error.orig, "diag", None), "constraint_name", None) == "uq_applications_active"
 
 
+def _is_talent_pool_membership_conflict(error: IntegrityError) -> bool:
+    constraint_name = getattr(getattr(error.orig, "diag", None), "constraint_name", None)
+    if constraint_name == "uq_talent_pool_membership_candidate":
+        return True
+    return "talent_pool_memberships.organization_id, talent_pool_memberships.pool_id, talent_pool_memberships.candidate_id" in str(error.orig)
+
+
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
@@ -694,6 +701,8 @@ def patch_talent_pool(pool_id: UUID, payload: PoolPatch, request: Request, if_ma
         pool = _load_pool(db, principal, pool_id, manage=True, for_update=True)
         if pool is None:
             return _denied(request)
+        if pool.system_key is not None:
+            return problem(request, 409, "system_talent_pool_immutable", "System-managed talent pools cannot be edited.")
         if pool.version != expected:
             return problem(request, 409, "resource_version_conflict", "The resource changed. Reload and try again.")
         changes = payload.model_dump(exclude_unset=True, exclude={"grants"})
@@ -722,6 +731,49 @@ def patch_talent_pool(pool_id: UUID, payload: PoolPatch, request: Request, if_ma
         response.headers["ETag"] = f'"{pool.version}"'
         response.headers["Cache-Control"] = "no-store"
         return response
+
+
+@router.delete("/talent-pools/{pool_id}", status_code=204)
+def delete_talent_pool(pool_id: UUID, request: Request, if_match: str | None = Header(None)):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
+    expected = _expected_version(request, if_match)
+    if isinstance(expected, JSONResponse):
+        return expected
+    with request.app.state.identity_store.sync_session() as db:
+        pool = _load_pool(db, principal, pool_id, manage=True, for_update=True)
+        if pool is None:
+            return _denied(request)
+        if pool.system_key is not None:
+            return problem(request, 409, "system_talent_pool_immutable", "System-managed talent pools cannot be deleted.")
+        if pool.version != expected:
+            return problem(request, 409, "resource_version_conflict", "The resource changed. Reload and try again.")
+        member_count = db.scalar(
+            select(func.count(TalentPoolMembership.id)).where(
+                TalentPoolMembership.organization_id == principal.organization_id,
+                TalentPoolMembership.pool_id == pool.id,
+            )
+        )
+        if member_count:
+            return problem(request, 409, "talent_pool_not_empty", "Only empty talent pools can be deleted.")
+        db.add(AuditLog(
+            organization_id=principal.organization_id,
+            actor_user_id=principal.user_id,
+            event_type="talent_pool.deleted",
+            outcome="success",
+            trace_id=request.state.trace_id,
+            metadata_json={"pool_id": str(pool.id)},
+        ))
+        db.execute(
+            delete(TalentPoolGrant).where(
+                TalentPoolGrant.organization_id == principal.organization_id,
+                TalentPoolGrant.pool_id == pool.id,
+            )
+        )
+        db.delete(pool)
+        db.commit()
+        return Response(status_code=204)
 
 
 @router.get("/talent-pools/{pool_id}/memberships", response_model=DataCollection)
@@ -863,8 +915,22 @@ def patch_talent_pool_membership(membership_id: UUID, payload: MembershipPatch, 
             return _denied(request)
         candidate_id = membership.candidate_id
         changes = payload.model_dump(exclude_unset=True)
+        target_pool_id = changes.pop("pool_id", None)
+        moving_pool = "pool_id" in payload.model_fields_set
         if "owner_id" in changes and _active_user(db, principal.organization_id, changes["owner_id"]) is None:
             return _denied(request)
+        target_pool = None
+        if moving_pool:
+            target_pool = _load_pool(db, principal, target_pool_id, manage=True, for_update=True)
+            if target_pool is None:
+                return _denied(request)
+            if target_pool.system_key is not None:
+                return problem(
+                    request,
+                    409,
+                    "system_talent_pool_membership_target",
+                    "Memberships can only be moved to ordinary talent pools.",
+                )
         try:
             candidate = lock_active_candidate(db, principal.organization_id, candidate_id)
         except CandidateUnavailable:
@@ -876,13 +942,55 @@ def patch_talent_pool_membership(membership_id: UUID, payload: MembershipPatch, 
             return _denied(request)
         if membership.version != expected:
             return problem(request, 409, "resource_version_conflict", "The resource changed. Reload and try again.")
+        source_pool_id = membership.pool_id
+        if moving_pool:
+            source_pool = _load_pool(db, principal, source_pool_id, manage=True, for_update=True)
+            if source_pool is None:
+                return _denied(request)
+            if source_pool.system_key is not None:
+                return problem(
+                    request,
+                    409,
+                    "system_talent_pool_membership_source",
+                    "Memberships in system-managed talent pools cannot be moved manually.",
+                )
+            duplicate = db.scalar(
+                select(TalentPoolMembership.id).where(
+                    TalentPoolMembership.organization_id == principal.organization_id,
+                    TalentPoolMembership.pool_id == target_pool.id,
+                    TalentPoolMembership.candidate_id == membership.candidate_id,
+                    TalentPoolMembership.id != membership.id,
+                )
+            )
+            if duplicate is not None:
+                return problem(
+                    request,
+                    409,
+                    "talent_pool_membership_exists",
+                    "The candidate is already in the target talent pool.",
+                )
+            membership.pool_id = target_pool.id
         for field, value in changes.items():
             setattr(membership, field, value)
         membership.version += 1
         membership.updated_at = datetime.now(timezone.utc)
-        db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, event_type="talent_pool.member_updated", outcome="success", trace_id=request.state.trace_id, metadata_json={"membership_id": str(membership.id), "changed_fields": sorted(payload.model_fields_set)}))
+        audit_metadata = {"membership_id": str(membership.id), "changed_fields": sorted(payload.model_fields_set)}
+        if moving_pool:
+            audit_metadata.update({"source_pool_id": str(source_pool_id), "target_pool_id": str(target_pool.id)})
+        db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, event_type="talent_pool.member_updated", outcome="success", trace_id=request.state.trace_id, metadata_json=audit_metadata))
         recalculate_candidate_retention(db, principal.organization_id, membership.candidate_id)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError as error:
+            db.rollback()
+            if moving_pool and _is_talent_pool_membership_conflict(error):
+                return problem(
+                    request,
+                    409,
+                    "talent_pool_membership_exists",
+                    "The candidate is already in the target talent pool.",
+                )
+            raise
         response = JSONResponse({"data": _membership_data(db, principal, membership)})
         response.headers["ETag"] = f'"{membership.version}"'
         response.headers["Cache-Control"] = "no-store"

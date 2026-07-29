@@ -122,6 +122,7 @@ test("application shell uses BrowserRouter and URL-derived route state", async (
   assert.match(appSource, /interviewController\.get\(route\.id/);
   assert.match(appSource, /inert=\{drawerViewport && !menuOpen\}/);
   assert.doesNotMatch(appSource, /inert=\{drawerViewport && !menuOpen \? "" : undefined\}/);
+  assert.doesNotMatch(appSource, /模块将在后续原型中展开/);
   assert.doesNotMatch(appSource, /createAppHistory/);
 });
 

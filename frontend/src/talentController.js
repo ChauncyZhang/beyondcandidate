@@ -55,6 +55,17 @@ function safeArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+export function cleanSuitableRoles(value) {
+  return [...new Set(safeArray(value)
+    .filter((item) => typeof item === "string")
+    .map((item) => item.trim())
+    .filter((item) => /[\p{L}\p{N}]/u.test(item)))];
+}
+
+export function parseSuitableRoles(value) {
+  return cleanSuitableRoles(safeString(value).split(/[、,，;；\n]+/));
+}
+
 function requireId(value, code) {
   const id = safeString(value).trim();
   if (!id) {
@@ -131,7 +142,7 @@ export function normalizeTalentPool(value) {
     name: safeString(value?.name, "未命名人才库"),
     systemKey: safeString(value?.system_key),
     purpose: safeString(value?.purpose),
-    suitableRoles: safeArray(value?.suitable_roles).filter((item) => typeof item === "string"),
+    suitableRoles: cleanSuitableRoles(value?.suitable_roles),
     ownerId: safeString(value?.owner?.id),
     owner: safeString(value?.owner?.display_name, "未分配"),
     visibility: VISIBILITY_TO_UI[value?.visibility] || "指定成员可见",
@@ -197,7 +208,7 @@ export function normalizeTalentMembership(value) {
     finalScore,
     deferredAt: dateOnly(deferredScreening?.deferred_at),
     mainGaps,
-    suitableRoles: safeArray(value?.suitable_roles).filter((item) => typeof item === "string"),
+    suitableRoles: cleanSuitableRoles(value?.suitable_roles),
     tags,
     ownerId: safeString(value?.owner?.id),
     owner: safeString(value?.owner?.display_name, "未分配"),
@@ -224,16 +235,26 @@ function poolPayload(form, ownerId) {
     purpose: safeString(form?.purpose).trim(),
     visibility: UI_TO_VISIBILITY[form?.visibility] || "recruiting_team",
     owner_id: requireId(ownerId, "talent_owner_required"),
-    suitable_roles: safeArray(form?.suitableRoles),
+    suitable_roles: cleanSuitableRoles(form?.suitableRoles),
     retention_days: Number(form?.retentionDays) || 730,
     grants: [],
+  };
+}
+
+function poolPatchPayload(form) {
+  return {
+    name: safeString(form?.name).trim(),
+    purpose: safeString(form?.purpose).trim(),
+    visibility: UI_TO_VISIBILITY[form?.visibility] || "recruiting_team",
+    suitable_roles: cleanSuitableRoles(form?.suitableRoles),
+    retention_days: Number(form?.retentionDays) || 730,
   };
 }
 
 function membershipPatch(updated) {
   return {
     owner_id: requireId(updated?.ownerId, "talent_owner_required"),
-    suitable_roles: safeArray(updated?.suitableRoles),
+    suitable_roles: cleanSuitableRoles(updated?.suitableRoles),
     tags: safeArray(updated?.tags),
     reason: safeString(updated?.reason),
     next_contact_at: updated?.nextContact ? `${updated.nextContact}T00:00:00+08:00` : null,
@@ -281,6 +302,26 @@ export function createTalentController({ client = apiClient, idSource = () => gl
       }));
       return normalizeTalentPool(payload?.data);
     },
+    async updatePool(pool, form, options = {}) {
+      const id = requireId(pool?.id, "talent_pool_required");
+      const version = requireVersion(pool?.version);
+      const payload = await client.request(`/api/v1/talent-pools/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: poolPatchPayload(form),
+        ifMatch: `"${version}"`,
+        ...options,
+      });
+      return normalizeTalentPool(payload?.data);
+    },
+    async deletePool(pool, options = {}) {
+      const id = requireId(pool?.id, "talent_pool_required");
+      const version = requireVersion(pool?.version);
+      await client.request(`/api/v1/talent-pools/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        ifMatch: `"${version}"`,
+        ...options,
+      });
+    },
     async listMemberships(poolId, filters = {}, options = {}) {
       const id = requireId(poolId, "talent_pool_required");
       const params = new URLSearchParams();
@@ -321,6 +362,18 @@ export function createTalentController({ client = apiClient, idSource = () => gl
       const payload = await client.request(`/api/v1/talent-pool-memberships/${encodeURIComponent(id)}`, {
         method: "PATCH",
         body: membershipPatch(updated),
+        ifMatch: `"${version}"`,
+        ...options,
+      });
+      return normalizeTalentMembership(payload?.data);
+    },
+    async moveMembership(member, targetPoolId, options = {}) {
+      const id = requireId(member?.id, "talent_membership_required");
+      const version = requireVersion(member?.version);
+      const poolId = requireId(targetPoolId, "talent_pool_required");
+      const payload = await client.request(`/api/v1/talent-pool-memberships/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: { pool_id: poolId },
         ifMatch: `"${version}"`,
         ...options,
       });

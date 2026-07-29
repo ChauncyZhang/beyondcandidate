@@ -80,3 +80,27 @@ test("referral status is perceivable and the primary action does not depend on h
   assert.match(source, /aria-label=\{`转交用人经理：\$\{candidate\.name\}`\}/);
   assert.doesNotMatch(source, /onMouseEnter|onMouseLeave/);
 });
+
+test("ordinary pool details expose complete editing and conditional deletion", () => {
+  assert.match(source, /function EditPoolDialog/);
+  for (const label of ["人才库名称", "用途\/说明", "适合岗位", "可见范围", "保留天数"]) assert.match(source, new RegExp(label));
+  assert.match(source, /该人才库仍有候选人，请先移动或移除后再删除/);
+  assert.match(source, /controller\.updatePool\(selectedPool, form\)/);
+  assert.match(source, /controller\.deletePool\(selectedPool\)/);
+  assert.match(source, /if \(pool\.systemKey === "ai_screening_deferred"\) return <DeferredPoolDetail/);
+});
+
+test("member drawer confirms manual moves and excludes system pools", () => {
+  assert.match(source, /aria-label="目标人才库"/);
+  assert.match(source, /确认移动/);
+  assert.match(source, /item\.id !== pool\.id && !item\.systemKey/);
+  assert.match(source, /sourcePool\.systemKey \|\| targetPool\.systemKey/);
+  assert.match(source, /controller\.moveMembership\(member, targetPoolId\)/);
+});
+
+test("empty suitable roles render as not configured and role inputs support semicolons", () => {
+  assert.match(source, /pool\.suitableRoles\.join\("、"\) \|\| "未设置"/);
+  assert.match(source, /member\.suitableRoles\.join\("、"\) \|\| "未设置"/);
+  assert.match(source, /parseSuitableRoles\(form\.suitableRole\)/);
+  assert.match(source, /使用顿号、逗号或分号分隔/);
+});

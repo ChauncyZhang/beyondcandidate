@@ -125,17 +125,196 @@ def bind_terminal_audit_to_evaluation(audit, evaluation):
 def test_talent_openapi_registers_phase_5_pool_contract(tmp_path) -> None:
     app = make_app(tmp_path)
     with TestClient(app) as client:
-        paths = client.get("/openapi.json").json()["paths"]
+        openapi = client.get("/openapi.json").json()
+        paths = openapi["paths"]
 
     expected = {
         "/api/v1/talent-pools": {"get", "post"},
-        "/api/v1/talent-pools/{pool_id}": {"get", "patch"},
+        "/api/v1/talent-pools/{pool_id}": {"get", "patch", "delete"},
         "/api/v1/talent-pools/{pool_id}/memberships": {"get", "post"},
         "/api/v1/talent-pool-memberships/{membership_id}": {"patch", "delete"},
         "/api/v1/talent-pool-memberships/{membership_id}/reactivations": {"post"},
         "/api/v1/talent-pool-memberships/{membership_id}/review-referrals": {"post"},
     }
     assert {path: set(paths.get(path, {})) for path in expected} == expected
+    pool_id_schema = openapi["components"]["schemas"]["MembershipPatch"]["properties"]["pool_id"]
+    assert any(schema.get("format") == "uuid" for schema in pool_id_schema["anyOf"])
+
+
+def test_ordinary_pool_can_be_edited_and_only_empty_ordinary_pool_can_be_deleted(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+
+    with TestClient(app) as client:
+        headers, pool, _ = create_pool_and_membership(client, seed)
+        pool_id = pool.json()["data"]["id"]
+        edited = client.patch(
+            f"/api/v1/talent-pools/{pool_id}",
+            json={"name": "AI 技术人才（更新）", "suitable_roles": []},
+            headers={**headers, "If-Match": '"1"'},
+        )
+        nonempty = client.delete(
+            f"/api/v1/talent-pools/{pool_id}",
+            headers={**headers, "If-Match": '"2"'},
+        )
+
+        mark_deferred_system_pool(app, pool_id)
+        system_edit = client.patch(
+            f"/api/v1/talent-pools/{pool_id}",
+            json={"purpose": "不应修改"},
+            headers={**headers, "If-Match": '"2"'},
+        )
+        system_delete = client.delete(
+            f"/api/v1/talent-pools/{pool_id}",
+            headers={**headers, "If-Match": '"2"'},
+        )
+
+        empty = client.post(
+            "/api/v1/talent-pools",
+            json={**pool_payload(seed["admin_id"]), "name": "待删除空人才库"},
+            headers={**headers, "Idempotency-Key": "create-empty-pool-for-delete"},
+        )
+        empty_id = empty.json()["data"]["id"]
+        stale_delete = client.delete(
+            f"/api/v1/talent-pools/{empty_id}",
+            headers={**headers, "If-Match": '"2"'},
+        )
+        deleted = client.delete(
+            f"/api/v1/talent-pools/{empty_id}",
+            headers={**headers, "If-Match": '"1"'},
+        )
+        missing = client.get(f"/api/v1/talent-pools/{empty_id}", headers=headers)
+
+    assert edited.status_code == 200
+    assert edited.headers["ETag"] == '"2"'
+    assert edited.json()["data"]["name"] == "AI 技术人才（更新）"
+    assert edited.json()["data"]["suitable_roles"] == []
+    assert nonempty.status_code == 409
+    assert nonempty.json()["code"] == "talent_pool_not_empty"
+    assert system_edit.status_code == system_delete.status_code == 409
+    assert system_edit.json()["code"] == system_delete.json()["code"] == "system_talent_pool_immutable"
+    assert stale_delete.status_code == 409
+    assert stale_delete.json()["code"] == "resource_version_conflict"
+    assert deleted.status_code == 204
+    assert missing.status_code == 404
+    with app.state.identity_store.sync_session() as database:
+        deletion_audit = database.scalar(
+            select(AuditLog).where(
+                AuditLog.event_type == "talent_pool.deleted",
+                AuditLog.metadata_json["pool_id"].as_string() == empty_id,
+            )
+        )
+        assert deletion_audit is not None
+
+
+def test_membership_patch_moves_to_manageable_ordinary_pool_with_version_and_audit(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+
+    with TestClient(app) as client:
+        headers, source_pool, membership = create_pool_and_membership(client, seed)
+        source_pool_id = source_pool.json()["data"]["id"]
+        membership_id = membership.json()["data"]["id"]
+        target_pool = client.post(
+            "/api/v1/talent-pools",
+            json={**pool_payload(seed["admin_id"]), "name": "目标人才库"},
+            headers={**headers, "Idempotency-Key": "create-membership-move-target"},
+        )
+        target_pool_id = target_pool.json()["data"]["id"]
+
+        moved = client.patch(
+            f"/api/v1/talent-pool-memberships/{membership_id}",
+            json={"pool_id": target_pool_id, "tags": ["RAG", "平台工程"]},
+            headers={**headers, "If-Match": '"1"'},
+        )
+        stale = client.patch(
+            f"/api/v1/talent-pool-memberships/{membership_id}",
+            json={"tags": ["不应写入"]},
+            headers={**headers, "If-Match": '"1"'},
+        )
+        source_members = client.get(f"/api/v1/talent-pools/{source_pool_id}/memberships", headers=headers)
+        target_members = client.get(f"/api/v1/talent-pools/{target_pool_id}/memberships", headers=headers)
+
+    assert moved.status_code == 200
+    assert moved.headers["ETag"] == '"2"'
+    assert moved.json()["data"]["pool_id"] == target_pool_id
+    assert moved.json()["data"]["version"] == 2
+    assert moved.json()["data"]["tags"] == ["RAG", "平台工程"]
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "resource_version_conflict"
+    assert source_members.json()["data"] == []
+    assert [item["id"] for item in target_members.json()["data"]] == [membership_id]
+    with app.state.identity_store.sync_session() as database:
+        audit = database.scalar(
+            select(AuditLog).where(
+                AuditLog.event_type == "talent_pool.member_updated",
+                AuditLog.metadata_json["membership_id"].as_string() == membership_id,
+            )
+        )
+        assert audit.metadata_json["changed_fields"] == ["pool_id", "tags"]
+        assert audit.metadata_json["source_pool_id"] == source_pool_id
+        assert audit.metadata_json["target_pool_id"] == target_pool_id
+
+
+def test_membership_move_rejects_duplicate_and_system_target_without_mutating_version(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+
+    with TestClient(app) as client:
+        headers, source_pool, source_membership = create_pool_and_membership(client, seed)
+        source_pool_id = source_pool.json()["data"]["id"]
+        membership_id = source_membership.json()["data"]["id"]
+        duplicate_target = client.post(
+            "/api/v1/talent-pools",
+            json={**pool_payload(seed["admin_id"]), "name": "已有人才目标库"},
+            headers={**headers, "Idempotency-Key": "create-duplicate-target"},
+        )
+        duplicate_target_id = duplicate_target.json()["data"]["id"]
+        duplicate_membership = client.post(
+            f"/api/v1/talent-pools/{duplicate_target_id}/memberships",
+            json=membership_payload(seed),
+            headers={**headers, "Idempotency-Key": "add-duplicate-target-member"},
+        )
+        assert duplicate_membership.status_code == 201
+
+        duplicate = client.patch(
+            f"/api/v1/talent-pool-memberships/{membership_id}",
+            json={"pool_id": duplicate_target_id},
+            headers={**headers, "If-Match": '"1"'},
+        )
+
+        system_target = client.post(
+            "/api/v1/talent-pools",
+            json={**pool_payload(seed["admin_id"]), "name": "系统目标库"},
+            headers={**headers, "Idempotency-Key": "create-system-target"},
+        )
+        system_target_id = system_target.json()["data"]["id"]
+        mark_deferred_system_pool(app, system_target_id)
+        system = client.patch(
+            f"/api/v1/talent-pool-memberships/{membership_id}",
+            json={"pool_id": system_target_id},
+            headers={**headers, "If-Match": '"1"'},
+        )
+        with app.state.identity_store.sync_session() as database:
+            database.get(TalentPool, UUID(system_target_id)).system_key = None
+            database.get(TalentPool, UUID(source_pool_id)).system_key = "ai_screening_deferred"
+            database.commit()
+        system_source = client.patch(
+            f"/api/v1/talent-pool-memberships/{membership_id}",
+            json={"pool_id": duplicate_target_id},
+            headers={**headers, "If-Match": '"1"'},
+        )
+
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == "talent_pool_membership_exists"
+    assert system.status_code == 409
+    assert system.json()["code"] == "system_talent_pool_membership_target"
+    assert system_source.status_code == 409
+    assert system_source.json()["code"] == "system_talent_pool_membership_source"
+    with app.state.identity_store.sync_session() as database:
+        unchanged = database.get(TalentPoolMembership, UUID(membership_id))
+        assert str(unchanged.pool_id) == source_pool_id
+        assert unchanged.version == 1
 
 
 def test_pool_list_and_detail_expose_persisted_system_key_without_name_inference(tmp_path) -> None:

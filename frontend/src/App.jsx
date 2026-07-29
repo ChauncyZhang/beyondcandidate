@@ -962,8 +962,6 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
                   setSelectedCandidate(null);
                 } else if (label === "面试") {
                   updateSelectedInterviewId(null);
-                } else if (!['工作台', '筛选任务', '报表', '设置'].includes(label)) {
-                  notify(`${label}模块将在后续原型中展开`);
                 }
               }}
             >

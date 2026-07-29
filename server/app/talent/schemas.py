@@ -50,7 +50,7 @@ class PoolPatch(StrictModel):
     purpose: str | None = Field(default=None, min_length=1, max_length=4000)
     visibility: Literal["private", "recruiting_team", "granted"] | None = None
     owner_id: UUID | None = None
-    suitable_roles: list[str] | None = Field(default=None, min_length=1, max_length=50)
+    suitable_roles: list[str] | None = Field(default=None, max_length=50)
     retention_days: int | None = Field(default=None, ge=30, le=3650)
     grants: list[GrantInput] | None = Field(default=None, max_length=100)
 
@@ -99,6 +99,7 @@ class MembershipCreate(StrictModel):
 
 
 class MembershipPatch(StrictModel):
+    pool_id: UUID | None = None
     owner_id: UUID | None = None
     suitable_roles: list[str] | None = Field(default=None, min_length=1, max_length=50)
     tags: list[str] | None = Field(default=None, max_length=100)

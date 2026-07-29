@@ -265,6 +265,13 @@
 .pool-name-cell > span:first-child,
 .pool-detail-hero > div > span { color: var(--blue); background: var(--blue-soft); border-radius: 8px; }
 .pool-detail-hero > strong { color: var(--ink); }
+.pool-detail-summary { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+.pool-detail-summary > strong { color: var(--ink); font-size: 24px; }
+.pool-detail-summary > strong small { display: block; color: var(--muted); font-size: 13px; text-align: right; }
+.pool-detail-actions { display: flex; gap: 8px; }
+.pool-action-message { margin: 0 0 14px; padding: 10px 12px; border: 1px solid #f0c9c3; border-radius: 7px; color: #9b2c20; background: #fff5f3; }
+.membership-move { display: grid; gap: 8px; }
+.membership-move label { min-width: 0; }
 
 .talent-person { color: var(--ink); }
 .talent-row-tags small { color: var(--ink-secondary); background: #f0f0f3; }
@@ -431,6 +438,9 @@
 
   .candidate-detail-hero,
   .pool-detail-hero { padding: 16px; }
+  .pool-detail-summary { width: 100%; align-items: stretch; }
+  .pool-detail-summary > strong small { display: inline; margin-left: 5px; text-align: left; }
+  .pool-detail-actions .button { flex: 1; }
   .candidate-profile { align-items: flex-start; }
   .candidate-profile > div > div:first-child,
   .masked-contacts,

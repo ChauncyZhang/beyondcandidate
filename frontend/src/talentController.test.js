@@ -4,13 +4,21 @@ import assert from "node:assert/strict";
 import { ApiError } from "./apiClient.js";
 import {
   buildReactivatedCandidateSummary,
+  cleanSuitableRoles,
   createTalentController,
   canAddCandidateToTalentPool,
   normalizeTalentMembership,
   normalizeTalentPool,
+  parseSuitableRoles,
   selectExactTalentPool,
   selectServerTalentCandidates,
 } from "./talentController.js";
+
+test("suitable roles discard punctuation-only values and parse Chinese or English semicolons", () => {
+  assert.deepEqual(cleanSuitableRoles(["；", "...", " AI 工程师 ", "AI 工程师", "产品经理"]), ["AI 工程师", "产品经理"]);
+  assert.deepEqual(parseSuitableRoles("AI 工程师；产品经理; 数据分析师、前端工程师"), ["AI 工程师", "产品经理", "数据分析师", "前端工程师"]);
+  assert.deepEqual(normalizeTalentPool({ id: "pool-1", suitable_roles: ["；", "，", "算法工程师"] }).suitableRoles, ["算法工程师"]);
+});
 
 
 test("talent pool and membership normalization keeps only the server projection", () => {
@@ -126,7 +134,8 @@ test("talent controller uses cursor APIs and versioned mutations", async () => {
       calls.push({ path, options });
       if (path.startsWith("/api/v1/talent-pools?")) return { data: [], meta: { next_cursor: "next" } };
       if (path.endsWith("/memberships?limit=25")) return { data: [], meta: { next_cursor: null } };
-      if (options.method === "PATCH") return { data: { id: "member-1", pool_id: "pool-1", candidate: { id: "candidate-1", display_name: "候选人" }, owner: { id: "user-1", display_name: "HR" }, suitable_roles: ["AI"], tags: [], reason: "保留", retention_until: "2028-01-01T00:00:00Z", status: "active", version: 4 } };
+      if (path === "/api/v1/talent-pools/pool-1" && options.method === "PATCH") return { data: { id: "pool-1", name: "AI 人才库", purpose: "复用", visibility: "private", suitable_roles: ["AI"], retention_days: 365, member_count: 0, version: 3 } };
+      if (options.method === "PATCH") return { data: { id: "member-1", pool_id: options.body.pool_id || "pool-1", candidate: { id: "candidate-1", display_name: "候选人" }, owner: { id: "user-1", display_name: "HR" }, suitable_roles: ["AI"], tags: [], reason: "保留", retention_until: "2028-01-01T00:00:00Z", status: "active", version: 4 } };
       if (path.endsWith("/reactivations")) return { data: { id: "application-2" } };
       return null;
     },
@@ -135,16 +144,27 @@ test("talent controller uses cursor APIs and versioned mutations", async () => {
 
   assert.equal((await controller.listPools({ limit: 25 })).nextCursor, "next");
   await controller.listMemberships("pool-1", { limit: 25 });
+  const pool = await controller.updatePool({ id: "pool-1", version: 2 }, { name: "AI 人才库", purpose: "复用", visibility: "仅自己可见", suitableRoles: [], retentionDays: 365 });
+  await controller.deletePool(pool);
   const updated = await controller.updateMembership({ id: "member-1", version: 3, ownerId: "user-1", suitableRoles: ["AI"], tags: [], reason: "保留", retentionUntil: "2028-01-01", status: "正常" });
-  await controller.removeMembership(updated, "岗位方向变化");
+  const moved = await controller.moveMembership(updated, "pool-2");
+  await controller.removeMembership(moved, "岗位方向变化");
   await controller.reactivate("member-1", "job-2");
 
   assert.equal(calls[0].path, "/api/v1/talent-pools?limit=25");
   assert.equal(calls[1].path, "/api/v1/talent-pools/pool-1/memberships?limit=25");
-  assert.equal(calls[2].options.ifMatch, '"3"');
+  assert.equal(calls[2].options.ifMatch, '"2"');
+  assert.equal(calls[2].options.body.visibility, "private");
+  assert.deepEqual(calls[2].options.body.suitable_roles, []);
   assert.equal(calls[3].options.method, "DELETE");
-  assert.equal(calls[3].options.ifMatch, '"4"');
-  assert.equal(calls[4].options.idempotencyKey, "idem-1");
+  assert.equal(calls[3].options.ifMatch, '"3"');
+  assert.equal(calls[4].options.ifMatch, '"3"');
+  assert.equal("pool_id" in calls[4].options.body, false);
+  assert.equal(calls[5].options.body.pool_id, "pool-2");
+  assert.equal(calls[5].options.ifMatch, '"4"');
+  assert.equal(calls[6].options.method, "DELETE");
+  assert.equal(calls[6].options.ifMatch, '"4"');
+  assert.equal(calls[7].options.idempotencyKey, "idem-1");
 });
 
 
