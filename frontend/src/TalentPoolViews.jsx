@@ -55,6 +55,7 @@ function PoolList({
   memberships,
   onOpen,
   onCreate,
+  onUpdate,
   status = "ready",
   error = "",
   onRetry,
@@ -66,6 +67,7 @@ function PoolList({
   const [query, setQuery] = useState("");
   const [visibility, setVisibility] = useState("全部范围");
   const [createOpen, setCreateOpen] = useState(false);
+  const [editingPool, setEditingPool] = useState(null);
   const filtered = pools.filter(
     (pool) =>
       `${pool.name}${pool.purpose}${pool.suitableRoles.join("")}`
@@ -177,16 +179,18 @@ function PoolList({
               <span>人才数</span>
               <span>默认保留</span>
               <span>最近活动</span>
-              <span />
+              <span>操作</span>
             </div>
             {filtered.map((pool) => (
-              <button
+              <div
                 className="pool-table-row"
-                type="button"
                 key={pool.id}
-                onClick={() => onOpen(pool.id)}
               >
-                <span className="pool-name-cell">
+                <button
+                  className="pool-name-cell pool-row-open"
+                  type="button"
+                  onClick={() => onOpen(pool.id)}
+                >
                   <span>
                     <BriefcaseBusiness size={17} />
                   </span>
@@ -194,7 +198,7 @@ function PoolList({
                     <strong>{pool.name}</strong>
                     <small>{pool.purpose}</small>
                   </span>
-                </span>
+                </button>
                 <span>{pool.suitableRoles.join("、") || "未设置"}</span>
                 <span>{pool.owner}</span>
                 <span>
@@ -209,8 +213,29 @@ function PoolList({
                   <strong>{pool.recentActivity}</strong>
                   <small>{pool.activity}</small>
                 </span>
-                <ChevronRight size={17} />
-              </button>
+                <span className="pool-row-actions">
+                  {!pool.systemKey ? (
+                    <button
+                      className="button secondary small"
+                      type="button"
+                      onClick={() => setEditingPool(pool)}
+                    >
+                      <Pencil size={15} />
+                      编辑
+                    </button>
+                  ) : (
+                    <small>系统管理</small>
+                  )}
+                  <button
+                    className="icon-button"
+                    type="button"
+                    aria-label={`查看人才库：${pool.name}`}
+                    onClick={() => onOpen(pool.id)}
+                  >
+                    <ChevronRight size={17} />
+                  </button>
+                </span>
+              </div>
             ))}
             {filtered.length === 0 && (
               <div className="talent-empty">
@@ -241,6 +266,13 @@ function PoolList({
             const created = await onCreate(pool);
             if (created) setCreateOpen(false);
           }}
+        />
+      )}
+      {editingPool && (
+        <EditPoolDialog
+          pool={editingPool}
+          onClose={() => setEditingPool(null)}
+          onSave={(form) => onUpdate(editingPool, form)}
         />
       )}
     </div>
@@ -453,13 +485,13 @@ export function TalentPoolWorkspace({ mode, setMode, selectedPoolId, setSelected
 
   function openPool(id) { setSelectedPoolId(id); setMode("detail"); }
   async function createPool(pool) { if (!serverBacked) { setPools((current) => [pool, ...current]); return pool; } try { const created = await controller.createPool(pool, actorId); if (!created) return null; setServerState((current) => ({ ...current, pools: [created, ...current.pools] })); onNotify("人才库已创建"); return created; } catch { onNotify("人才库创建失败，请检查名称和权限后重试"); return null; } }
-  async function updatePool(form) { if (!selectedPool || selectedPool.systemKey) return null; if (!serverBacked) { const saved = { ...selectedPool, ...form }; setPools((current) => current.map((item) => item.id === saved.id ? saved : item)); onNotify("人才库已更新"); return saved; } try { const saved = await controller.updatePool(selectedPool, form); setServerState((current) => ({ ...current, pools: current.pools.map((item) => item.id === saved.id ? saved : item) })); onNotify("人才库已更新"); return saved; } catch { onNotify("人才库更新失败，请刷新后重试"); return null; } }
+  async function updatePool(pool, form) { if (!pool || pool.systemKey) return null; if (!serverBacked) { const saved = { ...pool, ...form }; setPools((current) => current.map((item) => item.id === saved.id ? saved : item)); onNotify("人才库已更新"); return saved; } try { const saved = await controller.updatePool(pool, form); setServerState((current) => ({ ...current, pools: current.pools.map((item) => item.id === saved.id ? saved : item) })); onNotify("人才库已更新"); return saved; } catch { onNotify("人才库更新失败，请刷新后重试"); return null; } }
   async function deletePool() { if (!selectedPool || selectedPool.systemKey) return; const memberTotal = selectedPool.memberCount ?? activeMemberships.filter((item) => item.poolId === selectedPool.id).length; if (memberTotal > 0) { onNotify("请先移动或移除人才库中的候选人"); return; } try { if (serverBacked) await controller.deletePool(selectedPool); else setPools((current) => current.filter((item) => item.id !== selectedPool.id)); setSelectedPoolId(null); setMode("list"); onNotify("人才库已删除"); } catch { onNotify("人才库删除失败，请刷新后重试"); } }
   async function updateMember(updated) { if (!serverBacked) { setMemberships((current) => current.map((item) => item.id === updated.id ? updated : item)); return; } try { const saved = await controller.updateMembership(updated); setServerState((current) => ({ ...current, memberships: current.memberships.map((item) => item.id === saved.id ? saved : item) })); onNotify("人才信息已保存"); } catch { onNotify("人才信息保存失败，请刷新后重试"); } }
   async function moveMember(member, targetPoolId) { const sourcePool = activePools.find((item) => item.id === member.poolId); const targetPool = activePools.find((item) => item.id === targetPoolId); if (!sourcePool || !targetPool || sourcePool.systemKey || targetPool.systemKey) throw new Error("system talent pools cannot be moved manually"); if (!serverBacked) { setMemberships((current) => current.map((item) => item.id === member.id ? { ...item, poolId: targetPoolId } : item)); setPools((current) => current.map((pool) => ({ ...pool, memberIds: pool.id === member.poolId ? pool.memberIds.filter((id) => id !== member.candidateId) : pool.id === targetPoolId ? [...new Set([...pool.memberIds, member.candidateId])] : pool.memberIds }))); onNotify(`已移动到“${targetPool.name}”`); return; } const saved = await controller.moveMembership(member, targetPoolId); setServerState((current) => ({ ...current, memberships: current.memberships.map((item) => item.id === saved.id ? saved : item), pools: current.pools.map((pool) => pool.id === member.poolId ? { ...pool, memberCount: Math.max(0, pool.memberCount - 1) } : pool.id === targetPoolId ? { ...pool, memberCount: pool.memberCount + 1 } : pool) })); onNotify(`已移动到“${targetPool.name}”`); }
   async function removeMember(member) { if (!serverBacked) { setMemberships((current) => current.filter((item) => item.id !== member.id)); return; } try { await controller.removeMembership(member, "由招聘人员从人才库移出"); setServerState((current) => ({ ...current, memberships: current.memberships.filter((item) => item.id !== member.id), pools: current.pools.map((pool) => pool.id === member.poolId ? { ...pool, memberCount: Math.max(0, pool.memberCount - 1) } : pool) })); onNotify("已从人才库移出"); } catch { onNotify("移出失败，请刷新后重试"); } }
   async function referToReview(member) { try { const result = await controller.referToReview(member.id, member.version); if (!result.membership) throw new Error("referral membership missing"); setServerState((current) => ({ ...current, memberships: current.memberships.map((item) => item.id === result.membership.id ? result.membership : item) })); onReferralComplete(result.application); onNotify("已转交用人经理"); return result; } catch (error) { onNotify("转交失败，请刷新后重试"); throw error; } }
   async function reactivate(memberId, position) { if (!serverBacked) return onReactivateCandidate(memberId, position); return controller.reactivate(memberId, position.id); }
-  if (mode === "detail" && selectedPool) return <PoolDetail pool={selectedPool} pools={activePools} memberships={activeMemberships} candidates={candidates} positions={positions} onBack={() => { setSelectedPoolId(null); setMode("list"); }} onUpdatePool={updatePool} onDeletePool={deletePool} onUpdateMember={updateMember} onMove={moveMember} onRemove={removeMember} onReferMember={referToReview} onReactivateCandidate={reactivate} onOpenCandidate={onOpenCandidate} onNotify={onNotify} status={serverState.memberStatus} error={serverState.error} onRetry={() => void loadMembers(selectedPool.id)} nextCursor={serverState.memberCursor} loadingMore={serverState.loadingMembers} onLoadMore={() => void loadMembers(selectedPool.id, { cursor: serverState.memberCursor, append: true })} />;
-  return <PoolList pools={activePools} memberships={activeMemberships} onOpen={openPool} onCreate={createPool} status={serverState.poolStatus} error={serverState.error} onRetry={() => void loadPools()} nextCursor={serverState.poolCursor} loadingMore={serverState.loadingPools} onLoadMore={() => void loadPools({ cursor: serverState.poolCursor, append: true })} pageActionHost={pageActionHost} />;
+  if (mode === "detail" && selectedPool) return <PoolDetail pool={selectedPool} pools={activePools} memberships={activeMemberships} candidates={candidates} positions={positions} onBack={() => { setSelectedPoolId(null); setMode("list"); }} onUpdatePool={(form) => updatePool(selectedPool, form)} onDeletePool={deletePool} onUpdateMember={updateMember} onMove={moveMember} onRemove={removeMember} onReferMember={referToReview} onReactivateCandidate={reactivate} onOpenCandidate={onOpenCandidate} onNotify={onNotify} status={serverState.memberStatus} error={serverState.error} onRetry={() => void loadMembers(selectedPool.id)} nextCursor={serverState.memberCursor} loadingMore={serverState.loadingMembers} onLoadMore={() => void loadMembers(selectedPool.id, { cursor: serverState.memberCursor, append: true })} />;
+  return <PoolList pools={activePools} memberships={activeMemberships} onOpen={openPool} onCreate={createPool} onUpdate={updatePool} status={serverState.poolStatus} error={serverState.error} onRetry={() => void loadPools()} nextCursor={serverState.poolCursor} loadingMore={serverState.loadingPools} onLoadMore={() => void loadPools({ cursor: serverState.poolCursor, append: true })} pageActionHost={pageActionHost} />;
 }

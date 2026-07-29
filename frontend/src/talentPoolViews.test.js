@@ -85,9 +85,17 @@ test("ordinary pool details expose complete editing and conditional deletion", (
   assert.match(source, /function EditPoolDialog/);
   for (const label of ["人才库名称", "用途\/说明", "适合岗位", "可见范围", "保留天数"]) assert.match(source, new RegExp(label));
   assert.match(source, /该人才库仍有候选人，请先移动或移除后再删除/);
-  assert.match(source, /controller\.updatePool\(selectedPool, form\)/);
+  assert.match(source, /controller\.updatePool\(pool, form\)/);
   assert.match(source, /controller\.deletePool\(selectedPool\)/);
   assert.match(source, /if \(pool\.systemKey === "ai_screening_deferred"\) return <DeferredPoolDetail/);
+});
+
+test("ordinary pools expose a visible edit action from the list", () => {
+  assert.match(source, /<span>操作<\/span>/);
+  assert.match(source, /className="pool-row-actions"/);
+  assert.match(source, /!pool\.systemKey \? \(/);
+  assert.match(source, /<Pencil size=\{15\} \/>[\s\S]{0,80}编辑/);
+  assert.match(source, /onSave=\{\(form\) => onUpdate\(editingPool, form\)\}/);
 });
 
 test("member drawer confirms manual moves and excludes system pools", () => {
