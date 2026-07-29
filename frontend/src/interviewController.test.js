@@ -439,12 +439,15 @@ test("schedule candidates come only from server-backed pending applications", ()
     applicationId: APPLICATION_ID,
     serverBacked: true,
     stage: "待安排",
+    jobStatus: "open",
   };
   const records = [
     { ...pending, id: "fixture", serverBacked: false },
     pending,
     { ...pending, id: "interviewing", applicationId: "other", stage: "面试中" },
     { ...pending, id: "missing-application", applicationId: "" },
+    { ...pending, id: "closed-job", applicationId: "closed", jobStatus: "closed" },
+    { ...pending, id: "archived-job", applicationId: "archived", jobStatus: "archived" },
     pending,
   ];
 

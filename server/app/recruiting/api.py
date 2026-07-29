@@ -464,6 +464,7 @@ def _candidate_application_summaries(db, organization_id: UUID, application_ids:
     rows = db.execute(select(
         Application,
         Job.title,
+        Job.status,
         User.display_name,
         latest_result.c.rule_score,
         latest_result.c.recommendation,
@@ -489,6 +490,7 @@ def _candidate_application_summaries(db, organization_id: UUID, application_ids:
             "id": str(application.id),
             "job_id": str(application.job_id),
             "job_title": job_title,
+            "job_status": job_status,
             "resume_id": str(application.resume_id),
             "owner_id": str(application.owner_id),
             "owner_name": owner_name,
@@ -502,7 +504,7 @@ def _candidate_application_summaries(db, organization_id: UUID, application_ids:
             "recommendation": recommendation,
             **projections.get(application.id,{"route_result":None,"ai_score":None,"ai_recommendation":None,"llm_status":None,"llm_error_code":None,"llm_evaluation":None}),
         }
-        for application, job_title, owner_name, rule_score, recommendation in rows
+        for application, job_title, job_status, owner_name, rule_score, recommendation in rows
     }
 
 
@@ -1575,12 +1577,12 @@ def applications(candidate_id: UUID, request: Request):
     if isinstance(principal, JSONResponse): return principal
     with request.app.state.identity_store.sync_session() as db:
         if _load_candidate(db, principal, candidate_id) is None: return _denied(request)
-        rows = db.execute(select(Application, Job.title).join(Job, and_(Job.organization_id == Application.organization_id, Job.id == Application.job_id)).where(Application.organization_id == principal.organization_id, Application.candidate_id == candidate_id, _job_scope(principal)).order_by(Application.created_at.desc())).all()
-        application_ids = [application.id for application, _ in rows]
+        rows = db.execute(select(Application, Job.title, Job.status).join(Job, and_(Job.organization_id == Application.organization_id, Job.id == Application.job_id)).where(Application.organization_id == principal.organization_id, Application.candidate_id == candidate_id, _job_scope(principal)).order_by(Application.created_at.desc())).all()
+        application_ids = [application.id for application, _, _ in rows]
         projections=_screening_projections_for_applications(db,principal.organization_id,application_ids)
         next_rounds = _next_interview_rounds(db, principal.organization_id, application_ids)
         empty={"route_result":None,"ai_score":None,"ai_recommendation":None,"llm_status":None,"llm_error_code":None,"llm_evaluation":None}
-        return {"data": [{**_application_data(application), "job_title": job_title, "next_interview_round": next_rounds.get(application.id), **projections.get(application.id,empty)} for application, job_title in rows], "meta": {"count": len(rows)}}
+        return {"data": [{**_application_data(application), "job_title": job_title, "job_status": job_status, "next_interview_round": next_rounds.get(application.id), **projections.get(application.id,empty)} for application, job_title, job_status in rows], "meta": {"count": len(rows)}}
 
 
 @router.post("/jobs/{job_id}/applications", status_code=201, response_model=ApplicationResource)

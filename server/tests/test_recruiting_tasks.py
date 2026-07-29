@@ -6,11 +6,30 @@ import pytest
 from sqlalchemy import func, select
 
 from server.app.identity.models import Job
+from server.app.integrations.feishu.models import FeishuOrganizationConfig
+from server.app.queue.models import OutboxEvent
 from server.app.recruiting.models import Application, ApplicationReviewTask
 from server.app.recruiting.service import apply_application_workflow_action_record
 from server.app.recruiting.tasks import close_review_task, ensure_review_task
 from server.tests.test_recruiting_api import make_app
 from server.tests.test_screening_routing import seed_routing_case
+
+
+def enable_feishu(app, organization_id, actor_id):
+    with app.state.identity_store.sync_session() as db:
+        db.add(
+            FeishuOrganizationConfig(
+                organization_id=organization_id,
+                app_id="cli_test",
+                encrypted_app_secret=app.state.feishu_secret_cipher.encrypt("app-secret"),
+                redirect_uri="https://hr.example.test/api/v1/auth/feishu/callback",
+                calendar_id="primary",
+                enabled=True,
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+        )
+        db.commit()
 
 
 def test_review_task_creation_is_idempotent_and_uses_hiring_owner(tmp_path):
@@ -38,6 +57,48 @@ def test_review_task_creation_is_idempotent_and_uses_hiring_owner(tmp_path):
         assert first.ai_status == "succeeded"
         assert first.safe_error_code is None
         assert db.scalar(select(func.count(ApplicationReviewTask.id))) == 1
+
+
+def test_review_task_and_approval_queue_the_next_responsible_person(tmp_path):
+    app = make_app(tmp_path)
+    case = seed_routing_case(app, suffix="task-notification")
+    enable_feishu(app, case.organization_id, case.creator_id)
+
+    with app.state.identity_store.sync_session() as db:
+        application = db.get(Application, case.application_id)
+        application.stage = "review"
+        ensure_review_task(
+            db,
+            application=application,
+            job=db.get(Job, case.job_id),
+            ai_status="succeeded",
+        )
+        db.flush()
+        apply_application_workflow_action_record(
+            db,
+            case.organization_id,
+            case.application_id,
+            "review_approved",
+            expected_version=1,
+            actor_user_id=case.manager_id,
+            trace_id="trace-feishu-notification",
+        )
+        db.flush()
+
+        events = list(
+            db.scalars(
+                select(OutboxEvent)
+                .where(OutboxEvent.topic == "feishu.notification.send")
+                .order_by(OutboxEvent.created_at, OutboxEvent.id)
+            )
+        )
+        recipients_by_event = {
+            event.payload["event_type"]: event.aggregate_id for event in events
+        }
+        assert recipients_by_event == {
+            "review_requested": case.manager_id,
+            "interview_arrangement_requested": case.creator_id,
+        }
 
 
 def test_review_task_refreshes_failed_ai_state_after_successful_retry(tmp_path):

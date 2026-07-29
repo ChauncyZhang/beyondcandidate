@@ -36,6 +36,7 @@ test("candidate list safely encodes supported filters and normalizes server rows
             id: "application-1",
             job_id: "job/一",
             job_title: "平台 & AI",
+            job_status: "open",
             owner_id: "owner-1",
             owner_name: "张小北",
             stage: "deferred",
@@ -79,6 +80,7 @@ test("candidate list safely encodes supported filters and normalizes server rows
     candidateId: "candidate/一",
     applicationId: "application-1",
     jobId: "job/一",
+    jobStatus: "open",
     ownerId: "owner-1",
     name: "李 嘉明",
     role: "AI & RAG 工程师",
@@ -193,9 +195,9 @@ test("candidate review loads the exact selected application when the same candid
         contacts: [{ kind: "phone", value: "138****2468" }, { kind: "email", value: "lij***@mail.com" }],
       });
       if (path === `/api/v1/candidates/${candidateId}/applications`) return response([
-        { id: "application-other", candidate_id: candidateId, job_id: "job-2", job_title: "平台工程师", resume_id: "resume-2", owner_id: "user-2", stage: "rejected", source: "manual", human_conclusion: null, version: 4, updated_at: "2026-07-12T09:00:00+00:00" },
-        { id: "application-older", candidate_id: candidateId, job_id: jobId, job_title: "AI 工程师", resume_id: "resume-old", owner_id: "user-2", stage: "rejected", source: "manual", human_conclusion: "暂不合适：历史申请", version: 5, updated_at: "2026-07-12T10:00:00+00:00" },
-        { id: "application-1", candidate_id: candidateId, job_id: jobId, job_title: "AI 工程师", resume_id: "resume-1", owner_id: "user-1", stage: "review", source: "本地上传", human_conclusion: "需要补充：确认到岗时间", version: 2, updated_at: "2026-07-13T09:00:00+00:00", rule_score: 81, recommendation: "可沟通", ai_score: 86, ai_recommendation: "建议评审", llm_status: "succeeded", llm_evaluation: {
+        { id: "application-other", candidate_id: candidateId, job_id: "job-2", job_title: "平台工程师", job_status: "archived", resume_id: "resume-2", owner_id: "user-2", stage: "rejected", source: "manual", human_conclusion: null, version: 4, updated_at: "2026-07-12T09:00:00+00:00" },
+        { id: "application-older", candidate_id: candidateId, job_id: jobId, job_title: "AI 工程师", job_status: "open", resume_id: "resume-old", owner_id: "user-2", stage: "rejected", source: "manual", human_conclusion: "暂不合适：历史申请", version: 5, updated_at: "2026-07-12T10:00:00+00:00" },
+        { id: "application-1", candidate_id: candidateId, job_id: jobId, job_title: "AI 工程师", job_status: "open", resume_id: "resume-1", owner_id: "user-1", stage: "review", source: "本地上传", human_conclusion: "需要补充：确认到岗时间", version: 2, updated_at: "2026-07-13T09:00:00+00:00", rule_score: 81, recommendation: "可沟通", ai_score: 86, ai_recommendation: "建议评审", llm_status: "succeeded", llm_evaluation: {
           score: 86,
           recommendation: "建议评审",
           summary: "核心能力与岗位高度匹配。",
@@ -255,6 +257,7 @@ test("candidate review loads the exact selected application when the same candid
   assert.equal(review.candidateId, candidateId);
   assert.equal(review.applicationId, "application-1");
   assert.equal(review.jobId, jobId);
+  assert.equal(review.jobStatus, "open");
   assert.equal(review.score, 86);
   assert.equal(review.recommendation, "建议评审");
   assert.equal(review.llmSummary, "核心能力与岗位高度匹配。");

@@ -103,7 +103,7 @@ def config_payload(**overrides):
 
 def test_config_is_disabled_by_default_and_never_returns_plaintext(feishu_app) -> None:
     app, client = feishu_app
-    seed_user(app)
+    admin_id = seed_user(app)
     csrf = login(client)
 
     missing = client.get("/api/v1/settings/integrations/feishu")
@@ -122,12 +122,47 @@ def test_config_is_disabled_by_default_and_never_returns_plaintext(feishu_app) -
     assert saved.json()["data"]["app_secret_configured"] is True
     assert saved.headers["Cache-Control"] == "no-store"
 
+    with app.state.identity_store.sync_session() as db:
+        admin = db.get(User, admin_id)
+        db.add(
+            FeishuIdentityBinding(
+                organization_id=admin.organization_id,
+                user_id=admin.id,
+                union_id="on_admin",
+                open_id="ou_admin",
+                tenant_key="tenant",
+            )
+        )
+        db.commit()
+
     tested = client.post(
         "/api/v1/settings/integrations/feishu/test",
         headers=write_headers(csrf),
     )
     assert tested.status_code == 200
     assert tested.json()["data"]["last_test_status"] == "succeeded"
+    assert app.state.feishu_provider.messages[-1][0] == "ou_admin"
+    assert "招聘提醒测试成功" in app.state.feishu_provider.messages[-1][1]
+
+
+def test_connection_test_requires_the_current_admin_to_bind_feishu(feishu_app) -> None:
+    app, client = feishu_app
+    seed_user(app)
+    csrf = login(client)
+    assert client.put(
+        "/api/v1/settings/integrations/feishu",
+        json=config_payload(),
+        headers=write_headers(csrf),
+    ).status_code == 200
+
+    tested = client.post(
+        "/api/v1/settings/integrations/feishu/test",
+        headers=write_headers(csrf),
+    )
+
+    assert tested.status_code == 409
+    assert tested.json()["code"] == "feishu_test_user_unbound"
+    assert app.state.feishu_provider.messages == []
 
 
 def test_login_authorization_is_disabled_safely_until_configured(feishu_app) -> None:

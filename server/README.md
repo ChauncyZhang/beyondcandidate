@@ -195,6 +195,16 @@ can replay the same event. The system does not claim externally exactly-once del
 When shutdown arrives while a database claim is in flight, the worker does not start the
 returned item. It intentionally leaves the lease untouched; database-time lease expiry
 and stale-claim recovery make the same durable ID available to another worker.
+
+Feishu notifications must stay on the same outbox contract. Schedule only allowlisted
+`feishu.notification.send` events after confirming the organization integration is enabled,
+store only tenant/user/application/interview identifiers in the payload, and let the worker
+resolve candidate, job, interview, origin, current recipient binding, and the Chinese Card 2.0
+payload at delivery time. Keep card actions as `open_url` links to the platform and use the outbox
+UUID as the Feishu message idempotency key. Disabled configs,
+unbound recipients, stale feedback assignments, or completed feedback are successful no-ops;
+provider/network failures remain retryable without logging provider response bodies or private
+candidate data. Verify this path with `python -m pytest server/tests/test_feishu_notifications.py`.
 Production TLS must terminate upstream or use externally managed certificates mounted into
 Nginx with a production-specific server block. Never expose API, PostgreSQL, or MinIO ports.
 

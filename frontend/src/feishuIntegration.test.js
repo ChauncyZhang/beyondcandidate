@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { createApiClient } from "./apiClient.js";
-import { buildFeishuConfigPayload, getFeishuCallbackErrorCode, getFeishuConfigErrorMessage, getFeishuLoginErrorMessage, normalizeFeishuConfig, normalizeFeishuBinding, startFeishuAuthorization } from "./feishuIntegration.js";
+import { buildFeishuConfigPayload, getFeishuCallbackErrorCode, getFeishuConfigErrorMessage, getFeishuConnectionTestErrorMessage, getFeishuLoginErrorMessage, normalizeFeishuConfig, normalizeFeishuBinding, startFeishuAuthorization } from "./feishuIntegration.js";
 
 function response(body, status = 200, headers = {}) {
   return new Response(body == null ? null : JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
@@ -75,6 +75,12 @@ test("Feishu configuration errors explain validation failures without exposing s
     getFeishuConfigErrorMessage({ status: 503, code: "unexpected", detail: "database password" }),
     "飞书配置暂时无法保存，请稍后重试。当前输入已保留。",
   );
+});
+
+test("Feishu message tests distinguish account binding from bot permission failures", () => {
+  assert.match(getFeishuConnectionTestErrorMessage({ code: "feishu_test_user_unbound" }), /个人设置.*飞书账号/);
+  assert.match(getFeishuConnectionTestErrorMessage({ code: "feishu_request_failed" }), /机器人能力.*以应用身份发消息/);
+  assert.doesNotMatch(getFeishuConnectionTestErrorMessage({ code: "unknown", detail: "private" }), /private/);
 });
 
 test("Feishu authorization navigates only to an HTTPS Feishu URL", async () => {

@@ -653,6 +653,66 @@
 .settings-page .settings-table-row small { display: block; overflow-wrap: anywhere; }
 .settings-page .settings-table-row small { margin-top: 2px; color: var(--muted); font-size: 12px; }
 
+.settings-page .organization-settings .users-table .settings-table-head,
+.settings-page .organization-settings .users-table .settings-table-row {
+  min-width: 900px;
+  grid-template-columns: minmax(180px, 1.35fr) minmax(100px, .75fr) minmax(135px, 1fr) minmax(105px, .75fr) 72px minmax(120px, .9fr);
+}
+
+.settings-page .member-row-action { text-align: right; }
+.settings-page .member-row-action .text-button { white-space: nowrap; }
+.settings-page .mobile-field-label { display: none !important; }
+
+.settings-page .recruiting-scope-fields,
+.settings-page .recruiting-department-options {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.settings-page .recruiting-scope-fields { display: grid; gap: 10px; }
+.settings-page .recruiting-scope-fields > legend { padding: 0; color: var(--ink-secondary); font-weight: 600; }
+.settings-page .recruiting-scope-fields > p { margin: -4px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.settings-page .recruiting-scope-options { display: grid; gap: 8px; }
+.settings-page .recruiting-scope-options > label {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  cursor: pointer;
+}
+.settings-page .recruiting-scope-options input[type="radio"],
+.settings-page .recruiting-department-options input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 2px 0 0;
+  padding: 0;
+  flex: 0 0 auto;
+  accent-color: var(--blue);
+}
+.settings-page .recruiting-scope-options span,
+.settings-page .recruiting-scope-options strong,
+.settings-page .recruiting-scope-options small { min-width: 0; display: block; }
+.settings-page .recruiting-scope-options small { margin-top: 3px; color: var(--muted); line-height: 1.4; }
+.settings-page .recruiting-department-options {
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px 12px;
+}
+.settings-page .recruiting-department-options legend { padding: 0 5px; color: var(--ink-secondary); font-size: 13px; font-weight: 600; }
+.settings-page .recruiting-department-options label { min-width: 0; display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.settings-page .recruiting-department-options label span { min-width: 0; overflow-wrap: anywhere; }
+.settings-page .recruiting-department-options > p,
+.settings-page .recruiting-department-options .field-error { grid-column: 1 / -1; margin: 0; color: #a51f2c; font-size: 13px; line-height: 1.5; }
+
 .settings-page .department-list {
   padding: 0;
   display: grid;
@@ -1232,11 +1292,15 @@
   .settings-page .settings-table { padding: 7px; border: 0; background: #f5f5f7; display: grid; gap: 7px; overflow: visible; }
   .settings-page .settings-table-head { display: none; }
   .settings-page .settings-table-row { min-width: 0; min-height: 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
-  .settings-page .organization-settings .users-table .settings-table-row { min-width: 0; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "user status" "department role"; gap: 9px 12px; }
+  .settings-page .organization-settings .users-table .settings-table-row { min-width: 0; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "user status" "department role" "scope scope" "action action"; gap: 9px 12px; }
   .settings-page .organization-settings .users-table .settings-table-row > span:nth-child(1) { grid-area: user; }
   .settings-page .organization-settings .users-table .settings-table-row > span:nth-child(2) { grid-area: department; }
   .settings-page .organization-settings .users-table .settings-table-row > span:nth-child(3) { grid-area: role; text-align: right; }
-  .settings-page .organization-settings .users-table .settings-table-row > span:nth-child(4) { grid-area: status; text-align: right; }
+  .settings-page .organization-settings .users-table .settings-table-row > span:nth-child(4) { grid-area: scope; }
+  .settings-page .organization-settings .users-table .settings-table-row > span:nth-child(5) { grid-area: status; text-align: right; }
+  .settings-page .organization-settings .users-table .settings-table-row > span:nth-child(6) { grid-area: action; text-align: right; }
+  .settings-page .organization-settings .mobile-field-label { margin-bottom: 3px; display: block !important; color: var(--muted); font-size: 12px; font-weight: 400; }
+  .settings-page .recruiting-department-options { grid-template-columns: 1fr; }
   .settings-page .department-list { grid-template-columns: 1fr; }
   .settings-page .department-list > button { align-items: flex-start; flex-direction: column; }
   .settings-page .department-list span { text-align: left; }

@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import CheckConstraint, JSON, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Integer, String, UniqueConstraint, Uuid
+from sqlalchemy import CheckConstraint, JSON, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Index, Integer, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -76,6 +76,10 @@ class WorkflowTemplate(Timestamped, Base):
 class User(Timestamped, Base):
     __tablename__ = "users"
     __table_args__ = (
+        CheckConstraint(
+            "recruiting_scope_type IN ('jobs','departments','organization')",
+            name="ck_users_recruiting_scope_type",
+        ),
         UniqueConstraint("organization_id", "normalized_email"),
         UniqueConstraint("organization_id", "id"),
         ForeignKeyConstraint(
@@ -94,8 +98,14 @@ class User(Timestamped, Base):
     failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_login_window_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recruiting_scope_type: Mapped[str] = mapped_column(
+        String(16), default="jobs", server_default="jobs"
+    )
     organization: Mapped[Organization] = relationship()
     roles: Mapped[list[UserRole]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    recruiting_department_scopes: Mapped[list[UserRecruitingDepartmentScope]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class UserRole(Timestamped, Base):
@@ -109,6 +119,31 @@ class UserRole(Timestamped, Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     role: Mapped[str] = mapped_column(String(32))
     user: Mapped[User] = relationship(back_populates="roles")
+
+
+class UserRecruitingDepartmentScope(Base):
+    __tablename__ = "user_recruiting_department_scopes"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["organization_id", "user_id"],
+            ["users.organization_id", "users.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "department_id"],
+            ["departments.organization_id", "departments.id"],
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_user_recruiting_department_scopes_department",
+            "organization_id",
+            "department_id",
+        ),
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    department_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    user: Mapped[User] = relationship(back_populates="recruiting_department_scopes")
 
 
 class UserSession(Timestamped, Base):

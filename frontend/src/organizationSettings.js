@@ -9,6 +9,7 @@ const ROLE_LABELS = new Map([
 ]);
 const ALL_INVITE_ROLES = [...ROLE_LABELS].map(([value, label]) => ({ value, label }));
 const RECRUITING_ADMIN_INVITE_ROLES = ALL_INVITE_ROLES.filter(({ value }) => ["recruiter", "hiring_manager", "interviewer"].includes(value));
+const RECRUITING_SCOPE_TYPES = new Set(["jobs", "departments", "organization"]);
 
 function safeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -16,6 +17,26 @@ function safeString(value) {
 
 function safeCount(value) {
   return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function normalizeRecruitingDepartmentIds(value) {
+  return Array.isArray(value) ? [...new Set(value.map(safeString).filter(Boolean))] : [];
+}
+
+function normalizeRecruitingScopeType(value) {
+  return RECRUITING_SCOPE_TYPES.has(value) ? value : "jobs";
+}
+
+export function isRecruitingScopeValid(scopeType, departmentIds) {
+  return normalizeRecruitingScopeType(scopeType) !== "departments" || normalizeRecruitingDepartmentIds(departmentIds).length > 0;
+}
+
+export function getRecruitingScopeLabel(user) {
+  if (user?.roleValues?.includes("recruiting_admin")) return "全公司";
+  if (!user?.roleValues?.includes("recruiter")) return "-";
+  if (user.recruitingScopeType === "organization") return "全公司";
+  if (user.recruitingScopeType === "departments") return `${user.recruitingDepartmentIds.length} 个部门`;
+  return "指定职位";
 }
 
 function normalizeDepartment(value) {
@@ -50,6 +71,8 @@ function normalizeDepartmentDetail(value) {
 function normalizeUser(value) {
   const roleValues = Array.isArray(value?.roles) ? value.roles : [];
   const roles = roleValues.map((role) => ROLE_LABELS.get(role) || safeString(role)).filter(Boolean);
+  const recruitingScopeType = normalizeRecruitingScopeType(value?.recruiting_scope_type);
+  const recruitingDepartmentIds = normalizeRecruitingDepartmentIds(value?.recruiting_department_ids);
   const status = value?.status === "invited" || value?.status === "pending"
     ? "待激活"
     : value?.status === "active" ? "启用" : value?.status === "disabled" ? "停用" : safeString(value?.status) || "未知";
@@ -59,8 +82,11 @@ function normalizeUser(value) {
     email: safeString(value?.email),
     departmentId: safeString(value?.department_id),
     department: safeString(value?.department_name) || "未分配部门",
+    roleValues,
     roles,
     role: roles.join("、") || "未分配角色",
+    recruitingScopeType,
+    recruitingDepartmentIds,
     status,
   };
 }
@@ -94,17 +120,54 @@ export function createOrganizationSettingsController({ client = apiClient, creat
     async inviteMember(form) {
       patchState({ actionStatus: "saving", actionError: "", invitation: null });
       try {
-        const result = await client.inviteUser({
+        const role = safeString(form?.role);
+        const recruitingScopeType = normalizeRecruitingScopeType(form?.recruitingScopeType);
+        const recruitingDepartmentIds = normalizeRecruitingDepartmentIds(form?.recruitingDepartmentIds);
+        if (role === "recruiter" && !isRecruitingScopeValid(recruitingScopeType, recruitingDepartmentIds)) {
+          const error = new Error("负责招聘部门至少选择一项");
+          error.code = "RECRUITING_DEPARTMENT_REQUIRED";
+          throw error;
+        }
+        const body = {
           display_name: safeString(form?.displayName),
           email: safeString(form?.email),
           department_id: safeString(form?.departmentId),
-          role: safeString(form?.role),
-        }, { idempotencyKey: createIdempotencyKey() });
+          role,
+        };
+        if (role === "recruiter") {
+          body.recruiting_scope_type = recruitingScopeType;
+          body.recruiting_department_ids = recruitingScopeType === "departments" ? recruitingDepartmentIds : [];
+        }
+        const result = await client.inviteUser(body, { idempotencyKey: createIdempotencyKey() });
         const invitation = { token: safeString(result?.invitation?.token), expiresAt: safeString(result?.invitation?.expires_at) };
         patchState({ actionStatus: "success", users: [normalizeUser(result?.user), ...state.users.filter((user) => user.id !== result?.user?.id)], invitation });
         return invitation;
       } catch (error) {
-        patchState({ actionStatus: "error", actionError: error?.kind === "unavailable" ? "邀请暂时无法发送，请稍后重试。" : "邀请发送失败，请核对信息后重试。" });
+        patchState({ actionStatus: "error", actionError: error?.code === "RECRUITING_DEPARTMENT_REQUIRED" ? error.message : error?.kind === "unavailable" ? "邀请暂时无法发送，请稍后重试。" : "邀请发送失败，请核对信息后重试。" });
+        throw error;
+      }
+    },
+    async updateRecruitingScope(userId, form) {
+      patchState({ actionStatus: "saving", actionError: "" });
+      try {
+        const recruitingScopeType = normalizeRecruitingScopeType(form?.recruitingScopeType);
+        const recruitingDepartmentIds = normalizeRecruitingDepartmentIds(form?.recruitingDepartmentIds);
+        if (!isRecruitingScopeValid(recruitingScopeType, recruitingDepartmentIds)) {
+          const error = new Error("负责招聘部门至少选择一项");
+          error.code = "RECRUITING_DEPARTMENT_REQUIRED";
+          throw error;
+        }
+        const updatedUser = normalizeUser(await client.updateRecruitingScope(userId, {
+          recruiting_scope_type: recruitingScopeType,
+          recruiting_department_ids: recruitingScopeType === "departments" ? recruitingDepartmentIds : [],
+        }));
+        patchState({
+          actionStatus: "success",
+          users: state.users.map((user) => user.id === updatedUser.id ? updatedUser : user),
+        });
+        return updatedUser;
+      } catch (error) {
+        patchState({ actionStatus: "error", actionError: error?.code === "RECRUITING_DEPARTMENT_REQUIRED" ? error.message : error?.kind === "unavailable" ? "招聘范围暂时无法保存，请稍后重试。" : "招聘范围保存失败，请检查权限后重试。" });
         throw error;
       }
     },

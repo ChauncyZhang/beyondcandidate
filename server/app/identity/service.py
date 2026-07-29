@@ -182,6 +182,9 @@ class IdentityService:
             select(UserSession)
             .options(
                 selectinload(UserSession.user).selectinload(User.roles),
+                selectinload(UserSession.user).selectinload(
+                    User.recruiting_department_scopes
+                ),
                 selectinload(UserSession.user).selectinload(User.organization),
             )
             .where(UserSession.token_hash == hash_token(token))
@@ -387,6 +390,11 @@ class IdentityService:
                 organization_id=record.organization_id,
                 roles=frozenset(role.role for role in record.user.roles),
                 active=True,
+                recruiting_scope_type=record.user.recruiting_scope_type,
+                recruiting_department_ids=frozenset(
+                    scope.department_id
+                    for scope in record.user.recruiting_department_scopes
+                ),
             )
 
     def logout(self, token: str, csrf: str, *, trace_id: str, network: str | None) -> None:

@@ -16,7 +16,7 @@ export function isInterviewStartStrictlyFuture(date, time, now = new Date()) {
   return Number.isFinite(startsAt) && Number.isFinite(reference) && startsAt > reference;
 }
 
-export function buildWorkweekColumns(reference = new Date()) {
+export function buildWeekColumns(reference = new Date()) {
   const today = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate());
   const monday = new Date(today);
   monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
@@ -24,7 +24,7 @@ export function buildWorkweekColumns(reference = new Date()) {
   const tomorrow = new Date(today);
   tomorrow.setDate(today.getDate() + 1);
   const tomorrowKey = localDateKey(tomorrow);
-  return Array.from({ length: 5 }, (_, index) => {
+  return Array.from({ length: 7 }, (_, index) => {
     const date = new Date(monday);
     date.setDate(monday.getDate() + index);
     const key = localDateKey(date);
@@ -34,7 +34,7 @@ export function buildWorkweekColumns(reference = new Date()) {
   });
 }
 
-export function isInWorkweek(date, columns) {
+export function isInWeek(date, columns) {
   return Boolean(date && columns.length && date >= columns[0][0] && date <= columns.at(-1)[0]);
 }
 

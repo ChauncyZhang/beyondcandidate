@@ -14,6 +14,7 @@ from server.app.identity.api import problem, session_token
 from server.app.identity.models import AuditLog, Job, JobCollaborator, User, UserRole, UserStatus, WorkflowTemplate
 from server.app.identity.policy import Principal
 from server.app.identity.service import InvalidSession
+from server.app.integrations.feishu.notifications import schedule_feishu_notification
 from server.app.integrations.feishu.sync import schedule_interview_sync
 from server.app.interviews.domain import CalendarContact, build_calendar_invitation
 from server.app.interviews.availability import INTERNAL_AVAILABILITY_PROVIDER, privacy_safe_availability
@@ -208,6 +209,7 @@ def _load_application_for_management(db, principal: Principal, application_id: U
         .where(
             Application.organization_id == principal.organization_id,
             Application.id == application_id,
+            Job.status == "open",
             Candidate.deleted_at.is_(None),
             AUTH.job_predicate(principal, RecruitingAction.TRANSITION, Job),
         )
@@ -607,6 +609,28 @@ def _advance_application_if_interviews_complete(
             recalculate_candidate_retention(db, organization_id, application.candidate_id)
     elif application.stage not in {"decision", "interview_pending"}:
         raise InvalidStateTransition
+    job = db.scalar(
+        select(Job).where(
+            Job.organization_id == organization_id,
+            Job.id == application.job_id,
+        )
+    )
+    if job is None:
+        raise InvalidStateTransition
+    if next_round_name is not None:
+        event_type = "next_interview_requested"
+        recipient_ids = [application.owner_id]
+    else:
+        event_type = "hiring_decision_requested"
+        recipient_ids = [job.hiring_owner_id or job.owner_id]
+    schedule_feishu_notification(
+        db,
+        organization_id=organization_id,
+        recipient_user_ids=recipient_ids,
+        event_type=event_type,
+        application_id=application.id,
+        actor_user_id=actor_user_id,
+    )
     return True, next_round_name
 
 
@@ -960,6 +984,17 @@ def create_interview(payload: InterviewCreate, request: Request, idempotency_key
                     or locked_application.candidate_id != candidate_id
                 ):
                     raise InvalidStateTransition
+                active_job = db.scalar(
+                    select(Job)
+                    .where(
+                        Job.organization_id == principal.organization_id,
+                        Job.id == locked_application.job_id,
+                        Job.status == "open",
+                    )
+                    .with_for_update()
+                )
+                if active_job is None:
+                    raise InvalidStateTransition
                 if locked_application.stage == "interview_pending":
                     managed, expected_round = _expected_interview_round(
                         db, locked_application
@@ -1063,6 +1098,16 @@ def create_interview(payload: InterviewCreate, request: Request, idempotency_key
                     db, principal.organization_id, candidate_id
                 )
                 schedule_interview_sync(db, interview, "create")
+                schedule_feishu_notification(
+                    db,
+                    organization_id=principal.organization_id,
+                    recipient_user_ids=participant_ids,
+                    event_type="interview_scheduled",
+                    application_id=locked_application.id,
+                    interview_id=interview.id,
+                    actor_user_id=principal.user_id,
+                    exclude_actor=True,
+                )
                 return 201, {"data": _interview_data(db, interview)}
 
             status_code, body = persisted_idempotent(
@@ -1166,16 +1211,17 @@ def patch_interview(interview_id: UUID, payload: InterviewPatch, request: Reques
             return problem(request, 422, "validation_failed", "meeting_url is required for video interviews.")
         if final_method == "onsite" and not final_location:
             return problem(request, 422, "validation_failed", "location is required for onsite interviews.")
+        previous_participant_ids = list(
+            db.scalars(
+                select(InterviewParticipant.user_id).where(
+                    InterviewParticipant.organization_id == principal.organization_id,
+                    InterviewParticipant.interview_id == interview.id,
+                )
+            ).all()
+        )
         participants = payload.participants
         if participants is None:
-            participant_ids = list(
-                db.scalars(
-                    select(InterviewParticipant.user_id).where(
-                        InterviewParticipant.organization_id == principal.organization_id,
-                        InterviewParticipant.interview_id == interview.id,
-                    )
-                ).all()
-            )
+            participant_ids = previous_participant_ids
         else:
             participant_ids = [item.user_id for item in participants]
             if not _validate_participants(db, principal.organization_id, participant_ids):
@@ -1271,6 +1317,27 @@ def patch_interview(interview_id: UUID, payload: InterviewPatch, request: Reques
                 db, principal.organization_id, candidate_id
             )
             schedule_interview_sync(db, interview, "update")
+            schedule_feishu_notification(
+                db,
+                organization_id=principal.organization_id,
+                recipient_user_ids=participant_ids,
+                event_type="interview_rescheduled",
+                application_id=interview.application_id,
+                interview_id=interview.id,
+                actor_user_id=principal.user_id,
+                exclude_actor=True,
+            )
+            removed_participant_ids = set(previous_participant_ids) - set(participant_ids)
+            if removed_participant_ids:
+                schedule_feishu_notification(
+                    db,
+                    organization_id=principal.organization_id,
+                    recipient_user_ids=removed_participant_ids,
+                    event_type="interview_assignment_removed",
+                    application_id=interview.application_id,
+                    interview_id=interview.id,
+                    actor_user_id=principal.user_id,
+                )
             body = {"data": _interview_data(db, interview)}
             db.commit()
             response = JSONResponse(body)
@@ -1478,6 +1545,35 @@ def transition_interview(
                 )
                 if target == "cancelled":
                     schedule_interview_sync(db, locked, "cancel")
+                    schedule_feishu_notification(
+                        db,
+                        organization_id=principal.organization_id,
+                        recipient_user_ids=[participant.user_id for participant in participants],
+                        event_type="interview_cancelled",
+                        application_id=locked.application_id,
+                        interview_id=locked.id,
+                        actor_user_id=principal.user_id,
+                        exclude_actor=True,
+                    )
+                elif target == "completed" and locked.status == "pending_feedback":
+                    feedback_user_ids = list(
+                        db.scalars(
+                            select(InterviewParticipant.user_id).where(
+                                InterviewParticipant.organization_id == principal.organization_id,
+                                InterviewParticipant.interview_id == locked.id,
+                                InterviewParticipant.required_feedback.is_(True),
+                            )
+                        ).all()
+                    )
+                    schedule_feishu_notification(
+                        db,
+                        organization_id=principal.organization_id,
+                        recipient_user_ids=feedback_user_ids,
+                        event_type="feedback_requested",
+                        application_id=locked.application_id,
+                        interview_id=locked.id,
+                        actor_user_id=principal.user_id,
+                    )
                 return 200, {"data": _interview_data(db, locked)}
 
             status_code, body = persisted_idempotent(

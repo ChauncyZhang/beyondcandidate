@@ -165,7 +165,7 @@ export function selectSchedulableCandidates(records) {
   const applicationIds = new Set();
   return safeArray(records).filter((record) => {
     const applicationId = safeString(record?.applicationId);
-    if (record?.serverBacked !== true || record?.stage !== "待安排" || !applicationId || applicationIds.has(applicationId)) {
+    if (record?.serverBacked !== true || record?.stage !== "待安排" || record?.jobStatus !== "open" || !applicationId || applicationIds.has(applicationId)) {
       return false;
     }
     applicationIds.add(applicationId);

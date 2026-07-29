@@ -62,6 +62,16 @@ export function getFeishuConfigErrorMessage(error) {
   return "飞书配置暂时无法保存，请稍后重试。当前输入已保留。";
 }
 
+export function getFeishuConnectionTestErrorMessage(error) {
+  if (error?.code === "feishu_test_user_unbound") {
+    return "当前账号尚未绑定飞书，请先到“个人设置 → 飞书账号”完成绑定，再发送测试提醒。";
+  }
+  if (["feishu_request_failed", "feishu_response_invalid"].includes(error?.code)) {
+    return "测试消息发送失败，请确认飞书应用已开启机器人能力和“以应用身份发消息”权限，并已发布最新版本。";
+  }
+  return "飞书凭据或消息服务暂时不可用，现有招聘功能不受影响。";
+}
+
 export async function startFeishuAuthorization(authorize, navigate = (url) => window.location.assign(url)) {
   const result = await authorize();
   const authorizationUrl = new URL(result?.authorization_url || "");

@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -56,6 +56,12 @@ def test_interview_create_queues_enabled_feishu_sync_with_durable_idempotency(tm
     with app.state.identity_store.sync_session() as db:
         sync = db.scalar(select(FeishuInterviewSync).where(FeishuInterviewSync.interview_id == interview_id))
         event = db.scalar(select(OutboxEvent).where(OutboxEvent.aggregate_id == interview_id))
+        notification = db.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.topic == "feishu.notification.send",
+                OutboxEvent.aggregate_id == seed["interviewer_id"],
+            )
+        )
         assert sync.sync_status == "pending"
         assert sync.desired_action == "create"
         assert event.topic == "feishu.calendar.create"
@@ -65,6 +71,13 @@ def test_interview_create_queues_enabled_feishu_sync_with_durable_idempotency(tm
             "sync_id": str(sync.id),
         }
         assert str(event.id)
+        assert notification.payload == {
+            "organization_id": str(sync.organization_id),
+            "recipient_user_id": str(seed["interviewer_id"]),
+            "event_type": "interview_scheduled",
+            "application_id": str(seed["application_id"]),
+            "interview_id": str(interview_id),
+        }
 
 
 def test_interview_create_degrades_to_disabled_sync_without_outbox(tmp_path) -> None:
@@ -83,6 +96,63 @@ def test_interview_create_degrades_to_disabled_sync_without_outbox(tmp_path) -> 
         sync = db.scalar(select(FeishuInterviewSync).where(FeishuInterviewSync.interview_id == interview_id))
         assert sync.sync_status == "disabled"
         assert db.scalar(select(OutboxEvent).where(OutboxEvent.aggregate_id == interview_id)) is None
+
+
+def test_reschedule_notifies_new_and_removed_interviewers_separately(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with TestClient(app) as client:
+        headers = login(client, "interview-admin@example.test")
+        assert client.put(
+            "/api/v1/settings/integrations/feishu",
+            headers=headers,
+            json={
+                "app_id": "cli_test",
+                "app_secret": "app-secret-value",
+                "redirect_uri": "https://hr.example.test/api/v1/auth/feishu/callback",
+                "calendar_id": "primary",
+                "enabled": True,
+            },
+        ).status_code == 200
+        created, headers = create_interview(
+            client,
+            seed,
+            key="feishu-participant-create",
+            payload=_future_payload(seed),
+        )
+        interview_id = created.json()["data"]["id"]
+        start = datetime(2030, 7, 21, 8, 0, tzinfo=timezone.utc)
+        updated = client.patch(
+            f"/api/v1/interviews/{interview_id}",
+            headers={**headers, "If-Match": '"1"'},
+            json={
+                "starts_at": start.isoformat(),
+                "ends_at": (start + timedelta(minutes=45)).isoformat(),
+                "participants": [
+                    {
+                        "user_id": str(seed["other_interviewer_id"]),
+                        "role": "interviewer",
+                        "required_feedback": True,
+                    }
+                ],
+            },
+        )
+        assert updated.status_code == 200
+
+    with app.state.identity_store.sync_session() as db:
+        events = list(
+            db.scalars(
+                select(OutboxEvent).where(
+                    OutboxEvent.topic == "feishu.notification.send"
+                )
+            )
+        )
+        events = [event for event in events if event.payload.get("interview_id") == interview_id]
+        recipients = {
+            (event.payload["event_type"], event.aggregate_id) for event in events
+        }
+        assert ("interview_rescheduled", seed["other_interviewer_id"]) in recipients
+        assert ("interview_assignment_removed", seed["interviewer_id"]) in recipients
 
 
 def test_outbox_handler_creates_event_and_persists_retry_safe_sync_status(tmp_path) -> None:

@@ -22,6 +22,11 @@ before(async () => {
 
 async function openAuthenticatedPage(viewport) {
   const context = await browser.newContext({ viewport });
+  let users = [
+    { id: "user-1", display_name: "Admin", email: "admin@example.test", department_id: "dep-1", department_name: "技术部", roles: ["recruiting_admin"], status: "active", recruiting_scope_type: "organization", recruiting_department_ids: [] },
+    { id: "user-2", display_name: "林岚", email: "lin@example.test", department_id: "dep-1", department_name: "技术部", roles: ["recruiter"], status: "active", recruiting_scope_type: "departments", recruiting_department_ids: ["dep-1"] },
+    { id: "user-3", display_name: "周宁", email: "zhou@example.test", department_id: "dep-1", department_name: "技术部", roles: ["hiring_manager"], status: "active", recruiting_scope_type: "organization", recruiting_department_ids: [] },
+  ];
   await context.route("**/api/v1/**", async (route) => {
     const pathname = new URL(route.request().url()).pathname.replace(/\/$/, "");
     if (pathname === "/api/v1/me") {
@@ -45,8 +50,15 @@ async function openAuthenticatedPage(viewport) {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [{ id: "dep-1", name: "技术部", parent_id: null, member_count: 1, job_count: 1 }] }) });
       return;
     }
-    if (pathname === "/api/v1/settings/users") {
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [{ id: "user-1", display_name: "Admin", email: "admin@example.test", department_id: "dep-1", department_name: "技术部", roles: ["recruiting_admin"], status: "active" }] }) });
+    if (pathname === "/api/v1/settings/users" && route.request().method() === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: users }) });
+      return;
+    }
+    if (pathname === "/api/v1/settings/users/user-2/recruiting-scope" && route.request().method() === "PATCH") {
+      const body = route.request().postDataJSON();
+      assert.deepEqual(body, { recruiting_scope_type: "organization", recruiting_department_ids: [] });
+      users = users.map((user) => user.id === "user-2" ? { ...user, ...body } : user);
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: users.find((user) => user.id === "user-2") }) });
       return;
     }
     if (pathname === "/api/v1/settings/integrations/feishu") {
@@ -282,8 +294,66 @@ test("invite member opens a usable server-backed invitation drawer", { timeout: 
     await drawer.waitFor();
     await drawer.getByLabel("姓名", { exact: true }).fill("林岚");
     await drawer.getByLabel("工作邮箱", { exact: true }).fill("linlan@example.test");
-    await drawer.getByLabel("部门").selectOption("dep-1");
+    await drawer.getByLabel("所属部门", { exact: true }).selectOption("dep-1");
     assert.equal(await drawer.getByRole("button", { name: "发送邀请", exact: true }).isEnabled(), true);
+  } finally {
+    await context.close();
+  }
+});
+
+test("recruiting scope renders conditionally, validates departments, and refreshes after save", { timeout: 60_000 }, async () => {
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 });
+  try {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    const rows = page.locator(".users-table .settings-table-row");
+    await rows.filter({ hasText: "林岚" }).waitFor();
+    assert.match(await rows.filter({ hasText: "Admin" }).innerText(), /全公司/);
+    assert.match(await rows.filter({ hasText: "林岚" }).innerText(), /1 个部门/);
+    assert.match(await rows.filter({ hasText: "周宁" }).innerText(), /-/);
+    assert.equal(await page.getByRole("button", { name: "配置招聘范围", exact: true }).count(), 1);
+
+    await page.getByRole("button", { name: "邀请成员", exact: true }).click();
+    const inviteDrawer = page.getByRole("dialog", { name: "邀请成员", exact: true });
+    const scopeGroup = inviteDrawer.getByRole("group", { name: "负责招聘范围", exact: true });
+    await scopeGroup.waitFor();
+    await inviteDrawer.getByLabel("姓名", { exact: true }).fill("新专员");
+    await inviteDrawer.getByLabel("工作邮箱", { exact: true }).fill("new@example.test");
+    await inviteDrawer.getByLabel("所属部门", { exact: true }).selectOption("dep-1");
+    await inviteDrawer.getByLabel(/^指定部门/).check();
+    assert.equal(await inviteDrawer.getByRole("button", { name: "发送邀请", exact: true }).isDisabled(), true);
+    assert.match(await inviteDrawer.getByRole("alert").innerText(), /至少选择一个负责招聘部门/);
+    await inviteDrawer.getByLabel("技术部", { exact: true }).check();
+    assert.equal(await inviteDrawer.getByRole("button", { name: "发送邀请", exact: true }).isEnabled(), true);
+    await inviteDrawer.getByLabel("角色", { exact: true }).selectOption("interviewer");
+    assert.equal(await inviteDrawer.getByRole("group", { name: "负责招聘范围", exact: true }).count(), 0);
+    await inviteDrawer.getByRole("button", { name: "取消", exact: true }).click();
+
+    await page.getByRole("button", { name: "配置招聘范围", exact: true }).click();
+    const scopeDrawer = page.getByRole("dialog", { name: "配置招聘范围", exact: true });
+    await scopeDrawer.getByLabel(/^全公司/).check();
+    await scopeDrawer.getByRole("button", { name: "保存招聘范围", exact: true }).click();
+    await scopeDrawer.waitFor({ state: "detached" });
+    assert.match(await rows.filter({ hasText: "林岚" }).innerText(), /全公司/);
+  } finally {
+    await context.close();
+  }
+});
+
+test("member recruiting scope cards stay within a narrow mobile viewport", { timeout: 60_000 }, async () => {
+  const { context, page } = await openAuthenticatedPage({ width: 390, height: 844 });
+  try {
+    await page.getByRole("button", { name: "打开主导航", exact: true }).click();
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.locator(".users-table .settings-table-row").first().waitFor();
+    await assertNoHorizontalOverflow(page, "390px recruiting scope members");
+    const boxes = await page.locator(".users-table .settings-table-row").evaluateAll((elements) => elements.map((element) => {
+      const box = element.getBoundingClientRect();
+      return { left: box.left, right: box.right, width: box.width };
+    }));
+    assert.ok(boxes.every((box) => box.left >= 0 && box.right <= 390 && box.width > 0), JSON.stringify(boxes));
+    const gridAreas = await page.locator(".users-table .settings-table-row").first().evaluate((element) => getComputedStyle(element).gridTemplateAreas);
+    assert.match(gridAreas, /scope/);
+    assert.match(gridAreas, /action/);
   } finally {
     await context.close();
   }

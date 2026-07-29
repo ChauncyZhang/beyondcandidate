@@ -4,7 +4,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
-from server.app.identity.models import AuditLog, JobCollaborator
+from server.app.identity.models import AuditLog, Job, JobCollaborator
 
 
 class Permission(str, Enum):
@@ -35,6 +35,8 @@ class Principal:
     organization_id: UUID
     roles: frozenset[str]
     active: bool
+    recruiting_scope_type: str = "jobs"
+    recruiting_department_ids: frozenset[UUID] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -49,11 +51,39 @@ def require_permission(principal: Principal, permission: Permission) -> bool:
     return principal.active and any(permission in GLOBAL_PERMISSIONS.get(role, set()) for role in principal.roles)
 
 
-def require_job_access(principal: Principal, job_id: UUID, organization_id: UUID, permission: Permission, grants: list[JobGrant]) -> bool:
+def require_job_access(
+    principal: Principal,
+    job_id: UUID,
+    organization_id: UUID,
+    permission: Permission,
+    grants: list[JobGrant],
+    *,
+    job_department_id: UUID | None = None,
+) -> bool:
     if not principal.active or principal.organization_id != organization_id:
         return False
     if "recruiting_admin" in principal.roles and require_permission(principal, permission):
         return True
+    if "recruiter" in principal.roles:
+        if principal.recruiting_scope_type == "organization":
+            return permission in {
+                Permission.READ_RECRUITING,
+                Permission.COMMENT,
+                Permission.RECOMMEND_DECISION,
+                Permission.BULK_EXPORT,
+                Permission.SEARCH_JOBS,
+            }
+        if (
+            principal.recruiting_scope_type == "departments"
+            and job_department_id in principal.recruiting_department_ids
+        ):
+            return permission in {
+                Permission.READ_RECRUITING,
+                Permission.COMMENT,
+                Permission.RECOMMEND_DECISION,
+                Permission.BULK_EXPORT,
+                Permission.SEARCH_JOBS,
+            }
     return any(
         grant.user_id == principal.user_id
         and grant.job_id == job_id
@@ -73,6 +103,12 @@ class AuthorizationService:
 
     def require_job_access(self, principal: Principal, job_id: UUID, organization_id: UUID, permission: Permission, *, trace_id: str) -> bool:
         with self.store.sync_session() as db:
+            job = db.scalar(
+                select(Job).where(
+                    Job.organization_id == organization_id,
+                    Job.id == job_id,
+                )
+            )
             rows = db.scalars(
                 select(JobCollaborator).where(
                     JobCollaborator.user_id == principal.user_id,
@@ -81,7 +117,14 @@ class AuthorizationService:
                 )
             ).all()
             grants = [JobGrant(row.user_id, row.job_id, row.organization_id, row.access_role) for row in rows]
-            allowed = require_job_access(principal, job_id, organization_id, permission, grants)
+            allowed = job is not None and require_job_access(
+                principal,
+                job_id,
+                organization_id,
+                permission,
+                grants,
+                job_department_id=job.department_id,
+            )
             if not allowed:
                 db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, event_type="authorization.denied", outcome="denied", trace_id=trace_id, metadata_json={"permission": permission.value}))
                 db.commit()

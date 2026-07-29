@@ -51,16 +51,24 @@ class RecruitingAuthorizationService:
         if not principal.active:
             return False
         if "recruiting_admin" in principal.roles:
-            return True
+            return job.organization_id == principal.organization_id
         branches = []
         if "recruiter" in principal.roles and action in ROLE_ACTIONS["recruiter"]:
-            recruiter_grants = ("job_owner",) if action == RecruitingAction.RECOMMEND else ("job_owner", "job_recruiter")
+            recruiter_grants = (
+                ("job_owner",)
+                if action == RecruitingAction.RECOMMEND
+                else ("job_owner", "job_recruiter")
+            )
             branches.append(exists().where(
                 JobCollaborator.organization_id == job.organization_id,
                 JobCollaborator.job_id == job.id,
                 JobCollaborator.user_id == principal.user_id,
                 JobCollaborator.access_role.in_(recruiter_grants),
             ))
+            if principal.recruiting_scope_type == "departments":
+                branches.append(job.department_id.in_(principal.recruiting_department_ids))
+            elif principal.recruiting_scope_type == "organization":
+                branches.append(True)
         if "hiring_manager" in principal.roles and action in ROLE_ACTIONS["hiring_manager"]:
             branches.append(exists().where(
                 JobCollaborator.organization_id == job.organization_id,
@@ -68,7 +76,11 @@ class RecruitingAuthorizationService:
                 JobCollaborator.user_id == principal.user_id,
                 JobCollaborator.access_role == "job_manager",
             ))
-        return or_(*branches) if branches else False
+        return (
+            and_(job.organization_id == principal.organization_id, or_(*branches))
+            if branches
+            else False
+        )
 
     def candidate_predicate(self, principal: Principal, action: RecruitingAction, candidate=Candidate):
         if not self.role_allows(principal, action):

@@ -335,6 +335,10 @@ def _principal_for_export(db, export: ExportRecord) -> Principal | None:
         organization_id=user.organization_id,
         roles=frozenset(role.role for role in user.roles),
         active=True,
+        recruiting_scope_type=user.recruiting_scope_type,
+        recruiting_department_ids=frozenset(
+            scope.department_id for scope in user.recruiting_department_scopes
+        ),
     )
 
 

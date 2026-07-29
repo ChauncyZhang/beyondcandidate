@@ -386,6 +386,8 @@ def test_user_invitation_is_once_only_and_user_listing_is_tenant_scoped(manageme
         "department_name": "Engineering",
         "roles": ["recruiter"],
         "status": "invited",
+        "recruiting_scope_type": "jobs",
+        "recruiting_department_ids": [],
     }
 
     with app.state.identity_store.sync_session() as db:

@@ -150,6 +150,7 @@ class CandidateApplicationSummaryOut(ApiModel):
     id: str
     job_id: str
     job_title: str
+    job_status: str
     resume_id: str
     owner_id: str
     owner_name: str
@@ -189,6 +190,7 @@ class ApplicationOut(ApiModel):
 
 class ApplicationHistoryOut(ApplicationOut):
     job_title: str
+    job_status: str
     next_interview_round: str | None = None
     route_result: Literal["review", "deferred"] | None
     ai_score: int | None

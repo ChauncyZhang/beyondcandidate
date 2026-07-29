@@ -20,6 +20,7 @@ from server.app.identity.models import (
     Job,
     PasswordInvitation,
     User,
+    UserRecruitingDepartmentScope,
     UserRole,
     UserStatus,
     WorkflowTemplate,
@@ -142,6 +143,8 @@ class UserInvite(StrictModel):
     display_name: str = Field(min_length=1, max_length=200)
     email: str = Field(min_length=3, max_length=320)
     department_id: UUID | None
+    recruiting_scope_type: Literal["jobs", "departments", "organization"] = "jobs"
+    recruiting_department_ids: list[UUID] = Field(default_factory=list)
     role: Literal[
         "system_admin",
         "recruiting_admin",
@@ -165,6 +168,37 @@ class UserInvite(StrictModel):
         if value.count("@") != 1 or not all(value.split("@")):
             raise ValueError("invalid email address")
         return value
+
+    @model_validator(mode="after")
+    def validate_recruiting_scope_shape(self):
+        if len(set(self.recruiting_department_ids)) != len(
+            self.recruiting_department_ids
+        ):
+            raise ValueError("recruiting department ids must be unique")
+        if self.recruiting_scope_type == "departments":
+            if not self.recruiting_department_ids:
+                raise ValueError("department scope requires departments")
+        elif self.recruiting_department_ids:
+            raise ValueError("only department scope accepts departments")
+        return self
+
+
+class RecruitingScopeUpdate(StrictModel):
+    recruiting_scope_type: Literal["jobs", "departments", "organization"]
+    recruiting_department_ids: list[UUID] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_shape(self):
+        if len(set(self.recruiting_department_ids)) != len(
+            self.recruiting_department_ids
+        ):
+            raise ValueError("recruiting department ids must be unique")
+        if self.recruiting_scope_type == "departments":
+            if not self.recruiting_department_ids:
+                raise ValueError("department scope requires departments")
+        elif self.recruiting_department_ids:
+            raise ValueError("only department scope accepts departments")
+        return self
 
 
 def _principal(
@@ -255,7 +289,48 @@ def _user_data(user: User, department_name: str | None) -> dict:
         "department_name": department_name,
         "roles": sorted(role.role for role in user.roles),
         "status": user.status.value,
+        "recruiting_scope_type": user.recruiting_scope_type,
+        "recruiting_department_ids": sorted(
+            str(scope.department_id)
+            for scope in user.recruiting_department_scopes
+        ),
     }
+
+
+def _active_scope_departments(db, organization_id: UUID, department_ids: list[UUID]):
+    if not department_ids:
+        return []
+    departments = db.scalars(
+        select(Department).where(
+            Department.organization_id == organization_id,
+            Department.id.in_(department_ids),
+            Department.status == "active",
+        )
+    ).all()
+    return departments if len(departments) == len(department_ids) else None
+
+
+def _set_recruiting_scope(
+    user: User, scope_type: str, departments: list[Department]
+) -> None:
+    user.recruiting_scope_type = scope_type
+    requested_ids = {department.id for department in departments}
+    user.recruiting_department_scopes[:] = [
+        scope
+        for scope in user.recruiting_department_scopes
+        if scope.department_id in requested_ids
+    ]
+    existing_ids = {
+        scope.department_id for scope in user.recruiting_department_scopes
+    }
+    user.recruiting_department_scopes.extend(
+        UserRecruitingDepartmentScope(
+            organization_id=user.organization_id,
+            department_id=department.id,
+        )
+        for department in departments
+        if department.id not in existing_ids
+    )
 
 
 def _workflow_template_data(template: WorkflowTemplate) -> dict:
@@ -581,7 +656,10 @@ def list_users(request: Request):
     with request.app.state.identity_store.sync_session() as db:
         rows = db.execute(
             select(User, Department.name)
-            .options(selectinload(User.roles))
+            .options(
+                selectinload(User.roles),
+                selectinload(User.recruiting_department_scopes),
+            )
             .outerjoin(
                 Department,
                 (Department.organization_id == User.organization_id)
@@ -625,6 +703,25 @@ def invite_user(
     now = request.app.state.identity_service.clock.current_time()
     raw_token = request.app.state.identity_service.tokens.new_token()
     with request.app.state.identity_store.sync_session() as db:
+        if payload.role != "recruiter" and payload.recruiting_scope_type != "jobs":
+            return problem(
+                request,
+                422,
+                "recruiting_scope_invalid",
+                "The recruiting scope is invalid.",
+            )
+        scope_departments = _active_scope_departments(
+            db,
+            principal.organization_id,
+            payload.recruiting_department_ids,
+        )
+        if scope_departments is None:
+            return problem(
+                request,
+                422,
+                "recruiting_scope_invalid",
+                "The recruiting scope is invalid.",
+            )
         if payload.department_id is not None:
             department = db.scalar(
                 select(Department).where(
@@ -662,6 +759,9 @@ def invite_user(
             status=UserStatus.INVITED,
         )
         user.roles.append(UserRole(role=payload.role))
+        _set_recruiting_scope(
+            user, payload.recruiting_scope_type, scope_departments
+        )
         db.add(user)
         expires_at = now + timedelta(hours=48)
         try:
@@ -684,7 +784,12 @@ def invite_user(
                     resource_type="user",
                     resource_id=user.id,
                     trace_id=request.state.trace_id,
-                    metadata_json={},
+                    metadata_json={
+                        "recruiting_scope_type": payload.recruiting_scope_type,
+                        "recruiting_department_ids": sorted(
+                            str(department.id) for department in scope_departments
+                        ),
+                    },
                 )
             )
             db.commit()
@@ -710,3 +815,101 @@ def invite_user(
             },
             status_code=201,
         )
+
+
+@router.patch("/users/{user_id}/recruiting-scope")
+def update_user_recruiting_scope(
+    user_id: UUID, payload: RecruitingScopeUpdate, request: Request
+):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
+    with request.app.state.identity_store.sync_session() as db:
+        user = db.scalar(
+            select(User)
+            .options(
+                selectinload(User.roles),
+                selectinload(User.recruiting_department_scopes),
+            )
+            .where(
+                User.organization_id == principal.organization_id,
+                User.id == user_id,
+            )
+            .with_for_update(of=User)
+        )
+        if user is None:
+            return problem(request, 404, "user_not_found", "The user was not found.")
+        target_roles = {role.role for role in user.roles}
+        if (
+            "system_admin" not in principal.roles
+            and target_roles & {"system_admin", "recruiting_admin"}
+        ):
+            return problem(
+                request,
+                403,
+                "recruiting_scope_assignment_forbidden",
+                "The recruiting scope cannot be assigned.",
+            )
+        if (
+            payload.recruiting_scope_type != "jobs"
+            and "recruiter" not in target_roles
+        ):
+            return problem(
+                request,
+                422,
+                "recruiting_scope_invalid",
+                "The recruiting scope is invalid.",
+            )
+        departments = _active_scope_departments(
+            db,
+            principal.organization_id,
+            payload.recruiting_department_ids,
+        )
+        if departments is None:
+            return problem(
+                request,
+                422,
+                "recruiting_scope_invalid",
+                "The recruiting scope is invalid.",
+            )
+
+        previous_scope_type = user.recruiting_scope_type
+        previous_department_ids = sorted(
+            str(scope.department_id)
+            for scope in user.recruiting_department_scopes
+        )
+        _set_recruiting_scope(user, payload.recruiting_scope_type, departments)
+        user.authorization_version += 1
+        db.add(
+            AuditLog(
+                organization_id=principal.organization_id,
+                actor_user_id=principal.user_id,
+                category="system",
+                event_type="identity.user_recruiting_scope_updated",
+                outcome="success",
+                resource_type="user",
+                resource_id=user.id,
+                trace_id=request.state.trace_id,
+                metadata_json={
+                    "previous_recruiting_scope_type": previous_scope_type,
+                    "previous_recruiting_department_ids": previous_department_ids,
+                    "recruiting_scope_type": payload.recruiting_scope_type,
+                    "recruiting_department_ids": sorted(
+                        str(department.id) for department in departments
+                    ),
+                },
+            )
+        )
+        db.commit()
+        db.refresh(user)
+        department_name = (
+            db.scalar(
+                select(Department.name).where(
+                    Department.organization_id == user.organization_id,
+                    Department.id == user.department_id,
+                )
+            )
+            if user.department_id is not None
+            else None
+        )
+        return {"data": _user_data(user, department_name)}

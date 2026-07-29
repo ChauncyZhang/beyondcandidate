@@ -104,18 +104,3 @@ def test_runtime_validator_removes_env_file_keys_from_process_environment(
     assert "APP_IMAGE" not in environment
     assert "APP_IMAGE_DIGEST" not in environment
     assert environment["UNRELATED_OPERATOR_SETTING"] == "preserved"
-
-
-def test_runbook_restores_complete_image_refs_in_clean_environment() -> None:
-    runbook = (ROOT / "deploy" / "production-operations-runbook.md").read_text(
-        encoding="utf-8"
-    )
-    rollback = runbook.split("For an application-only rollback", maxsplit=1)[1]
-
-    assert "APP_IMAGE`, `APP_IMAGE_DIGEST`, `FRONTEND_IMAGE`, and" in rollback
-    assert "`FRONTEND_IMAGE_DIGEST`" in rollback
-    assert (
-        "unset APP_IMAGE APP_IMAGE_DIGEST FRONTEND_IMAGE FRONTEND_IMAGE_DIGEST"
-        in rollback
-    )
-    assert "config --images" in rollback

@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode, urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -180,14 +180,41 @@ def test_config(request: Request):
             return problem(request, 409, "feishu_not_configured", "Feishu is not configured.")
         credentials = _credentials(request, config)
         result = request.app.state.feishu_provider.test_connection(credentials)
-        config.last_test_status = "succeeded" if result.ok else "failed"
+        safe_error_code = result.safe_error_code
+        if result.ok:
+            binding = db.scalar(
+                select(FeishuIdentityBinding).where(
+                    FeishuIdentityBinding.organization_id == principal.organization_id,
+                    FeishuIdentityBinding.user_id == principal.user_id,
+                )
+            )
+            if binding is None or not binding.open_id:
+                safe_error_code = "feishu_test_user_unbound"
+            else:
+                try:
+                    request.app.state.feishu_provider.send_message(
+                        credentials,
+                        binding.open_id,
+                        "BeyondCandidate 飞书招聘提醒测试成功。",
+                        idempotency_key=str(uuid4()),
+                    )
+                except FeishuProviderError as error:
+                    safe_error_code = error.safe_code
+        succeeded = result.ok and safe_error_code is None
+        config.last_test_status = "succeeded" if succeeded else "failed"
         config.last_tested_at = now
-        config.last_test_error_code = result.safe_error_code
+        config.last_test_error_code = safe_error_code
         db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, event_type="feishu.connection_tested", outcome=config.last_test_status, trace_id=request.state.trace_id, metadata_json={}))
         db.commit()
+        if not succeeded:
+            status_code = 409 if safe_error_code == "feishu_test_user_unbound" else 502
+            return problem(
+                request,
+                status_code,
+                safe_error_code or "feishu_request_failed",
+                "Feishu credentials or message delivery could not be verified.",
+            )
         response = _config_response(config)
-        if not result.ok:
-            response.status_code = 502
         return response
 
 

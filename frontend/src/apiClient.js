@@ -181,6 +181,10 @@ export function createApiClient({ fetchImpl = globalThis.fetch } = {}) {
       const response = await request("/api/v1/settings/users", { method: "POST", body, idempotencyKey });
       return response?.data ?? null;
     },
+    async updateRecruitingScope(id, body) {
+      const response = await request(`/api/v1/settings/users/${encodeURIComponent(id)}/recruiting-scope`, { method: "PATCH", body });
+      return response?.data ?? null;
+    },
     async acceptInvitation(body) {
       const response = await request("/api/v1/auth/invitations/accept", { method: "POST", body });
       return response?.data ?? null;

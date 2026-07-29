@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -105,6 +106,8 @@ class FeishuProvider(Protocol):
     def create_event(self, credentials: FeishuCredentials, request: CalendarEventRequest, *, idempotency_key: str) -> CalendarEvent: ...
     def update_event(self, credentials: FeishuCredentials, event_id: str, request: CalendarEventRequest, *, idempotency_key: str) -> CalendarEvent: ...
     def cancel_event(self, credentials: FeishuCredentials, event_id: str, *, idempotency_key: str) -> None: ...
+    def send_message(self, credentials: FeishuCredentials, open_id: str, text: str, *, idempotency_key: str) -> None: ...
+    def send_card(self, credentials: FeishuCredentials, open_id: str, card: dict, *, idempotency_key: str) -> None: ...
 
 
 class FakeFeishuProvider:
@@ -115,6 +118,8 @@ class FakeFeishuProvider:
         self.exchanged_codes: list[str] = []
         self.busy_windows: tuple[BusyWindow, ...] = ()
         self.freebusy_requests: list[FreeBusyRequest] = []
+        self.messages: list[tuple[str, str, str]] = []
+        self.cards: list[tuple[str, dict, str]] = []
         self.failure: FeishuProviderError | None = None
 
     def _check(self) -> None:
@@ -177,6 +182,20 @@ class FakeFeishuProvider:
         self.events[event_id] = replace(self.events[event_id], cancelled=True)
         self._idempotency[idempotency_key] = True
 
+    def send_message(self, credentials: FeishuCredentials, open_id: str, text: str, *, idempotency_key: str) -> None:
+        self._check()
+        if idempotency_key in self._idempotency:
+            return
+        self.messages.append((open_id, text, idempotency_key))
+        self._idempotency[idempotency_key] = True
+
+    def send_card(self, credentials: FeishuCredentials, open_id: str, card: dict, *, idempotency_key: str) -> None:
+        self._check()
+        if idempotency_key in self._idempotency:
+            return
+        self.cards.append((open_id, card, idempotency_key))
+        self._idempotency[idempotency_key] = True
+
 
 class HttpFeishuProvider:
     """Small synchronous adapter; callers run it outside database transactions."""
@@ -194,7 +213,10 @@ class HttpFeishuProvider:
             payload = response.json()
         except (httpx.TimeoutException, httpx.NetworkError):
             raise FeishuProviderError() from None
-        except (httpx.HTTPStatusError, ValueError, TypeError):
+        except httpx.HTTPStatusError as error:
+            retryable = error.response.status_code == 429 or error.response.status_code >= 500
+            raise FeishuProviderError("feishu_request_failed", retryable=retryable) from None
+        except (ValueError, TypeError):
             raise FeishuProviderError("feishu_response_invalid", retryable=False) from None
         if not isinstance(payload, dict) or payload.get("code", 0) != 0:
             code = payload.get("code") if isinstance(payload, dict) else None
@@ -362,3 +384,31 @@ class HttpFeishuProvider:
 
     def cancel_event(self, credentials: FeishuCredentials, event_id: str, *, idempotency_key: str) -> None:
         self._json("DELETE", f"{OPEN_API_BASE}/calendar/v4/calendars/{credentials.calendar_id}/events/{event_id}", headers=self._headers(credentials))
+
+    def send_message(self, credentials: FeishuCredentials, open_id: str, text: str, *, idempotency_key: str) -> None:
+        self._json(
+            "POST",
+            f"{OPEN_API_BASE}/im/v1/messages",
+            params={"receive_id_type": "open_id"},
+            headers=self._headers(credentials),
+            json={
+                "receive_id": open_id,
+                "msg_type": "text",
+                "content": json.dumps({"text": text}, ensure_ascii=False),
+                "uuid": idempotency_key,
+            },
+        )
+
+    def send_card(self, credentials: FeishuCredentials, open_id: str, card: dict, *, idempotency_key: str) -> None:
+        self._json(
+            "POST",
+            f"{OPEN_API_BASE}/im/v1/messages",
+            params={"receive_id_type": "open_id"},
+            headers=self._headers(credentials),
+            json={
+                "receive_id": open_id,
+                "msg_type": "interactive",
+                "content": json.dumps(card, ensure_ascii=False),
+                "uuid": idempotency_key,
+            },
+        )

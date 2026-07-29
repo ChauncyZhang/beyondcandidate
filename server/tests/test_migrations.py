@@ -12,13 +12,13 @@ from sqlalchemy.exc import IntegrityError
 from server.tests.test_interview_persistence_postgres import _seed_application
 
 
-TABLES = {"organizations", "departments", "workflow_templates", "users", "user_roles", "user_sessions", "jobs", "job_collaborators", "audit_logs", "candidates", "candidate_contacts", "file_objects", "resumes", "resume_profiles", "job_jd_versions", "screening_rule_versions", "applications", "application_stage_events", "application_review_tasks", "notification_reads", "candidate_notes", "candidate_events", "download_tickets", "idempotency_records", "background_jobs", "job_attempts", "outbox_events", "queue_claim_cursors", "screening_runs", "screening_items", "screening_results", "candidate_duplicate_hints", "llm_provider_configs", "ocr_provider_configs", "prompt_versions", "llm_invocations", "llm_screening_evaluations", "interviews", "interview_participants", "interview_events", "interview_feedbacks", "interview_feedback_revisions", "talent_pools", "talent_pool_grants", "talent_pool_memberships"}
+TABLES = {"organizations", "departments", "workflow_templates", "users", "user_roles", "user_sessions", "user_recruiting_department_scopes", "jobs", "job_collaborators", "audit_logs", "candidates", "candidate_contacts", "file_objects", "resumes", "resume_profiles", "job_jd_versions", "screening_rule_versions", "applications", "application_stage_events", "application_review_tasks", "notification_reads", "candidate_notes", "candidate_events", "download_tickets", "idempotency_records", "background_jobs", "job_attempts", "outbox_events", "queue_claim_cursors", "screening_runs", "screening_items", "screening_results", "candidate_duplicate_hints", "llm_provider_configs", "ocr_provider_configs", "prompt_versions", "llm_invocations", "llm_screening_evaluations", "interviews", "interview_participants", "interview_events", "interview_feedbacks", "interview_feedback_revisions", "talent_pools", "talent_pool_grants", "talent_pool_memberships"}
 
 
-def test_notification_read_migration_is_latest_revision() -> None:
+def test_recruiting_scope_migration_is_latest_revision() -> None:
     script_directory = ScriptDirectory.from_config(Config("server/alembic.ini"))
 
-    assert script_directory.get_current_head() == "0026_notification_reads"
+    assert script_directory.get_current_head() == "0027_recruiting_user_scopes"
 
 
 @pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")

@@ -16,7 +16,7 @@ import {
   Send,
   X,
 } from "lucide-react";
-import { buildWorkweekColumns, getInterviewPrimaryAction, isInWorkweek, isMyInterview } from "./interviewViewState.js";
+import { buildWeekColumns, getInterviewPrimaryAction, isInWeek, isMyInterview } from "./interviewViewState.js";
 import { InterviewCalendar } from "./InterviewCalendar.jsx";
 import { InterviewFeedbackWorkspace } from "./InterviewFeedbackWorkspace.jsx";
 import { ScheduleWorkspace } from "./ScheduleWorkspace.jsx";
@@ -129,11 +129,11 @@ function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor
   const [transitionDraft, setTransitionDraft] = useState(null);
   const [reason, setReason] = useState("");
   const [transitioning, setTransitioning] = useState(false);
-  const dayColumns = useMemo(() => buildWorkweekColumns(), []);
+  const dayColumns = useMemo(() => buildWeekColumns(), []);
 
   const filtered = useMemo(() => records.filter((item) => {
     const text = `${item.candidate}${item.position}${item.round}${item.interviewers.join("")}`.toLowerCase();
-    return (!query || text.includes(query.toLowerCase())) && (status === "全部状态" || item.status === status || item.feedbackStatus === status) && (!(mineOnly || !canSchedule) || isMyInterview(item, interviewerId)) && (date === "全部日期" || isInWorkweek(item.date, dayColumns));
+    return (!query || text.includes(query.toLowerCase())) && (status === "全部状态" || item.status === status || item.feedbackStatus === status) && (!(mineOnly || !canSchedule) || isMyInterview(item, interviewerId)) && (date === "全部日期" || isInWeek(item.date, dayColumns));
   }), [canSchedule, date, dayColumns, interviewerId, mineOnly, query, records, status]);
 
   function requestTerminalTransition(record, action) {

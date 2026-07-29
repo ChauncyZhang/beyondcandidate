@@ -855,6 +855,32 @@ def test_create_interview_rejects_an_application_that_has_not_completed_review(t
         ) is None
 
 
+@pytest.mark.parametrize("job_status", ["closed", "archived"])
+def test_create_interview_rejects_an_application_for_an_inactive_job(tmp_path, job_status) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with app.state.identity_store.sync_session() as database:
+        database.get(Job, seed["job_id"]).status = job_status
+        database.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/interviews",
+            json=interview_payload(seed),
+            headers={
+                **login(client, "interview-admin@example.test"),
+                "Idempotency-Key": f"inactive-job-{job_status}",
+            },
+        )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "resource_not_found"
+    with app.state.identity_store.sync_session() as database:
+        assert database.scalar(
+            select(Interview).where(Interview.application_id == seed["application_id"])
+        ) is None
+
+
 def test_revoked_recruiting_role_removes_historical_assignment_access(tmp_path) -> None:
     app = make_app(tmp_path)
     seed = seed_application(app)

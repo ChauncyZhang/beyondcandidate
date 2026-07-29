@@ -1007,6 +1007,7 @@ def test_candidate_list_returns_selected_application_and_latest_screening_result
             "id": ids["matching_application"],
             "job_id": ids["matching_job"],
             "job_title": "Platform Engineer",
+            "job_status": "draft",
             "resume_id": ids["matching_resume"],
             "owner_id": ids["first_owner"],
             "owner_name": "First Owner",

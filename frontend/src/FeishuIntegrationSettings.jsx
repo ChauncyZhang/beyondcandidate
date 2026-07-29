@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, RefreshCw } from "lucide-react";
 import { apiClient } from "./apiClient.js";
-import { buildFeishuConfigPayload, getFeishuConfigErrorMessage, normalizeFeishuConfig } from "./feishuIntegration.js";
+import { buildFeishuConfigPayload, getFeishuConfigErrorMessage, getFeishuConnectionTestErrorMessage, normalizeFeishuConfig } from "./feishuIntegration.js";
 
 const emptySecrets = { app_secret: "", verification_token: "", encrypt_key: "" };
 
@@ -38,14 +38,14 @@ export function FeishuIntegrationSettings({ onNotify = () => {}, client = apiCli
     try {
       const next = normalizeFeishuConfig(await client.testFeishuConnection());
       const succeeded = next.lastTestStatus === "succeeded";
-      setConfig(next); setMessage(succeeded ? "连接测试成功" : "连接测试失败"); setStatus(succeeded ? "ready" : "error");
+      setConfig(next); setMessage(succeeded ? "凭据和机器人消息测试成功，测试提醒已发送到当前飞书账号。" : "测试提醒发送失败"); setStatus(succeeded ? "ready" : "error");
     }
-    catch { setMessage("连接测试失败，现有招聘功能不受影响。"); setStatus("error"); }
+    catch (error) { setMessage(getFeishuConnectionTestErrorMessage(error)); setStatus("error"); }
   }
 
   if (status === "loading") return <div className="organization-state" role="status"><RefreshCw size={18} />正在加载飞书配置…</div>;
   return <form className="settings-section password-settings-form feishu-integration-form" onSubmit={save}>
-    <div className="settings-section-heading"><div><h2>飞书集成</h2><p>默认关闭。秘密字段只可替换，服务端不会回传明文。</p></div></div>
+    <div className="settings-section-heading"><div><h2>飞书集成</h2><p>启用后可同步面试日历并向已绑定员工发送招聘待办提醒。飞书应用需开启机器人能力及“以应用身份发消息”权限；秘密字段只可替换，服务端不会回传明文。</p></div></div>
     {message && <div className={status === "error" ? "settings-error" : "profile-success"} role="status">{status === "error" ? <AlertTriangle size={17} /> : <CheckCircle2 size={17} />}{message}</div>}
     <label>App ID<input value={draft.app_id} onChange={(event) => update("app_id", event.target.value)} required /></label>
     <label>App Secret<input type="password" autoComplete="new-password" placeholder={config.appSecretConfigured ? "已配置；留空保持不变" : "请输入 App Secret"} value={draft.app_secret} onChange={(event) => update("app_secret", event.target.value)} /></label>
@@ -55,7 +55,7 @@ export function FeishuIntegrationSettings({ onNotify = () => {}, client = apiCli
     <label>Encrypt Key<input type="password" autoComplete="new-password" placeholder={config.encryptKeyConfigured ? "已配置；留空保持不变" : "请输入 Encrypt Key"} value={draft.encrypt_key} onChange={(event) => update("encrypt_key", event.target.value)} /></label>
     <div className="feishu-form-footer">
       <label className="feishu-enabled-control"><input type="checkbox" checked={draft.enabled} onChange={(event) => update("enabled", event.target.checked)} /><span>启用飞书集成</span></label>
-      <div className="feishu-form-actions"><button className="button primary" type="submit" disabled={status === "saving" || status === "testing"}>{status === "saving" ? "保存中…" : "保存配置"}</button><button className="button secondary" type="button" disabled={!config.configured || status === "saving" || status === "testing"} onClick={testConnection}>{status === "testing" ? "测试中…" : "测试连接"}</button></div>
+      <div className="feishu-form-actions"><button className="button primary" type="submit" disabled={status === "saving" || status === "testing"}>{status === "saving" ? "保存中…" : "保存配置"}</button><button className="button secondary" type="button" disabled={!config.configured || status === "saving" || status === "testing"} onClick={testConnection}>{status === "testing" ? "发送中…" : "发送测试提醒"}</button></div>
     </div>
   </form>;
 }

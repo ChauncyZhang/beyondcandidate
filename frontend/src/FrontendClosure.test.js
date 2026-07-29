@@ -189,7 +189,7 @@ test("organization settings load real data, restrict invite roles, and show the 
     const drawer = page.getByRole("dialog", { name: "邀请成员", exact: true });
     await drawer.getByLabel("姓名", { exact: true }).fill("周宁");
     await drawer.getByLabel("工作邮箱", { exact: true }).fill("zhou@example.test");
-    await drawer.getByLabel("部门").selectOption(departments[0].id);
+    await drawer.getByLabel("所属部门", { exact: true }).selectOption(departments[0].id);
     assert.deepEqual(await drawer.getByLabel("角色").locator("option").allTextContents(), ["HR 招聘专员", "用人经理", "面试官"]);
     await drawer.getByRole("button", { name: "发送邀请", exact: true }).click();
     const link = drawer.getByLabel("邀请链接", { exact: true });
@@ -197,7 +197,7 @@ test("organization settings load real data, restrict invite roles, and show the 
     assert.match(await link.inputValue(), /#invite=invite-once$/);
     assert.match(await drawer.getByText(/48 小时/).textContent(), /48 小时/);
     assert.equal(inviteRequest.headers()["idempotency-key"].length > 0, true);
-    assert.deepEqual(inviteRequest.postDataJSON(), { display_name: "周宁", email: "zhou@example.test", department_id: departments[0].id, role: "recruiter" });
+    assert.deepEqual(inviteRequest.postDataJSON(), { display_name: "周宁", email: "zhou@example.test", department_id: departments[0].id, role: "recruiter", recruiting_scope_type: "jobs", recruiting_department_ids: [] });
   } finally { await context.close(); }
 });
 

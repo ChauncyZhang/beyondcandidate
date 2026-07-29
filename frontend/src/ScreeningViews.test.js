@@ -497,9 +497,12 @@ test("server candidate detail exposes the connected interview path and reports c
   assert.deepEqual(candidateHelpers.candidateWorkflowActions("待决策", "用人经理").map((item) => item.id), ["hiring_approved", "hiring_rejected"]);
   assert.deepEqual(candidateHelpers.candidateWorkflowActions("待安排", "HR 招聘专员"), []);
   assert.equal(candidateHelpers.candidateNextStep("面试中"), "完成当前面试与面试官反馈");
-  assert.equal(candidateHelpers.canScheduleCandidateInterview("待安排", "HR 招聘专员", true), true);
-  assert.equal(candidateHelpers.canScheduleCandidateInterview("待决策", "HR 招聘专员", true), true);
-  assert.equal(candidateHelpers.canScheduleCandidateInterview("待复核", "HR 招聘专员", true), false);
-  assert.equal(candidateHelpers.canScheduleCandidateInterview("待安排", "用人经理", true), false);
-  assert.equal(candidateHelpers.canScheduleCandidateInterview("已通过", "HR 招聘专员", true), false);
+  assert.equal(candidateHelpers.candidateNextStep("待安排", "archived"), "当前职位不在招聘中，不能安排新的面试");
+  assert.equal(candidateHelpers.canScheduleCandidateInterview("待安排", "HR 招聘专员", true, "open"), true);
+  assert.equal(candidateHelpers.canScheduleCandidateInterview("待决策", "HR 招聘专员", true, "open"), true);
+  assert.equal(candidateHelpers.canScheduleCandidateInterview("待复核", "HR 招聘专员", true, "open"), false);
+  assert.equal(candidateHelpers.canScheduleCandidateInterview("待安排", "用人经理", true, "open"), false);
+  assert.equal(candidateHelpers.canScheduleCandidateInterview("已通过", "HR 招聘专员", true, "open"), false);
+  assert.equal(candidateHelpers.canScheduleCandidateInterview("待安排", "HR 招聘专员", true, "closed"), false);
+  assert.equal(candidateHelpers.canScheduleCandidateInterview("待安排", "HR 招聘专员", true, "archived"), false);
 });

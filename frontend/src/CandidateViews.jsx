@@ -80,7 +80,8 @@ export function candidateWorkflowActions(stage, role) {
     .filter((item) => canPerformAction(role, item.capability));
 }
 
-export function candidateNextStep(stage) {
+export function candidateNextStep(stage, jobStatus = "open") {
+  if (jobStatus !== "open") return "当前职位不在招聘中，不能安排新的面试";
   return ({
     新简历: "AI 筛选完成后自动决定流转",
     待复核: "等待用人经理评审",
@@ -96,8 +97,8 @@ export function candidateNextStep(stage) {
   })[stage] || "等待流程更新";
 }
 
-export function canScheduleCandidateInterview(stage, role, scheduleAvailable) {
-  return ["待安排", "待决策"].includes(stage) && canPerformAction(role, "安排面试") && Boolean(scheduleAvailable);
+export function canScheduleCandidateInterview(stage, role, scheduleAvailable, jobStatus) {
+  return jobStatus === "open" && ["待安排", "待决策"].includes(stage) && canPerformAction(role, "安排面试") && Boolean(scheduleAvailable);
 }
 
 export function candidateStageFilterOptions() {
@@ -480,8 +481,8 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
   }
 
   const availableWorkflowActions = candidate.application || !candidate.serverBacked ? candidateWorkflowActions(candidate.stage, role) : [];
-  const nextStep = candidateNextStep(candidate.stage);
-  const canScheduleCurrent = canScheduleCandidateInterview(candidate.stage, role, onScheduleInterview);
+  const nextStep = candidateNextStep(candidate.stage, candidate.jobStatus);
+  const canScheduleCurrent = canScheduleCandidateInterview(candidate.stage, role, onScheduleInterview, candidate.jobStatus);
   const tabs = candidateDetailTabs(candidate.serverBacked);
   const notes = candidate.notes || [];
   const profileLine = [candidate.role, candidate.company, candidate.city].filter(Boolean).join(" · ");

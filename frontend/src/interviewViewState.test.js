@@ -2,13 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as interviewViewState from "./interviewViewState.js";
 
-const { buildWorkweekColumns, canSubmitInterviewFeedback, getInterviewPrimaryAction, getLocalDateInputMin, isInterviewStartStrictlyFuture, isInWorkweek, isMyInterview, isScheduleCandidateEligible, mergeScheduleCandidateOptions, resolveScheduleCandidateId, shouldHydrateScheduleCandidate } = interviewViewState;
+const { buildWeekColumns, canSubmitInterviewFeedback, getInterviewPrimaryAction, getLocalDateInputMin, isInterviewStartStrictlyFuture, isInWeek, isMyInterview, isScheduleCandidateEligible, mergeScheduleCandidateOptions, resolveScheduleCandidateId, shouldHydrateScheduleCandidate } = interviewViewState;
 
-test("workweek columns follow the current Monday through Friday across month boundaries", () => {
-  const columns = buildWorkweekColumns(new Date("2026-08-01T09:00:00+08:00"));
-  assert.deepEqual(columns.map((item) => item[0]), ["2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31"]);
-  assert.equal(isInWorkweek("2026-07-31", columns), true);
-  assert.equal(isInWorkweek("2026-08-01", columns), false);
+test("week columns include Saturday and Sunday across month boundaries", () => {
+  const columns = buildWeekColumns(new Date("2026-08-01T09:00:00+08:00"));
+  assert.deepEqual(columns.map((item) => item[0]), ["2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31", "2026-08-01", "2026-08-02"]);
+  assert.equal(isInWeek("2026-07-31", columns), true);
+  assert.equal(isInWeek("2026-08-01", columns), true);
+  assert.equal(isInWeek("2026-08-02", columns), true);
+  assert.equal(isInWeek("2026-08-03", columns), false);
 });
 
 test("my interview filtering uses the immutable user id instead of a display name", () => {

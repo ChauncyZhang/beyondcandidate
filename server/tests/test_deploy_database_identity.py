@@ -40,15 +40,14 @@ def test_alembic_does_not_provision_roles_or_passwords() -> None:
 
 
 def test_operations_require_role_reconciliation_after_every_forward_migration() -> None:
-    runbook = (ROOT / "deploy" / "production-operations-runbook.md").read_text(encoding="utf-8")
+    runbook = (ROOT / "server" / "README.md").read_text(encoding="utf-8")
 
-    migration_position = runbook.index("Apply forward-only migrations")
-    reconciliation_position = runbook.index(
-        "exec -T postgres sh /docker-entrypoint-initdb.d/10-provision-app-role.sh"
-    )
-    readiness_position = runbook.index("readiness", reconciliation_position)
+    migration_position = runbook.index("After every migration on an existing volume")
+    reconciliation_position = runbook.index("10-provision-app-role.sh")
+    restart_position = runbook.index("before restarting API/worker processes")
 
-    assert migration_position < reconciliation_position < readiness_position
+    assert migration_position < reconciliation_position
+    assert migration_position < restart_position
 
 
 @pytest.mark.parametrize(

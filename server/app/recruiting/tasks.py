@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from server.app.integrations.feishu.notifications import schedule_feishu_notification
 from server.app.recruiting.models import ApplicationReviewTask
 
 
@@ -93,6 +94,13 @@ def ensure_review_task(
         safe_error_code=safe_error_code,
     )
     db.add(task)
+    schedule_feishu_notification(
+        db,
+        organization_id=application.organization_id,
+        recipient_user_ids=[task.assignee_id],
+        event_type="review_requested",
+        application_id=application.id,
+    )
     return task
 
 

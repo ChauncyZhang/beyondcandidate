@@ -9,6 +9,23 @@ class UnsafePayload(ValueError): pass
 
 TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){1,7}$")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$")
+FEISHU_NOTIFICATION_EVENTS = frozenset(
+    {
+        "review_requested",
+        "interview_arrangement_requested",
+        "interview_scheduled",
+        "interview_rescheduled",
+        "interview_cancelled",
+        "interview_assignment_removed",
+        "feedback_requested",
+        "next_interview_requested",
+        "hiring_decision_requested",
+        "candidate_passed",
+        "candidate_rejected",
+        "offer_accepted",
+        "offer_declined",
+    }
+)
 
 
 class FieldPolicy(Protocol):
@@ -173,3 +190,18 @@ for _feishu_topic in (
             }
         ),
     )
+
+DEFAULT_PAYLOAD_POLICIES.register_topic(
+    "feishu.notification.send",
+    PayloadSchema(
+        {
+            "organization_id": OpaqueIdField(),
+            "recipient_user_id": OpaqueIdField(),
+            "event_type": EnumField(set(FEISHU_NOTIFICATION_EVENTS)),
+        },
+        {
+            "application_id": OpaqueIdField(),
+            "interview_id": OpaqueIdField(),
+        },
+    ),
+)
