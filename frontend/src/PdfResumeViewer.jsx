@@ -35,6 +35,11 @@ function isSafeTextFile(file) {
   return file?.blob?.type?.startsWith("text/") || [".txt", ".md", ".csv"].some((suffix) => name.endsWith(suffix));
 }
 
+function isImageFile(file) {
+  const name = file?.filename?.toLowerCase() || "";
+  return file?.blob?.type?.startsWith("image/") || [".jpg", ".jpeg", ".png"].some((suffix) => name.endsWith(suffix));
+}
+
 export function PdfResumeViewer({ file, status, error, onRetry, onDownload, downloading = false }) {
   const viewportRef = useRef(null);
   const [pageNumber, setPageNumber] = useState(1);
@@ -74,7 +79,8 @@ export function PdfResumeViewer({ file, status, error, onRetry, onDownload, down
   }, [file]);
 
   const showPdf = file && isPdfFile(file);
-  const showText = file && !showPdf && isSafeTextFile(file);
+  const showImage = file && !showPdf && isImageFile(file);
+  const showText = file && !showPdf && !showImage && isSafeTextFile(file);
   const canDownload = Boolean(file) && status === "ready";
 
   return <section className="pdf-resume-viewer" aria-label="原始简历预览">
@@ -107,7 +113,8 @@ export function PdfResumeViewer({ file, status, error, onRetry, onDownload, down
         onLoadError={() => setDocumentError("PDF 无法解析，可下载原始文件后查看。")}
       ><Page pageNumber={pageNumber} width={fitWidth ? pageWidth : undefined} scale={fitWidth ? 1 : zoom} renderAnnotationLayer renderTextLayer /></Document>}
       {status === "ready" && showText && <pre className="safe-text-preview">{textContent || "正在读取文本预览…"}</pre>}
-      {status === "ready" && file && !showPdf && !showText && <div className="pdf-viewer-state"><FileText size={25} /><strong>此格式不支持在线预览</strong><span>可通过工具栏下载原始文件，并使用本机安全应用打开。</span></div>}
+      {status === "ready" && showImage && <img className="resume-image-preview" src={file.url} alt={`${file.filename || "简历"}预览`} />}
+      {status === "ready" && file && !showPdf && !showImage && !showText && <div className="pdf-viewer-state"><FileText size={25} /><strong>此格式不支持在线预览</strong><span>可通过工具栏下载原始文件，并使用本机安全应用打开。</span></div>}
     </div>
   </section>;
 }

@@ -32,8 +32,14 @@ const demoFiles = [
   { id: "f3", name: "大模型应用_赵宁.pdf", size: "1.1 MB", type: "PDF", valid: true },
   { id: "f4", name: "候选人简历_陈浩.pdf", size: "2.0 MB", type: "PDF", valid: true },
   { id: "f5", name: "算法实习生_孙悦.pdf", size: "720 KB", type: "PDF", valid: true },
-  { id: "f6", name: "候选人作品集.zip", size: "8.6 MB", type: "ZIP", valid: false, error: "不支持 ZIP 文件，请仅上传 PDF、DOCX 或 TXT" },
+  { id: "f6", name: "候选人作品集.zip", size: "8.6 MB", type: "ZIP", valid: false, error: "不支持 ZIP 文件，请仅上传 PDF、DOCX、TXT、JPG 或 PNG" },
 ].map((file) => ({ ...file, example: true }));
+
+const SUPPORTED_RESUME_EXTENSIONS = new Set(["pdf", "docx", "txt", "jpg", "jpeg", "png"]);
+
+export function isSupportedResumeExtension(extension) {
+  return SUPPORTED_RESUME_EXTENSIONS.has(String(extension || "").toLowerCase());
+}
 
 export function statusLabel(status) {
   return {
@@ -259,8 +265,8 @@ export function ImportWizard({ activeJob, recentTask, onClose, onCreateTask, onR
   function selectLocalFiles(event) {
     const selectedFiles = [...event.target.files].map((file, index) => {
       const extension = file.name.split(".").pop()?.toLowerCase();
-      const valid = ["pdf", "docx", "txt"].includes(extension);
-      const candidate = file.name.replace(/\.(pdf|docx|txt)$/i, "").split(/[_-]/).pop() || `候选人 ${index + 1}`;
+      const valid = isSupportedResumeExtension(extension);
+      const candidate = file.name.replace(/\.(pdf|docx|txt|jpe?g|png)$/i, "").split(/[_-]/).pop() || `候选人 ${index + 1}`;
       return {
         id: `LOCAL-${Date.now()}-${index}`,
         name: file.name,
@@ -271,7 +277,7 @@ export function ImportWizard({ activeJob, recentTask, onClose, onCreateTask, onR
         type: extension?.toUpperCase() || "未知",
         valid,
         sourceFile: file,
-        error: valid ? null : "不支持该文件格式，请仅上传 PDF、DOCX 或 TXT",
+        error: valid ? null : "不支持该文件格式，请仅上传 PDF、DOCX、TXT、JPG 或 PNG",
         expectedParseStatus: "success",
         expectedLlmStatus: "success",
       };
@@ -356,8 +362,8 @@ export function ImportWizard({ activeJob, recentTask, onClose, onCreateTask, onR
           </div>}
 
           {step === 2 && <div className="wizard-section">
-            <input ref={fileInputRef} className="visually-hidden" type="file" accept=".pdf,.docx,.txt" multiple onChange={selectLocalFiles} />
-            {files.length === 0 ? <div className="wizard-dropzone-group"><button className="wizard-dropzone" type="button" onClick={() => fileInputRef.current?.click()}><Import size={28} /><strong>选择本地简历</strong><span>支持 PDF、DOCX 或 TXT，将按顺序逐份上传</span></button><button className="text-button" type="button" onClick={() => setFiles(demoFiles)}>查看格式错误示例</button></div> : <>
+            <input ref={fileInputRef} className="visually-hidden" type="file" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" multiple onChange={selectLocalFiles} />
+            {files.length === 0 ? <div className="wizard-dropzone-group"><button className="wizard-dropzone" type="button" onClick={() => fileInputRef.current?.click()}><Import size={28} /><strong>选择本地简历</strong><span>支持 PDF、DOCX、TXT、JPG 或 PNG，将按顺序逐份上传</span></button><button className="text-button" type="button" onClick={() => setFiles(demoFiles)}>查看格式错误示例</button></div> : <>
               <div className="file-summary"><span><strong>{validFiles.length}</strong> 份有效简历</span><span>{files.some((file) => file.example) ? "格式错误示例（不可创建）" : files.some((file) => file.synthetic) ? "UX-08 合成数据" : "本地选择"}</span><span className={invalidFiles.length || files.some((file) => file.example) ? "has-error" : "is-valid"}>{files.some((file) => file.example) ? "仅用于查看校验状态" : invalidFiles.length ? `${invalidFiles.length} 个文件需处理` : "全部文件可导入"}</span><button type="button" onClick={() => fileInputRef.current?.click()}><Plus size={15} />重新选择</button></div>
               {files.some((file) => file.example) && <div className="privacy-note" role="status"><CircleAlert size={17} /><span>以下内容是格式校验示例，不会上传，也不能进入真实任务创建流程。</span></div>}
               <div className="import-file-list">{files.map((file) => <div className={file.valid ? "" : "invalid"} key={file.id}><span className="file-icon">{file.valid ? <FileText size={18} /> : <FileArchive size={18} />}</span><span><strong>{file.name}</strong><small>{file.type} · {file.size}{file.error ? ` · ${file.error}` : ""}</small></span><span className={file.example || !file.valid ? "invalid-label" : "valid-label"}>{file.example ? "示例" : file.valid ? "可导入" : "不支持"}</span><button type="button" aria-label={`移除 ${file.name}`} onClick={() => setFiles((current) => current.filter((item) => item.id !== file.id))}><Trash2 size={16} /></button></div>)}</div>

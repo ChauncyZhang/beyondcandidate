@@ -37,4 +37,6 @@ test("PDF viewer uses react-pdf and exposes complete keyboard-accessible control
   assert.match(viewer, /<Page/);
   assert.match(viewer, /textContent/);
   assert.match(viewer, /aria-live="polite"/);
+  assert.match(viewer, /className="resume-image-preview"/);
+  assert.match(styles, /\.resume-image-preview/);
 });

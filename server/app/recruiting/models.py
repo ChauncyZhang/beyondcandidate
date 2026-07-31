@@ -51,7 +51,7 @@ class FileObject(Record, Base):
     detected_type: Mapped[str | None] = mapped_column(String(20))
     scan_status: Mapped[str] = mapped_column(String(20), default="clean")
     quarantine_cleanup_key: Mapped[str | None] = mapped_column(String(512))
-    __table_args__ = (UniqueConstraint("organization_id", "id"), UniqueConstraint("organization_id", "storage_key"), ForeignKeyConstraint(["organization_id", "uploaded_by"], ["users.organization_id", "users.id"]), CheckConstraint("storage_state in ('quarantine','clean','rejected','deleted')",name="ck_file_objects_storage_state"), CheckConstraint("scan_status in ('pending','clean','rejected','failed')",name="ck_file_objects_scan_status"), CheckConstraint("detected_type is null or detected_type in ('pdf','docx','txt')",name="ck_file_objects_detected_type"), Index("ix_file_objects_tenant_sha","organization_id","sha256"))
+    __table_args__ = (UniqueConstraint("organization_id", "id"), UniqueConstraint("organization_id", "storage_key"), ForeignKeyConstraint(["organization_id", "uploaded_by"], ["users.organization_id", "users.id"]), CheckConstraint("storage_state in ('quarantine','clean','rejected','deleted')",name="ck_file_objects_storage_state"), CheckConstraint("scan_status in ('pending','clean','rejected','failed')",name="ck_file_objects_scan_status"), CheckConstraint("detected_type is null or detected_type in ('pdf','docx','txt','image')",name="ck_file_objects_detected_type"), Index("ix_file_objects_tenant_sha","organization_id","sha256"))
 
 
 class Resume(Record, Base):

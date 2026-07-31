@@ -3,7 +3,7 @@ import zipfile
 
 import pytest
 
-from server.app.screening.parsers import ParserError, ParserLimits, parse_document
+from server.app.screening.parsers import ParserError, ParserLimits, parse_document, validate_upload_preflight
 from server.app.screening.rules import ENGINE_VERSION, RuleSnapshot, RuleSnapshotError, score_resume
 from server.app.queue.payloads import DEFAULT_PAYLOAD_POLICIES, UnsafePayload
 import uuid
@@ -85,6 +85,14 @@ def pdf_bytes(*, pages: int = 1, encrypted: bool = False) -> bytes:
     writer.write(stream); return stream.getvalue()
 
 
+def image_bytes(image_format: str) -> bytes:
+    from PIL import Image
+
+    stream = io.BytesIO()
+    Image.new("RGB", (120, 80), "white").save(stream, format=image_format)
+    return stream.getvalue()
+
+
 def test_parser_happy_paths_use_stable_versions_and_quality() -> None:
     txt = parse_document(io.BytesIO("中文 Python 5年".encode("utf-8")), extension=".txt", mime_type="text/plain")
     docx = parse_document(io.BytesIO(docx_bytes("Python 后端")), extension=".docx", mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
@@ -92,6 +100,53 @@ def test_parser_happy_paths_use_stable_versions_and_quality() -> None:
     assert txt.text == "中文 Python 5年" and txt.parser_version == "txt-v1" and txt.quality == "good"
     assert "Python 后端" in docx.text and docx.parser_version == "docx-v2"
     assert pdf.parser_version == "pdf-v4" and pdf.quality == "empty"
+
+
+@pytest.mark.parametrize(
+    ("extension", "mime_type", "image_format"),
+    [
+        (".jpg", "image/jpeg", "JPEG"),
+        (".jpeg", "image/jpeg", "JPEG"),
+        (".png", "image/png", "PNG"),
+    ],
+)
+def test_image_resume_preflight_and_parser_accept_safe_images(extension, mime_type, image_format) -> None:
+    data = image_bytes(image_format)
+
+    assert validate_upload_preflight(io.BytesIO(data), extension=extension, mime_type=mime_type) == "image"
+    parsed = parse_document(io.BytesIO(data), extension=extension, mime_type=mime_type)
+
+    assert parsed.text == ""
+    assert parsed.parser_version == "image-v1"
+    assert parsed.quality == "empty"
+
+
+def test_image_resume_rejects_extension_magic_mismatch() -> None:
+    with pytest.raises(ParserError) as raised:
+        validate_upload_preflight(
+            io.BytesIO(image_bytes("PNG")),
+            extension=".jpg",
+            mime_type="image/jpeg",
+        )
+    assert raised.value.safe_code == "file_magic_mismatch"
+
+
+def test_pdf_parser_allows_pdfium_renderable_document_when_text_parsers_fail(monkeypatch) -> None:
+    class Document:
+        def __len__(self):
+            return 1
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("pypdf.PdfReader", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("xref")))
+    monkeypatch.setattr("server.app.screening.parsers.extract_structured_pdf", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr("pypdfium2.PdfDocument", lambda *_args, **_kwargs: Document())
+
+    parsed = parse_document(io.BytesIO(b"%PDF-renderable"), extension=".pdf", mime_type="application/pdf")
+
+    assert parsed.parser_version == "pdf-renderable-v1"
+    assert parsed.quality == "empty"
 
 
 def test_docx_parser_reads_table_content_in_document_order() -> None:

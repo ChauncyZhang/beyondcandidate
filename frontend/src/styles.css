@@ -402,6 +402,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .pdf-viewer-state span { max-width: 390px; line-height: 1.6; font-size: 13px; }
 .pdf-viewer-state.error { color: #a84752; }
 .safe-text-preview { min-height: 100%; margin: 0; padding: 24px; border-radius: 4px; background: #fff; color: #263c4b; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.7; font: 13px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.resume-image-preview { display: block; max-width: 100%; height: auto; margin: 0 auto; background: #fff; box-shadow: 0 2px 12px rgba(42, 62, 76, .18); }
 .workspace-download-error { margin-top: 8px; padding: 9px 11px; border: 1px solid #e3a1a9; border-radius: 5px; background: #fff3f4; color: #a63f4b; display: flex; align-items: center; gap: 7px; font-size: 13px; }
 
 @media (max-width: 1179px) {

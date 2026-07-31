@@ -35,7 +35,7 @@ class _WorkerError(Exception):
         self.safe_code = safe_code
 
 
-def _render(source: bytes, limits: _Limits) -> tuple[list[dict[str, int]], bytes]:
+def _render_pdf(source: bytes, limits: _Limits) -> tuple[list[dict[str, int]], bytes]:
     if len(source) > limits.max_source_bytes:
         raise _WorkerError("file_too_large")
     if not source.startswith(b"%PDF-"):
@@ -47,15 +47,12 @@ def _render(source: bytes, limits: _Limits) -> tuple[list[dict[str, int]], bytes
         reader = PdfReader(io.BytesIO(source), strict=True)
         if reader.is_encrypted:
             raise _WorkerError("pdf_encrypted")
-        page_count = len(reader.pages)
     except _WorkerError:
         raise
     except Exception:
-        raise _WorkerError("pdf_malformed") from None
-    if page_count <= 0:
-        raise _WorkerError("pdf_malformed")
-    if page_count > limits.max_pages:
-        raise _WorkerError("pdf_page_limit")
+        # PDFium is the rendering authority. It can safely render some exported
+        # image PDFs whose cross-reference metadata pypdf cannot parse.
+        pass
 
     try:
         import pypdfium2 as pdfium
@@ -64,8 +61,11 @@ def _render(source: bytes, limits: _Limits) -> tuple[list[dict[str, int]], bytes
     except Exception:
         raise _WorkerError("pdf_malformed") from None
     try:
-        if len(document) != page_count:
+        page_count = len(document)
+        if page_count <= 0:
             raise _WorkerError("pdf_malformed")
+        if page_count > limits.max_pages:
+            raise _WorkerError("pdf_page_limit")
 
         scale = limits.dpi / 72.0
         dimensions: list[tuple[int, int]] = []
@@ -124,13 +124,44 @@ def _render(source: bytes, limits: _Limits) -> tuple[list[dict[str, int]], bytes
         document.close()
 
 
+def _render_image(source: bytes, limits: _Limits) -> tuple[list[dict[str, int | str]], bytes]:
+    if len(source) > limits.max_source_bytes:
+        raise _WorkerError("file_too_large")
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(source)) as opened:
+            if opened.format not in {"JPEG", "PNG"}:
+                raise _WorkerError("file_type_not_allowed")
+            width, height = opened.size
+            if width <= 0 or height <= 0:
+                raise _WorkerError("image_malformed")
+            if width * height > limits.max_page_pixels:
+                raise _WorkerError("image_pixel_limit")
+            opened.load()
+            media_type = "image/jpeg" if opened.format == "JPEG" else "image/png"
+    except _WorkerError:
+        raise
+    except Exception:
+        raise _WorkerError("image_malformed") from None
+    if len(source) > limits.max_total_bytes:
+        raise _WorkerError("image_render_byte_limit")
+    return [{"page_number": 1, "width": width, "height": height, "length": len(source), "media_type": media_type}], source
+
+
 def main() -> None:
     payload = b""
     try:
         header = json.loads(sys.stdin.buffer.readline(8192))
         limits = _Limits(**header["limits"])
+        source_type = header.get("source_type", "pdf")
         source = sys.stdin.buffer.read(limits.max_source_bytes + 1)
-        pages, payload = _render(source, limits)
+        if source_type == "pdf":
+            pages, payload = _render_pdf(source, limits)
+        elif source_type == "image":
+            pages, payload = _render_image(source, limits)
+        else:
+            raise _WorkerError("ocr_source_type_invalid")
         response = {"ok": True, "pages": pages}
     except _WorkerError as error:
         response = {"ok": False, "safe_code": error.safe_code}

@@ -42,6 +42,12 @@ def app_and_seed(tmp_path):
 def login(client,email,organization_slug="acme"):
     response=client.post("/api/v1/auth/login",json={"organization_slug":organization_slug,"email":email,"password":"correct"},headers={"Origin":"https://hr.example.test"}); assert response.status_code==200; return {"Origin":"https://hr.example.test","X-CSRF-Token":response.headers["X-CSRF-Token"]}
 
+
+def image_bytes(image_format="PNG"):
+    from PIL import Image
+
+    stream=io.BytesIO(); Image.new("RGB",(120,80),"white").save(stream,format=image_format); return stream.getvalue()
+
 def test_screening_runs_are_listed_with_display_context_and_job_scope(tmp_path):
     app,_,job_id=app_and_seed(tmp_path)
     with TestClient(app) as client:
@@ -274,6 +280,26 @@ def test_screening_upload_rejects_empty_and_magic_mismatch_without_storage(tmp_p
         for key,name,data,mime,code in (("empty","x.txt",b"","text/plain","empty_file"),("magic","x.pdf",b"not pdf","application/pdf","file_magic_mismatch")):
             response=client.post(f"/api/v1/screening-runs/{run['id']}/items",files={"file":(name,data,mime)},headers={**headers,"Idempotency-Key":key}); assert response.status_code==422 and response.json()["code"]==code
         assert storage.writes==0
+
+
+def test_screening_upload_accepts_image_resume_and_persists_detected_type(tmp_path):
+    app,storage,job_id=app_and_seed(tmp_path)
+    with TestClient(app) as client:
+        headers=login(client,"admin@example.test")
+        run=client.post(f"/api/v1/jobs/{job_id}/screening-runs",json={},headers={**headers,"Idempotency-Key":"image-run"}).json()["data"]
+        response=client.post(
+            f"/api/v1/screening-runs/{run['id']}/items",
+            files={"file":("resume.png",image_bytes(),"image/png")},
+            headers={**headers,"Idempotency-Key":"image-item"},
+        )
+
+        assert response.status_code==201
+        assert response.json()["data"]["mime_type"]=="image/png"
+        with app.state.identity_store.sync_session() as db:
+            stored=db.get(ScreeningItem,uuid.UUID(response.json()["data"]["id"]))
+            file_object=db.get(FileObject,stored.file_object_id)
+            assert file_object.detected_type=="image"
+        assert len(storage.objects)==1
 
 def test_screening_upload_exact_size_boundary_and_storage_failure(tmp_path):
     app,storage,job_id=app_and_seed(tmp_path); app.state.settings.parser_max_source_bytes=1024

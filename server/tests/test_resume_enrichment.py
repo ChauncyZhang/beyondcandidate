@@ -36,6 +36,10 @@ class Renderer:
         assert limits.max_pages == 20
         return (RenderedOcrPage(1, b"\x89PNG\r\n\x1a\npixels", 1, 1),)
 
+    async def render_image(self, _stream, *, limits):
+        assert limits.max_pages == 20
+        return (RenderedOcrPage(1, b"\x89PNG\r\n\x1a\nimage", 1, 1),)
+
 
 class Cipher:
     def decrypt(self, _value):
@@ -100,6 +104,27 @@ def test_poor_pdf_uses_better_ocr_text():
     assert result.assessment.quality == "good"
     assert "财务管理" in result.text
     assert storage.opens == 1
+
+
+def test_image_resume_always_uses_image_ocr_renderer():
+    class Gateway:
+        async def extract_images(self, *_args):
+            return ["结构设计工程师\n六年产品结构设计经验\n熟练使用 Creo 和 AutoCAD"]
+
+    enhancer = ResumeTextEnhancer(
+        lambda: Database(config()), Storage(), Gateway(), Cipher(), settings(), Renderer()
+    )
+    result = asyncio.run(enhancer.enhance(
+        uuid.uuid4(),
+        storage_key="clean/resume-image",
+        filename="resume.jpg",
+        mime_type="image/jpeg",
+        native_text="",
+    ))
+
+    assert result.used_ocr is True
+    assert result.assessment.quality == "good"
+    assert "结构设计" in result.text
 
 
 def test_ocr_failure_preserves_native_text_and_safe_code():

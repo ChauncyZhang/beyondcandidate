@@ -22,12 +22,34 @@ class ParsedDocument:
 class ParserError(Exception):
     def __init__(self, safe_code: str) -> None: self.safe_code = normalize_safe_code(safe_code); super().__init__(self.safe_code)
 
-_MIMES = {".pdf": "application/pdf", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".txt": "text/plain"}
+_MIMES = {
+    ".pdf": ("application/pdf",),
+    ".docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",),
+    ".txt": ("text/plain",),
+    ".jpg": ("image/jpeg", "image/jpg"),
+    ".jpeg": ("image/jpeg", "image/jpg"),
+    ".png": ("image/png",),
+}
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+_MAX_IMAGE_PIXELS = 20_000_000
+
+
+def _validate_type(extension: str, mime_type: str) -> None:
+    if extension not in _MIMES:
+        raise ParserError("file_type_not_allowed")
+    if mime_type.casefold() not in _MIMES[extension]:
+        raise ParserError("file_type_mismatch")
+
+
+def _validate_image_magic(data: bytes, extension: str) -> None:
+    if extension in {".jpg", ".jpeg"} and not data.startswith(b"\xff\xd8\xff"):
+        raise ParserError("file_magic_mismatch")
+    if extension == ".png" and not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ParserError("file_magic_mismatch")
 
 def parse_document(stream: BinaryIO, *, extension: str, mime_type: str, limits: ParserLimits = ParserLimits()) -> ParsedDocument:
     extension = extension.lower()
-    if extension not in _MIMES: raise ParserError("file_type_not_allowed")
-    if mime_type != _MIMES[extension]: raise ParserError("file_type_mismatch")
+    _validate_type(extension, mime_type)
     stream.seek(0); data = stream.read(limits.max_source_bytes + 1)
     if len(data) > limits.max_source_bytes: raise ParserError("file_too_large")
     if extension == ".pdf":
@@ -36,13 +58,15 @@ def parse_document(stream: BinaryIO, *, extension: str, mime_type: str, limits: 
     if extension == ".docx":
         if not data.startswith(b"PK\x03\x04"): raise ParserError("file_magic_mismatch")
         return _docx(data, limits)
+    if extension in _IMAGE_EXTENSIONS:
+        _validate_image_magic(data, extension)
+        return _image(data, extension)
     if data.startswith((b"%PDF-", b"PK\x03\x04")): raise ParserError("file_magic_mismatch")
     return _txt(data, limits)
 
 def validate_upload_preflight(stream: BinaryIO, *, extension: str, mime_type: str, limits: ParserLimits = ParserLimits()) -> str:
     extension=extension.lower()
-    if extension not in _MIMES: raise ParserError("file_type_not_allowed")
-    if mime_type!=_MIMES[extension]: raise ParserError("file_type_mismatch")
+    _validate_type(extension, mime_type)
     stream.seek(0); data=stream.read(limits.max_source_bytes+1); stream.seek(0)
     if not data: raise ParserError("empty_file")
     if len(data)>limits.max_source_bytes: raise ParserError("file_too_large")
@@ -53,6 +77,9 @@ def validate_upload_preflight(stream: BinaryIO, *, extension: str, mime_type: st
     if extension==".txt":
         if data.startswith((b"%PDF-",b"PK\x03\x04")): raise ParserError("file_magic_mismatch")
         if b"\x00" in data: raise ParserError("binary_text_rejected")
+    if extension in _IMAGE_EXTENSIONS:
+        _validate_image_magic(data, extension)
+        return "image"
     return extension[1:]
 
 def _docx_preflight(data,limits):
@@ -176,14 +203,50 @@ def _pdf(data: bytes, limits: ParserLimits) -> ParsedDocument:
             raise ParserError(error.safe_code) from None
     except Exception:
         pass
-    if reader is None:
-        raise ParserError("pdf_malformed")
+    if reader is not None:
+        try:
+            return _pdf_fallback(reader, limits)
+        except ParserError:
+            raise
+        except Exception:
+            pass
+
+    # Some image-only PDFs have damaged cross-reference metadata but are still
+    # safely renderable. Let the isolated OCR renderer handle those documents.
     try:
-        return _pdf_fallback(reader, limits)
+        import pypdfium2 as pdfium
+
+        document = pdfium.PdfDocument(data)
+        try:
+            page_count = len(document)
+        finally:
+            document.close()
+    except Exception:
+        raise ParserError("pdf_malformed") from None
+    if page_count <= 0:
+        raise ParserError("pdf_malformed")
+    if page_count > limits.pdf_max_pages:
+        raise ParserError("pdf_page_limit")
+    return ParsedDocument("", "pdf-renderable-v1", "empty")
+
+
+def _image(data: bytes, extension: str) -> ParsedDocument:
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            expected_format = "JPEG" if extension in {".jpg", ".jpeg"} else "PNG"
+            if image.format != expected_format:
+                raise ParserError("file_magic_mismatch")
+            width, height = image.size
+            if width <= 0 or height <= 0 or width * height > _MAX_IMAGE_PIXELS:
+                raise ParserError("image_pixel_limit")
+            image.verify()
     except ParserError:
         raise
     except Exception:
-        raise ParserError("pdf_malformed") from None
+        raise ParserError("image_malformed") from None
+    return ParsedDocument("", "image-v1", "empty")
 
 
 def _docx_blocks(document) -> list[str]:

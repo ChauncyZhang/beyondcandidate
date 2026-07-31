@@ -4,7 +4,7 @@ BeyondCandidate 是一个开源的 AI 招聘协作平台，覆盖简历导入与
 
 ## 主要能力
 
-- 按职位批量导入 PDF、DOCX 和 TXT 简历。
+- 按职位批量导入 PDF、DOCX、TXT、JPG 和 PNG 简历；扫描件与图片型 PDF 可通过已配置的 OCR 服务识别。
 - 结构化解析、扫描件 OCR 和 LLM 补全组成的多层简历处理链路。
 - 使用 OpenAI-compatible Provider 进行多维度 AI 评估与宽松流转。
 - 候选人、职位、招聘流程模板、面试轮次和反馈统一管理。

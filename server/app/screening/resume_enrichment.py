@@ -23,7 +23,7 @@ class EnrichedResumeText:
 
 
 class ResumeTextEnhancer:
-    """Use OCR only when native PDF extraction is not reliable enough."""
+    """Use OCR when PDF extraction is weak or the source is an image."""
 
     def __init__(self, sessions, storage, gateway, cipher, settings, renderer=None):
         self.sessions = sessions
@@ -55,8 +55,10 @@ class ResumeTextEnhancer:
         native_text: str,
     ) -> EnrichedResumeText:
         native = assess_text_quality(native_text)
-        is_pdf = mime_type == "application/pdf" or PurePath(filename).suffix.casefold() == ".pdf"
-        if native.quality == "good" or not is_pdf:
+        suffix = PurePath(filename).suffix.casefold()
+        is_pdf = mime_type == "application/pdf" or suffix == ".pdf"
+        is_image = mime_type.casefold().startswith("image/") or suffix in {".jpg", ".jpeg", ".png"}
+        if native.quality == "good" or not (is_pdf or is_image):
             return EnrichedResumeText(native_text, native, False)
 
         with self.sessions() as database:
@@ -75,13 +77,14 @@ class ResumeTextEnhancer:
         try:
             source_limit = min(self.settings.parser_max_source_bytes, 10 * 1024 * 1024)
             stream = await self.storage.open(storage_key, source_limit)
-            pages = await self.renderer.render_pdf(
-                stream,
-                limits=OcrRenderLimits(
-                    max_source_bytes=source_limit,
-                    max_pages=min(self.settings.parser_pdf_max_pages, 20),
-                ),
+            render_limits = OcrRenderLimits(
+                max_source_bytes=source_limit,
+                max_pages=min(self.settings.parser_pdf_max_pages, 20),
             )
+            if is_pdf:
+                pages = await self.renderer.render_pdf(stream, limits=render_limits)
+            else:
+                pages = await self.renderer.render_image(stream, limits=render_limits)
             page_text = await self.gateway.extract_images(
                 provider_id,
                 base_url,

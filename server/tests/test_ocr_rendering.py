@@ -31,6 +31,14 @@ def _render(data: bytes, *, limits: OcrRenderLimits = OcrRenderLimits(), timeout
     return asyncio.run(IsolatedOcrRenderer(timeout_seconds=timeout).render_pdf(io.BytesIO(data), limits=limits))
 
 
+def _image_bytes(image_format: str = "JPEG") -> bytes:
+    from PIL import Image
+
+    stream = io.BytesIO()
+    Image.new("RGB", (240, 120), "white").save(stream, format=image_format)
+    return stream.getvalue()
+
+
 def test_renders_scanned_pdf_to_ordered_in_memory_png_pages() -> None:
     pages = _render(_scanned_image_pdf())
     assert len(pages) == 1
@@ -39,6 +47,22 @@ def test_renders_scanned_pdf_to_ordered_in_memory_png_pages() -> None:
     assert pages[0].image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
     assert pages[0].width > pages[0].height > 0
     assert "path" not in pages[0].__dict__
+
+
+@pytest.mark.parametrize(
+    ("image_format", "media_type", "magic"),
+    [("JPEG", "image/jpeg", b"\xff\xd8\xff"), ("PNG", "image/png", b"\x89PNG\r\n\x1a\n")],
+)
+def test_validates_image_resume_as_single_ocr_page(image_format: str, media_type: str, magic: bytes) -> None:
+    pages = asyncio.run(
+        IsolatedOcrRenderer(timeout_seconds=10).render_image(io.BytesIO(_image_bytes(image_format)))
+    )
+
+    assert len(pages) == 1
+    assert pages[0].page_number == 1
+    assert pages[0].media_type == media_type
+    assert pages[0].image_bytes.startswith(magic)
+    assert (pages[0].width, pages[0].height) == (240, 120)
 
 
 @pytest.mark.parametrize(

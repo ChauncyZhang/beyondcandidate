@@ -56,6 +56,16 @@ test("format examples can never advance into the real task flow", () => {
   assert.equal(helpers.canAdvanceFromFiles([{ valid: false, sourceFile: {} }]), false);
 });
 
+test("resume import accepts common image formats alongside documents", () => {
+  for (const extension of ["pdf", "docx", "txt", "jpg", "jpeg", "png"]) {
+    assert.equal(helpers.isSupportedResumeExtension(extension), true);
+  }
+  assert.equal(helpers.isSupportedResumeExtension("zip"), false);
+  const source = readFileSync(new URL("./ScreeningViews.jsx", import.meta.url), "utf8");
+  assert.match(source, /accept="\.pdf,\.docx,\.txt,\.jpg,\.jpeg,\.png"/);
+  assert.match(source, /支持 PDF、DOCX、TXT、JPG 或 PNG/);
+});
+
 test("server candidate labels never present a derived name as verified", () => {
   assert.equal(helpers.candidateDisplayName({ candidate: "张三" }, true), "张三（姓名待核验）");
   assert.equal(helpers.candidateDisplayName({ candidate: "" }, true), "候选人姓名待核验");
