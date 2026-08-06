@@ -4,6 +4,7 @@ from sqlalchemy import select
 
 from server.app.integrations.feishu.notifications import schedule_feishu_notification
 from server.app.recruiting.models import ApplicationReviewTask
+from server.app.recruiting.review_assignments import review_notification_user_ids
 
 
 LLM_TERMINAL_SAFE_ERROR_CODES = frozenset(
@@ -55,6 +56,7 @@ def ensure_review_task(
     ai_status: str,
     safe_error_code: str | None = None,
     create_if_missing: bool = True,
+    recipient_user_ids=None,
 ):
     if (
         job.organization_id != application.organization_id
@@ -85,10 +87,11 @@ def ensure_review_task(
     if not create_if_missing:
         return None
 
+    recipients = tuple(recipient_user_ids or review_notification_user_ids(db, job))
     task = ApplicationReviewTask(
         organization_id=application.organization_id,
         application_id=application.id,
-        assignee_id=job.hiring_owner_id or job.owner_id,
+        assignee_id=recipients[0],
         status="open",
         ai_status=ai_status,
         safe_error_code=safe_error_code,
@@ -97,7 +100,7 @@ def ensure_review_task(
     schedule_feishu_notification(
         db,
         organization_id=application.organization_id,
-        recipient_user_ids=[task.assignee_id],
+        recipient_user_ids=recipients,
         event_type="review_requested",
         application_id=application.id,
     )

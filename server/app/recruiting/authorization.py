@@ -76,6 +76,10 @@ class RecruitingAuthorizationService:
                 JobCollaborator.user_id == principal.user_id,
                 JobCollaborator.access_role == "job_manager",
             ))
+            if principal.recruiting_scope_type == "departments":
+                branches.append(job.department_id.in_(principal.recruiting_department_ids))
+            elif principal.recruiting_scope_type == "organization":
+                branches.append(True)
         return (
             and_(job.organization_id == principal.organization_id, or_(*branches))
             if branches

@@ -18,6 +18,7 @@ from server.app.integrations.feishu.provider import CalendarEventRequest, Feishu
 from server.app.interviews.models import Interview, InterviewParticipant
 from server.app.queue.service import PermanentJobError, RetryableJobError
 from server.app.recruiting.models import Application, ApplicationReviewTask, Candidate
+from server.app.recruiting.review_assignments import review_notification_user_ids
 
 
 def _aware(value):
@@ -332,26 +333,29 @@ def _notification_recipient_is_current(
     if application is None or job is None:
         return False
     if event_type == "review_requested":
-        return application.stage == "review" and db.scalar(
+        return application.stage == "review" and (
+            recipient_user_id in review_notification_user_ids(db, job)
+            or db.scalar(
             select(ApplicationReviewTask.id).where(
                 ApplicationReviewTask.organization_id == organization_id,
                 ApplicationReviewTask.application_id == application.id,
                 ApplicationReviewTask.assignee_id == recipient_user_id,
                 ApplicationReviewTask.status == "open",
             )
-        ) is not None
+            ) is not None
+        )
     if event_type in {"interview_arrangement_requested", "next_interview_requested"}:
         return application.stage == "interview_pending" and application.owner_id == recipient_user_id
     if event_type == "hiring_decision_requested":
-        return application.stage == "decision" and (job.hiring_owner_id or job.owner_id) == recipient_user_id
+        return application.stage == "decision" and recipient_user_id in review_notification_user_ids(db, job)
     if event_type == "candidate_passed":
         return application.stage == "passed" and application.owner_id == recipient_user_id
     if event_type == "candidate_rejected":
         return application.stage == "rejected" and application.owner_id == recipient_user_id
     if event_type == "offer_accepted":
-        return application.stage == "hired" and (job.hiring_owner_id or job.owner_id) == recipient_user_id
+        return application.stage == "hired" and recipient_user_id in review_notification_user_ids(db, job)
     if event_type == "offer_declined":
-        return application.stage == "withdrawn" and (job.hiring_owner_id or job.owner_id) == recipient_user_id
+        return application.stage == "withdrawn" and recipient_user_id in review_notification_user_ids(db, job)
     if participant is None or interview is None:
         return False
     if event_type == "interview_scheduled":

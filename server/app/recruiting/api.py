@@ -24,6 +24,7 @@ from server.app.recruiting.models import (
     Application, ApplicationReviewTask, ApplicationStageEvent, Candidate, CandidateContact, CandidateEvent, CandidateNote,
     DownloadTicket, JobJdVersion, Resume, ResumeProfile, ScreeningRuleVersion,
 )
+from server.app.recruiting.review_assignments import review_manager_user_ids
 from server.app.screening.models import ScreeningItem, ScreeningResult
 from server.app.llm.models import LlmScreeningEvaluation
 from server.app.interviews.models import Interview
@@ -812,6 +813,12 @@ def get_workbench(request: Request, response: Response):
                     notification_item["notification_version"] = workbench_notification_version(row)
                     notification_candidates[row.stage].append(notification_item)
 
+        review_visibility = ApplicationReviewTask.assignee_id == principal.user_id
+        if "hiring_manager" in principal.roles:
+            review_visibility = or_(
+                review_visibility,
+                AUTH.job_predicate(principal, RecruitingAction.RECOMMEND, Job),
+            )
         review_rows=db.execute(select(
             ApplicationReviewTask.id.label("task_id"),
             ApplicationReviewTask.ai_status,
@@ -821,11 +828,15 @@ def get_workbench(request: Request, response: Response):
             Job.hiring_owner_id,
         ).join(Application,and_(Application.organization_id==ApplicationReviewTask.organization_id,Application.id==ApplicationReviewTask.application_id)).join(Candidate,and_(Candidate.organization_id==Application.organization_id,Candidate.id==Application.candidate_id)).join(Job,and_(Job.organization_id==Application.organization_id,Job.id==Application.job_id)).where(
             ApplicationReviewTask.organization_id==principal.organization_id,
-            ApplicationReviewTask.assignee_id==principal.user_id,
+            review_visibility,
             ApplicationReviewTask.status=="open",
             Candidate.deleted_at.is_(None),
             AUTH.job_predicate(principal,RecruitingAction.READ,Job),
         ).order_by(Application.updated_at.desc(),ApplicationReviewTask.id.desc())).all()
+        configured_review_jobs = {
+            job_id: bool(review_manager_user_ids(db, db.get(Job, job_id)))
+            for job_id in {row.job_id for row in review_rows}
+        }
         review_task=tasks["review"]
         review_task["count"]=len(review_rows)
         for row in review_rows[:5]:
@@ -834,7 +845,7 @@ def get_workbench(request: Request, response: Response):
                 "stage":"review",
                 "task_id":str(row.task_id),
                 "ai_status":row.ai_status,
-                "config_warning":row.hiring_owner_id is None,
+                "config_warning":not configured_review_jobs.get(row.job_id, False),
                 "candidate_link":f"/candidates/{row.candidate_id}?tab=evidence&application={row.application_id}&job={row.job_id}",
             })
             review_task["items"].append(item)
@@ -844,7 +855,7 @@ def get_workbench(request: Request, response: Response):
                 stage="review",
                 task_id=row.task_id,
                 ai_status=row.ai_status,
-                config_warning=row.hiring_owner_id is None,
+                config_warning=not configured_review_jobs.get(row.job_id, False),
             )
             notification_candidates["review"].append(notification_item)
 

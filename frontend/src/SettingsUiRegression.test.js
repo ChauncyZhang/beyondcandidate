@@ -316,29 +316,31 @@ test("recruiting scope renders conditionally, validates departments, and refresh
     await rows.filter({ hasText: "林岚" }).waitFor();
     assert.match(await rows.filter({ hasText: "Admin" }).innerText(), /全公司/);
     assert.match(await rows.filter({ hasText: "林岚" }).innerText(), /1 个部门/);
-    assert.match(await rows.filter({ hasText: "周宁" }).innerText(), /-/);
-    assert.equal(await page.getByRole("button", { name: "配置招聘范围", exact: true }).count(), 1);
+    assert.match(await rows.filter({ hasText: "周宁" }).innerText(), /全公司/);
+    assert.equal(await page.getByRole("button", { name: "配置负责范围", exact: true }).count(), 2);
 
     await page.getByRole("button", { name: "邀请成员", exact: true }).click();
     const inviteDrawer = page.getByRole("dialog", { name: "邀请成员", exact: true });
-    const scopeGroup = inviteDrawer.getByRole("group", { name: "负责招聘范围", exact: true });
+    const scopeGroup = inviteDrawer.getByRole("group", { name: "负责范围", exact: true });
     await scopeGroup.waitFor();
     await inviteDrawer.getByLabel("姓名", { exact: true }).fill("新专员");
     await inviteDrawer.getByLabel("工作邮箱", { exact: true }).fill("new@example.test");
     await inviteDrawer.getByLabel("所属部门", { exact: true }).selectOption("dep-1");
     await inviteDrawer.getByLabel(/^指定部门/).check();
     assert.equal(await inviteDrawer.getByRole("button", { name: "发送邀请", exact: true }).isDisabled(), true);
-    assert.match(await inviteDrawer.getByRole("alert").innerText(), /至少选择一个负责招聘部门/);
+    assert.match(await inviteDrawer.getByRole("alert").innerText(), /至少选择一个负责部门/);
     await inviteDrawer.getByLabel("技术部", { exact: true }).check();
     assert.equal(await inviteDrawer.getByRole("button", { name: "发送邀请", exact: true }).isEnabled(), true);
     await inviteDrawer.getByLabel("角色", { exact: true }).selectOption("interviewer");
-    assert.equal(await inviteDrawer.getByRole("group", { name: "负责招聘范围", exact: true }).count(), 0);
+    assert.equal(await inviteDrawer.getByRole("group", { name: "负责范围", exact: true }).count(), 0);
+    await inviteDrawer.getByLabel("角色", { exact: true }).selectOption("hiring_manager");
+    assert.equal(await inviteDrawer.getByRole("group", { name: "负责范围", exact: true }).count(), 1);
     await inviteDrawer.getByRole("button", { name: "取消", exact: true }).click();
 
-    await page.getByRole("button", { name: "配置招聘范围", exact: true }).click();
-    const scopeDrawer = page.getByRole("dialog", { name: "配置招聘范围", exact: true });
+    await rows.filter({ hasText: "林岚" }).getByRole("button", { name: "配置负责范围", exact: true }).click();
+    const scopeDrawer = page.getByRole("dialog", { name: "配置负责范围", exact: true });
     await scopeDrawer.getByLabel(/^全公司/).check();
-    await scopeDrawer.getByRole("button", { name: "保存招聘范围", exact: true }).click();
+    await scopeDrawer.getByRole("button", { name: "保存负责范围", exact: true }).click();
     await scopeDrawer.waitFor({ state: "detached" });
     assert.match(await rows.filter({ hasText: "林岚" }).innerText(), /全公司/);
   } finally {

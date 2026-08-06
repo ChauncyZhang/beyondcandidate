@@ -12,12 +12,13 @@ from sqlalchemy.exc import IntegrityError
 from server.app.governance.audit import AuditValidationError, _validate_metadata
 from server.app.governance.retention import recalculate_candidate_retention
 from server.app.identity.api import problem, session_token
-from server.app.identity.models import AuditLog, Job, User, UserRole, UserStatus
+from server.app.identity.models import AuditLog, Job, User, UserStatus
 from server.app.identity.policy import Principal
 from server.app.identity.service import InvalidSession
 from server.app.llm.models import LlmInvocation, LlmScreeningEvaluation
 from server.app.recruiting.authorization import RecruitingAction, RecruitingAuthorizationService
 from server.app.recruiting.models import Application, ApplicationStageEvent, Candidate, CandidateEvent, Resume
+from server.app.recruiting.review_assignments import review_manager_user_ids
 from server.app.recruiting.tasks import ensure_review_task
 from server.app.recruiting.service import (
     ActiveApplicationExists,
@@ -1157,15 +1158,15 @@ def refer_deferred_membership_to_review(
             job=db.scalar(select(Job).where(Job.organization_id==principal.organization_id,Job.id==source.job_id,AUTH.job_predicate(principal,RecruitingAction.TRANSITION,Job)).with_for_update())
             if job is None: raise ReviewReferralUnavailable
             if job.status != "open": raise ReviewReferralJobClosed
-            if job.hiring_owner_id is None: raise ReviewReferralHiringManagerMissing
-            assignee_id=job.hiring_owner_id
-            if _active_user(db,principal.organization_id,assignee_id) is None: raise ReviewReferralHiringManagerInvalid
-            if not db.scalar(select(exists().where(UserRole.user_id==assignee_id,UserRole.role.in_(("hiring_manager", "recruiting_admin"))))): raise ReviewReferralHiringManagerInvalid
+            manager_ids=review_manager_user_ids(db,job)
+            if not manager_ids:
+                if job.hiring_owner_id is None: raise ReviewReferralHiringManagerMissing
+                raise ReviewReferralHiringManagerInvalid
             source.stage="review"; source.version+=1; source.updated_at=datetime.now(timezone.utc)
             event_payload={"membership_id":str(membership.id),"pool_id":str(membership.pool_id),"from_stage":"deferred","to_stage":"review"}
             db.add(ApplicationStageEvent(organization_id=principal.organization_id,application_id=source.id,actor_user_id=principal.user_id,event_type="application.stage_changed",payload=event_payload))
             db.add(AuditLog(organization_id=principal.organization_id,actor_user_id=principal.user_id,event_type="talent_pool.review_referred",outcome="success",trace_id=request.state.trace_id,metadata_json={"membership_id":str(membership.id),"application_id":str(source.id)}))
-            ensure_review_task(db,application=source,job=job,ai_status="succeeded")
+            ensure_review_task(db,application=source,job=job,ai_status="succeeded",recipient_user_ids=manager_ids)
             db.flush(); recalculate_candidate_retention(db,principal.organization_id,candidate.id)
             return 200,{"data":{"application":_application_data(source),"membership":_membership_data(db,principal,membership)}}
         try:

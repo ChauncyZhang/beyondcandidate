@@ -33,12 +33,12 @@ test("loads server-backed members and departments without seed data", async () =
   assert.equal(controller.getSnapshot().status, "ready");
 });
 
-test("formats recruiting scope only for recruiting administrators and recruiters", () => {
+test("formats responsible scope for recruiting administrators, recruiters, and hiring managers", () => {
   assert.equal(getRecruitingScopeLabel({ roleValues: ["recruiting_admin"], recruitingScopeType: "jobs", recruitingDepartmentIds: [] }), "全公司");
   assert.equal(getRecruitingScopeLabel({ roleValues: ["recruiter"], recruitingScopeType: "jobs", recruitingDepartmentIds: [] }), "指定职位");
   assert.equal(getRecruitingScopeLabel({ roleValues: ["recruiter"], recruitingScopeType: "departments", recruitingDepartmentIds: ["dep-1", "dep-2"] }), "2 个部门");
   assert.equal(getRecruitingScopeLabel({ roleValues: ["recruiter"], recruitingScopeType: "organization", recruitingDepartmentIds: [] }), "全公司");
-  assert.equal(getRecruitingScopeLabel({ roleValues: ["hiring_manager"], recruitingScopeType: "organization", recruitingDepartmentIds: [] }), "-");
+  assert.equal(getRecruitingScopeLabel({ roleValues: ["hiring_manager"], recruitingScopeType: "organization", recruitingDepartmentIds: [] }), "全公司");
   assert.equal(isRecruitingScopeValid("departments", []), false);
   assert.equal(isRecruitingScopeValid("departments", ["dep-1"]), true);
 });
@@ -94,6 +94,32 @@ test("invites a recruiter with an explicit department recruiting scope", async (
   assert.equal(controller.getSnapshot().users[0].recruitingScopeType, "departments");
 });
 
+test("invites a hiring manager with an organization-wide responsible scope", async () => {
+  let received;
+  const client = {
+    async inviteUser(body) {
+      received = body;
+      return {
+        user: { id: "user-4", display_name: "胡玥", email: "manager@example.test", department_id: "dep-1", department_name: "管理层", roles: ["hiring_manager"], status: "invited", recruiting_scope_type: "organization", recruiting_department_ids: [] },
+        invitation: { token: "invite-manager", expires_at: "2026-07-18T08:00:00Z" },
+      };
+    },
+  };
+  const controller = createOrganizationSettingsController({ client });
+
+  await controller.inviteMember({ displayName: "胡玥", email: "manager@example.test", departmentId: "dep-1", role: "hiring_manager", recruitingScopeType: "organization", recruitingDepartmentIds: [] });
+
+  assert.deepEqual(received, {
+    display_name: "胡玥",
+    email: "manager@example.test",
+    department_id: "dep-1",
+    role: "hiring_manager",
+    recruiting_scope_type: "organization",
+    recruiting_department_ids: [],
+  });
+  assert.equal(controller.getSnapshot().users[0].recruitingScopeType, "organization");
+});
+
 test("rejects an empty department scope before sending and updates the member list after save", async () => {
   let updateBody;
   const client = {
@@ -112,7 +138,7 @@ test("rejects an empty department scope before sending and updates the member li
   await controller.load();
 
   await assert.rejects(() => controller.inviteMember({ role: "recruiter", recruitingScopeType: "departments", recruitingDepartmentIds: [] }), { code: "RECRUITING_DEPARTMENT_REQUIRED" });
-  assert.equal(controller.getSnapshot().actionError, "负责招聘部门至少选择一项");
+  assert.equal(controller.getSnapshot().actionError, "负责部门至少选择一项");
 
   await controller.updateRecruitingScope("user-1", { role: "recruiter", recruitingScopeType: "organization", recruitingDepartmentIds: ["dep-1"] });
   assert.deepEqual(updateBody, { role: "recruiter", recruiting_scope_type: "organization", recruiting_department_ids: [] });

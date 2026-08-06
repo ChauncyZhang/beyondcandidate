@@ -39,6 +39,7 @@ from server.app.interviews.schemas import (
 )
 from server.app.recruiting.authorization import RecruitingAction, RecruitingAuthorizationService
 from server.app.recruiting.http import content_disposition
+from server.app.recruiting.review_assignments import review_notification_user_ids
 from server.app.recruiting.workflow import next_interview_round, normalized_workflow_rounds
 from server.app.recruiting.models import Application, ApplicationStageEvent, Candidate, FileObject, JobJdVersion, Resume
 from server.app.recruiting.storage import (
@@ -622,7 +623,7 @@ def _advance_application_if_interviews_complete(
         recipient_ids = [application.owner_id]
     else:
         event_type = "hiring_decision_requested"
-        recipient_ids = [job.hiring_owner_id or job.owner_id]
+        recipient_ids = review_notification_user_ids(db, job)
     schedule_feishu_notification(
         db,
         organization_id=organization_id,

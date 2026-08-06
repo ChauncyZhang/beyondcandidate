@@ -337,6 +337,56 @@ def test_legacy_job_access_entry_honors_department_and_organization_scopes() -> 
     )
 
 
+def test_hiring_manager_department_and_organization_scopes_cover_multiple_jobs(
+    management_app,
+) -> None:
+    app, _, _ = management_app
+    manager = seed_user(app, role="hiring_manager", email="manager@example.test")
+    owner = seed_user(app, role="recruiting_admin", email="owner@example.test")
+    engineering = _add_department(app, manager.organization_id, "Engineering")
+    finance = _add_department(app, manager.organization_id, "Finance")
+    engineering_job = _add_job(app, manager.organization_id, owner.user_id, "Backend", engineering)
+    finance_job = _add_job(app, manager.organization_id, owner.user_id, "Finance", finance)
+
+    department_principal = Principal(
+        manager.user_id,
+        manager.organization_id,
+        frozenset({"hiring_manager"}),
+        True,
+        "departments",
+        frozenset({engineering}),
+    )
+    organization_principal = Principal(
+        manager.user_id,
+        manager.organization_id,
+        frozenset({"hiring_manager"}),
+        True,
+        "organization",
+    )
+
+    assert _visible_job_ids(app, department_principal) == {engineering_job}
+    assert _visible_job_ids(app, organization_principal) == {
+        engineering_job,
+        finance_job,
+    }
+    assert require_job_access(
+        organization_principal,
+        finance_job,
+        manager.organization_id,
+        Permission.RECOMMEND_DECISION,
+        [],
+        job_department_id=finance,
+    )
+    assert not require_job_access(
+        organization_principal,
+        finance_job,
+        manager.organization_id,
+        Permission.BULK_EXPORT,
+        [],
+        job_department_id=finance,
+    )
+
+
 def test_invite_and_patch_recruiting_scope_validate_tenant_status_and_audit(
     management_app,
 ) -> None:
@@ -392,7 +442,7 @@ def test_invite_and_patch_recruiting_scope_validate_tenant_status_and_audit(
         assert rejected.status_code == 422
         assert rejected.json()["code"] == "recruiting_scope_invalid"
 
-    non_recruiter = client.post(
+    scoped_manager = client.post(
         "/api/v1/settings/users",
         json={
             "display_name": "Manager",
@@ -404,8 +454,23 @@ def test_invite_and_patch_recruiting_scope_validate_tenant_status_and_audit(
         },
         headers=headers,
     )
-    assert non_recruiter.status_code == 422
-    assert non_recruiter.json()["code"] == "recruiting_scope_invalid"
+    assert scoped_manager.status_code == 201
+    assert scoped_manager.json()["data"]["user"]["recruiting_scope_type"] == "organization"
+
+    non_scoped_role = client.post(
+        "/api/v1/settings/users",
+        json={
+            "display_name": "Interviewer",
+            "email": "interviewer@example.test",
+            "department_id": None,
+            "role": "interviewer",
+            "recruiting_scope_type": "organization",
+            "recruiting_department_ids": [],
+        },
+        headers=headers,
+    )
+    assert non_scoped_role.status_code == 422
+    assert non_scoped_role.json()["code"] == "recruiting_scope_invalid"
 
     recruiting_admin_headers = login(client, "recruiting-admin@example.test")
     repeated = client.patch(

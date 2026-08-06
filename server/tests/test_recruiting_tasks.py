@@ -3,9 +3,9 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
-from server.app.identity.models import Job
+from server.app.identity.models import Job, JobCollaborator, User
 from server.app.integrations.feishu.models import FeishuOrganizationConfig
 from server.app.queue.models import OutboxEvent
 from server.app.recruiting.models import Application, ApplicationReviewTask
@@ -202,6 +202,48 @@ def test_review_task_falls_back_to_job_owner_and_closes_only_in_tenant(tmp_path)
             application_id=case.application_id,
         ) is None
         assert task.closed_at == closed_at
+
+
+def test_review_task_uses_organization_scoped_hiring_manager_without_job_assignment(
+    tmp_path,
+):
+    app = make_app(tmp_path)
+    case = seed_routing_case(app, suffix="organization-manager")
+    enable_feishu(app, case.organization_id, case.creator_id)
+    with app.state.identity_store.sync_session() as db:
+        application = db.get(Application, case.application_id)
+        application.stage = "review"
+        job = db.get(Job, case.job_id)
+        job.hiring_owner_id = None
+        db.execute(
+            delete(JobCollaborator).where(
+                JobCollaborator.organization_id == case.organization_id,
+                JobCollaborator.job_id == case.job_id,
+                JobCollaborator.access_role == "job_manager",
+            )
+        )
+        manager = db.get(User, case.manager_id)
+        manager.recruiting_scope_type = "organization"
+
+        task = ensure_review_task(
+            db,
+            application=application,
+            job=job,
+            ai_status="succeeded",
+        )
+        db.flush()
+        events = list(
+            db.scalars(
+                select(OutboxEvent).where(
+                    OutboxEvent.topic == "feishu.notification.send"
+                )
+            )
+        )
+
+        assert task.assignee_id == case.manager_id
+        assert [(event.payload["event_type"], event.aggregate_id) for event in events] == [
+            ("review_requested", case.manager_id)
+        ]
 
 
 @pytest.mark.parametrize(

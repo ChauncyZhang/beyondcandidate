@@ -3,7 +3,7 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import event, select
+from sqlalchemy import delete, event, select
 from sqlalchemy.exc import IntegrityError
 
 from server.app.core.settings import Settings
@@ -985,6 +985,51 @@ def test_deferred_membership_referral_reuses_application_and_is_idempotent(tmp_p
         assert db.query(ApplicationStageEvent).filter_by(application_id=source.id,event_type="application.stage_changed").count()==1
         assert db.query(AuditLog).filter_by(event_type="talent_pool.review_referred").count()==1
         assert db.query(IdempotencyRecord).filter_by(operation="talent_pool.review_referral").count()==1
+
+
+def test_deferred_membership_referral_uses_organization_scoped_hiring_manager(
+    tmp_path,
+) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    manager_id = seed_user(app, "hiring_manager", "global-manager@example.test")
+    with app.state.identity_store.sync_session() as db:
+        source = db.get(Application, seed["application_id"])
+        source.stage = "deferred"
+        source.version = 1
+        job = db.get(Job, source.job_id)
+        job.status = "open"
+        job.hiring_owner_id = None
+        db.execute(
+            delete(JobCollaborator).where(
+                JobCollaborator.organization_id == source.organization_id,
+                JobCollaborator.job_id == source.job_id,
+                JobCollaborator.access_role == "job_manager",
+            )
+        )
+        db.get(User, manager_id).recruiting_scope_type = "organization"
+        db.commit()
+
+    with TestClient(app) as client:
+        headers, _, membership = create_pool_and_membership(client, seed)
+        response = client.post(
+            f"/api/v1/talent-pool-memberships/{membership.json()['data']['id']}/review-referrals",
+            json={},
+            headers={
+                **headers,
+                "Idempotency-Key": "global-manager-referral",
+                "If-Match": '"1"',
+            },
+        )
+
+    assert response.status_code == 200
+    with app.state.identity_store.sync_session() as db:
+        task = db.scalar(
+            select(ApplicationReviewTask).where(
+                ApplicationReviewTask.application_id == seed["application_id"]
+            )
+        )
+        assert task.assignee_id == manager_id
 
 
 def test_deferred_membership_referral_allows_visible_hr_with_source_job_transition_access(tmp_path) -> None:

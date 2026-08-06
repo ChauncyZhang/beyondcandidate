@@ -267,7 +267,7 @@ def test_workbench_empty_state_is_stable(tmp_path, monkeypatch) -> None:
     }
 
 
-def test_workbench_review_tasks_are_persisted_open_and_principal_assigned(tmp_path, monkeypatch) -> None:
+def test_workbench_review_tasks_are_persisted_open_and_shared_with_job_manager(tmp_path, monkeypatch) -> None:
     app = make_app(tmp_path)
     base = datetime(2026, 7, 1, tzinfo=timezone.utc)
     with app.state.identity_store.sync_session() as db:
@@ -294,14 +294,12 @@ def test_workbench_review_tasks_are_persisted_open_and_principal_assigned(tmp_pa
         response=client.get("/api/v1/workbench")
 
     review=response.json()["data"]["tasks"]["review"]
-    assert review["count"]==1
-    assert review["items"]==[{
-        "application_id":str(assigned.id),"candidate_id":str(assigned.candidate_id),"job_id":str(job.id),
-        "display_name":"Candidate 1","current_title":"Title 1","location":"Location 1","source":"source-1",
-        "stage":"review","updated_at":(base+timedelta(hours=3)).replace(tzinfo=None).isoformat(),"next_interview_round":None,"task_id":str(tasks[0].id),
-        "ai_status":"failed","config_warning":False,
-        "candidate_link":f"/candidates/{assigned.candidate_id}?tab=evidence&application={assigned.id}&job={job.id}",
-    }]
+    assert review["count"]==2
+    assert [item["application_id"] for item in review["items"]] == [
+        str(assigned.id),
+        str(wrong_assignee.id),
+    ]
+    assert all(item["config_warning"] is False for item in review["items"])
     assert "provider_unavailable" not in response.text
     assert str(inferred_only.id) not in str(review)
 
@@ -326,6 +324,58 @@ def test_workbench_review_tasks_are_not_limited_to_latest_twenty_jobs(tmp_path, 
     assert body["tasks"]["review"]["count"]==1
     assert body["tasks"]["review"]["items"][0]["task_id"]==str(task.id)
     assert body["tasks"]["review"]["items"][0]["application_id"]==str(application.id)
+
+
+def test_organization_scoped_hiring_manager_sees_shared_review_tasks(
+    tmp_path, monkeypatch
+) -> None:
+    app = make_app(tmp_path)
+    base = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    with app.state.identity_store.sync_session() as db:
+        organization = Organization(slug="acme", name="Acme", status="active")
+        owner = seed_user(db, organization, "recruiting_admin", "owner@example.test")
+        manager = seed_user(db, organization, "hiring_manager", "manager@example.test")
+        other_manager = seed_user(
+            db, organization, "hiring_manager", "other-manager@example.test"
+        )
+        manager.recruiting_scope_type = "organization"
+        other_manager.recruiting_scope_type = "organization"
+        job = Job(
+            organization_id=organization.id,
+            title="Shared review",
+            owner_id=owner.id,
+            status="open",
+        )
+        db.add(job)
+        db.flush()
+        application = seed_application(db, job, owner, 1, "review", base)
+        db.add(
+            ApplicationReviewTask(
+                organization_id=organization.id,
+                application_id=application.id,
+                assignee_id=other_manager.id,
+                status="open",
+                ai_status="succeeded",
+            )
+        )
+        db.commit()
+        scoped_principal = Principal(
+            user_id=manager.id,
+            organization_id=organization.id,
+            roles=frozenset({"hiring_manager"}),
+            active=True,
+            recruiting_scope_type="organization",
+        )
+
+    monkeypatch.setattr(recruiting_api, "_principal", lambda request: scoped_principal)
+    with TestClient(app) as client:
+        response = client.get("/api/v1/workbench")
+
+    assert response.status_code == 200
+    review = response.json()["data"]["tasks"]["review"]
+    assert review["count"] == 1
+    assert review["items"][0]["application_id"] == str(application.id)
+    assert review["items"][0]["config_warning"] is False
 
 
 @pytest.mark.parametrize("role", ["system_admin", "interviewer", "unknown"])

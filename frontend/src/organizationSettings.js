@@ -10,6 +10,11 @@ const ROLE_LABELS = new Map([
 const ALL_INVITE_ROLES = [...ROLE_LABELS].map(([value, label]) => ({ value, label }));
 const RECRUITING_ADMIN_INVITE_ROLES = ALL_INVITE_ROLES.filter(({ value }) => ["recruiter", "hiring_manager", "interviewer"].includes(value));
 const RECRUITING_SCOPE_TYPES = new Set(["jobs", "departments", "organization"]);
+const SCOPED_ROLE_VALUES = new Set(["recruiter", "hiring_manager"]);
+
+export function roleUsesRecruitingScope(role) {
+  return SCOPED_ROLE_VALUES.has(role);
+}
 
 function safeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -33,7 +38,7 @@ export function isRecruitingScopeValid(scopeType, departmentIds) {
 
 export function getRecruitingScopeLabel(user) {
   if (user?.roleValues?.includes("recruiting_admin")) return "全公司";
-  if (!user?.roleValues?.includes("recruiter")) return "-";
+  if (!user?.roleValues?.some(roleUsesRecruitingScope)) return "-";
   if (user.recruitingScopeType === "organization") return "全公司";
   if (user.recruitingScopeType === "departments") return `${user.recruitingDepartmentIds.length} 个部门`;
   return "指定职位";
@@ -123,8 +128,8 @@ export function createOrganizationSettingsController({ client = apiClient, creat
         const role = safeString(form?.role);
         const recruitingScopeType = normalizeRecruitingScopeType(form?.recruitingScopeType);
         const recruitingDepartmentIds = normalizeRecruitingDepartmentIds(form?.recruitingDepartmentIds);
-        if (role === "recruiter" && !isRecruitingScopeValid(recruitingScopeType, recruitingDepartmentIds)) {
-          const error = new Error("负责招聘部门至少选择一项");
+        if (roleUsesRecruitingScope(role) && !isRecruitingScopeValid(recruitingScopeType, recruitingDepartmentIds)) {
+          const error = new Error("负责部门至少选择一项");
           error.code = "RECRUITING_DEPARTMENT_REQUIRED";
           throw error;
         }
@@ -134,7 +139,7 @@ export function createOrganizationSettingsController({ client = apiClient, creat
           department_id: safeString(form?.departmentId),
           role,
         };
-        if (role === "recruiter") {
+        if (roleUsesRecruitingScope(role)) {
           body.recruiting_scope_type = recruitingScopeType;
           body.recruiting_department_ids = recruitingScopeType === "departments" ? recruitingDepartmentIds : [];
         }
@@ -153,7 +158,7 @@ export function createOrganizationSettingsController({ client = apiClient, creat
         const recruitingScopeType = normalizeRecruitingScopeType(form?.recruitingScopeType);
         const recruitingDepartmentIds = normalizeRecruitingDepartmentIds(form?.recruitingDepartmentIds);
         if (!isRecruitingScopeValid(recruitingScopeType, recruitingDepartmentIds)) {
-          const error = new Error("负责招聘部门至少选择一项");
+          const error = new Error("负责部门至少选择一项");
           error.code = "RECRUITING_DEPARTMENT_REQUIRED";
           throw error;
         }
@@ -170,7 +175,7 @@ export function createOrganizationSettingsController({ client = apiClient, creat
         });
         return updatedUser;
       } catch (error) {
-        patchState({ actionStatus: "error", actionError: error?.code === "RECRUITING_DEPARTMENT_REQUIRED" ? error.message : error?.kind === "unavailable" ? "招聘范围暂时无法保存，请稍后重试。" : "招聘范围保存失败，请检查权限后重试。" });
+        patchState({ actionStatus: "error", actionError: error?.code === "RECRUITING_DEPARTMENT_REQUIRED" ? error.message : error?.kind === "unavailable" ? "负责范围暂时无法保存，请稍后重试。" : "负责范围保存失败，请检查权限后重试。" });
         throw error;
       }
     },

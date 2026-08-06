@@ -244,6 +244,7 @@ def apply_application_workflow_action_record(
     from server.app.identity.models import Job
     from server.app.integrations.feishu.notifications import schedule_feishu_notification
     from server.app.recruiting.models import Application
+    from server.app.recruiting.review_assignments import review_notification_user_ids
     from server.app.recruiting.tasks import close_review_task
 
     source, target = APPLICATION_WORKFLOW_ACTIONS[action]
@@ -307,13 +308,14 @@ def apply_application_workflow_action_record(
     )
     if job is None:
         raise InvalidStateTransition
+    hiring_recipients = review_notification_user_ids(db, job)
     event_and_recipients = {
         "review_approved": ("interview_arrangement_requested", [application.owner_id]),
         "review_rejected": ("candidate_rejected", [application.owner_id]),
         "hiring_approved": ("candidate_passed", [application.owner_id]),
         "hiring_rejected": ("candidate_rejected", [application.owner_id]),
-        "offer_accepted": ("offer_accepted", [job.hiring_owner_id or job.owner_id]),
-        "offer_declined": ("offer_declined", [job.hiring_owner_id or job.owner_id]),
+        "offer_accepted": ("offer_accepted", hiring_recipients),
+        "offer_declined": ("offer_declined", hiring_recipients),
     }
     event_type, recipient_user_ids = event_and_recipients[action]
     schedule_feishu_notification(

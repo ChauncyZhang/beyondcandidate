@@ -32,6 +32,7 @@ from server.app.identity.service import InvalidSession
 
 router = APIRouter(prefix="/api/v1/settings")
 ADMIN_ROLES = {"system_admin", "recruiting_admin"}
+SCOPED_RECRUITING_ROLES = {"recruiter", "hiring_manager"}
 ORGANIZATION_READ_ROLES = ADMIN_ROLES | {"recruiter"}
 INVITABLE_ROLES = {
     "system_admin",
@@ -710,7 +711,10 @@ def invite_user(
     now = request.app.state.identity_service.clock.current_time()
     raw_token = request.app.state.identity_service.tokens.new_token()
     with request.app.state.identity_store.sync_session() as db:
-        if payload.role != "recruiter" and payload.recruiting_scope_type != "jobs":
+        if (
+            payload.role not in SCOPED_RECRUITING_ROLES
+            and payload.recruiting_scope_type != "jobs"
+        ):
             return problem(
                 request,
                 422,
@@ -875,7 +879,7 @@ def update_user_recruiting_scope(
             )
         if (
             payload.recruiting_scope_type != "jobs"
-            and "recruiter" not in requested_roles
+            and not requested_roles & SCOPED_RECRUITING_ROLES
         ):
             return problem(
                 request,

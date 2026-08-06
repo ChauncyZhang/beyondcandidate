@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, literal, select
+from sqlalchemy import and_, literal, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -17,6 +17,7 @@ from server.app.notifications.models import NotificationRead
 from server.app.notifications.service import workbench_notification_version
 from server.app.recruiting.authorization import RecruitingAction, RecruitingAuthorizationService
 from server.app.recruiting.models import Application, ApplicationReviewTask, Candidate
+from server.app.recruiting.review_assignments import review_manager_user_ids
 
 
 router = APIRouter(prefix="/api/v1/notifications")
@@ -56,6 +57,7 @@ def _principal(request: Request) -> Principal | JSONResponse:
 def _base_projection():
     return (
         Application.id.label("application_id"),
+        Application.job_id,
         Application.version.label("application_version"),
         Application.stage,
         Application.updated_at,
@@ -63,6 +65,12 @@ def _base_projection():
 
 
 def _current_notification(db, principal: Principal, application_id: UUID) -> tuple[Any, str] | None:
+    review_visibility = ApplicationReviewTask.assignee_id == principal.user_id
+    if "hiring_manager" in principal.roles:
+        review_visibility = or_(
+            review_visibility,
+            AUTH.job_predicate(principal, RecruitingAction.RECOMMEND, Job),
+        )
     review = db.execute(
         select(
             *_base_projection(),
@@ -91,19 +99,23 @@ def _current_notification(db, principal: Principal, application_id: UUID) -> tup
         .where(
             ApplicationReviewTask.organization_id == principal.organization_id,
             ApplicationReviewTask.application_id == application_id,
-            ApplicationReviewTask.assignee_id == principal.user_id,
+            review_visibility,
             ApplicationReviewTask.status == "open",
             Candidate.deleted_at.is_(None),
             AUTH.job_predicate(principal, RecruitingAction.READ, Job),
         )
     ).first()
     if review is not None:
+        review_job = db.get(Job, review.job_id)
+        config_warning = not (
+            review_job and review_manager_user_ids(db, review_job)
+        )
         return review, workbench_notification_version(
             review,
             stage="review",
             task_id=review.task_id,
             ai_status=review.ai_status,
-            config_warning=review.hiring_owner_id is None,
+            config_warning=config_warning,
         )
 
     visible_job_ids = select(Job.id).where(

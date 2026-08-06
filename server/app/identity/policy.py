@@ -64,15 +64,15 @@ def require_job_access(
         return False
     if "recruiting_admin" in principal.roles and require_permission(principal, permission):
         return True
-    if "recruiter" in principal.roles:
+    scoped_role = bool(principal.roles & {"recruiter", "hiring_manager"})
+    if scoped_role:
         if principal.recruiting_scope_type == "organization":
             return permission in {
                 Permission.READ_RECRUITING,
                 Permission.COMMENT,
                 Permission.RECOMMEND_DECISION,
-                Permission.BULK_EXPORT,
                 Permission.SEARCH_JOBS,
-            }
+            } | ({Permission.BULK_EXPORT} if "recruiter" in principal.roles else set())
         if (
             principal.recruiting_scope_type == "departments"
             and job_department_id in principal.recruiting_department_ids
@@ -81,9 +81,8 @@ def require_job_access(
                 Permission.READ_RECRUITING,
                 Permission.COMMENT,
                 Permission.RECOMMEND_DECISION,
-                Permission.BULK_EXPORT,
                 Permission.SEARCH_JOBS,
-            }
+            } | ({Permission.BULK_EXPORT} if "recruiter" in principal.roles else set())
     return any(
         grant.user_id == principal.user_id
         and grant.job_id == job_id
