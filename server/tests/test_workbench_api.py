@@ -267,7 +267,7 @@ def test_workbench_empty_state_is_stable(tmp_path, monkeypatch) -> None:
     }
 
 
-def test_workbench_review_tasks_are_persisted_open_and_shared_with_job_manager(tmp_path, monkeypatch) -> None:
+def test_workbench_review_tasks_are_visible_only_to_the_assignee(tmp_path, monkeypatch) -> None:
     app = make_app(tmp_path)
     base = datetime(2026, 7, 1, tzinfo=timezone.utc)
     with app.state.identity_store.sync_session() as db:
@@ -294,10 +294,9 @@ def test_workbench_review_tasks_are_persisted_open_and_shared_with_job_manager(t
         response=client.get("/api/v1/workbench")
 
     review=response.json()["data"]["tasks"]["review"]
-    assert review["count"]==2
+    assert review["count"]==1
     assert [item["application_id"] for item in review["items"]] == [
         str(assigned.id),
-        str(wrong_assignee.id),
     ]
     assert all(item["config_warning"] is False for item in review["items"])
     assert "provider_unavailable" not in response.text
@@ -326,7 +325,7 @@ def test_workbench_review_tasks_are_not_limited_to_latest_twenty_jobs(tmp_path, 
     assert body["tasks"]["review"]["items"][0]["application_id"]==str(application.id)
 
 
-def test_organization_scoped_hiring_manager_sees_shared_review_tasks(
+def test_organization_scoped_hiring_manager_does_not_see_another_assignees_review_task(
     tmp_path, monkeypatch
 ) -> None:
     app = make_app(tmp_path)
@@ -373,9 +372,7 @@ def test_organization_scoped_hiring_manager_sees_shared_review_tasks(
 
     assert response.status_code == 200
     review = response.json()["data"]["tasks"]["review"]
-    assert review["count"] == 1
-    assert review["items"][0]["application_id"] == str(application.id)
-    assert review["items"][0]["config_warning"] is False
+    assert review == {"count": 0, "items": []}
 
 
 @pytest.mark.parametrize("role", ["system_admin", "interviewer", "unknown"])

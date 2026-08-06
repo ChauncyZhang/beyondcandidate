@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Header, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from sqlalchemy import and_, exists, func, literal, or_, select
+from sqlalchemy import and_, exists, func, literal, or_, select, update
 from sqlalchemy.orm import aliased
 
 from server.app.governance.retention import recalculate_candidate_retention
@@ -24,10 +24,11 @@ from server.app.recruiting.models import (
     Application, ApplicationReviewTask, ApplicationStageEvent, Candidate, CandidateContact, CandidateEvent, CandidateNote,
     DownloadTicket, JobJdVersion, Resume, ResumeProfile, ScreeningRuleVersion,
 )
-from server.app.recruiting.review_assignments import review_manager_user_ids
+from server.app.recruiting.review_assignments import explicit_review_manager_user_ids, review_manager_user_ids
 from server.app.screening.models import ScreeningItem, ScreeningResult
 from server.app.llm.models import LlmScreeningEvaluation
 from server.app.interviews.models import Interview
+from server.app.integrations.feishu.notifications import schedule_feishu_notification
 from server.app.notifications.service import read_versions, workbench_notification_version
 from server.app.recruiting.tasks import LLM_TERMINAL_SAFE_ERROR_CODES, normalize_llm_terminal_safe_error_code
 from server.app.screening.rules import RuleSnapshotError,normalize_rule_content
@@ -39,7 +40,7 @@ from server.app.recruiting.resume_profile import extract_resume_profile
 from server.app.recruiting.schemas import (
     ApplicationCollection, ApplicationResource, CandidateCollection, CandidateResource,
     FunnelResource, JobCollection, JobDefinitionCommand, JobDefinitionResource, JobOwnerOptionCollection, JobResource, NoteCollection, NoteResource,
-    PreviewResource, ResumeCollection, TicketResource, TimelineCollection,
+    PreviewResource, ResumeCollection, ReviewTaskAssigneeCommand, ReviewTaskResource, TicketResource, TimelineCollection,
     VersionCollection, VersionResource, WorkbenchResource, Problem,
 )
 from server.app.recruiting.service import (
@@ -60,6 +61,7 @@ PROBLEM_RESPONSES = {
 }
 router = APIRouter(prefix="/api/v1", responses=PROBLEM_RESPONSES)
 ETAG = re.compile(r'^"([1-9][0-9]*)"$')
+ASSIGNEE_ETAG = re.compile(r'^"([0-9a-fA-F-]{36})"$')
 AUTH = RecruitingAuthorizationService()
 JOB_STATUSES = ("draft", "open", "paused", "closed", "archived")
 WORKBENCH_STAGES = ("new", "review", "contact", "interview_pending", "interviewing", "decision", "passed")
@@ -204,6 +206,18 @@ def _expected_version(request: Request, value: str | None) -> int | JSONResponse
     return int(match.group(1))
 
 
+def _expected_assignee(request: Request, value: str | None) -> UUID | JSONResponse:
+    if value is None:
+        return problem(request, 428, "precondition_required", "A quoted current assignee If-Match value is required.")
+    match = ASSIGNEE_ETAG.fullmatch(value)
+    if not match:
+        return problem(request, 422, "validation_failed", "If-Match must be a quoted assignee UUID.")
+    try:
+        return UUID(match.group(1))
+    except ValueError:
+        return problem(request, 422, "validation_failed", "If-Match must be a quoted assignee UUID.")
+
+
 def _idempotency(request: Request, value: str | None) -> str | JSONResponse:
     if not value or len(value) > 255:
         return problem(request, 428, "idempotency_key_required", "Idempotency-Key is required.")
@@ -293,11 +307,12 @@ def _workbench_candidate_data(row, next_interview_round: str | None = None) -> d
     }
 
 
-def _job_definition_data(job: Job, jd: JobJdVersion | None, rules: ScreeningRuleVersion | None) -> dict[str, Any]:
+def _job_definition_data(db, job: Job, jd: JobJdVersion | None, rules: ScreeningRuleVersion | None) -> dict[str, Any]:
     return {
         "job": _job_data(job),
         "jd": None if jd is None else _job_jd_definition(jd),
         "rules": None if rules is None else _screening_rules_definition(rules),
+        "hiring_manager_ids": [str(user_id) for user_id in explicit_review_manager_user_ids(db, job)],
     }
 
 
@@ -622,6 +637,11 @@ def create_job_definition(payload: JobDefinitionCommand, request: Request, idemp
             return problem(request, 422, "recruiting_owner_invalid", "The recruiting owner is invalid.")
         if not _eligible_hiring_manager(db, principal.organization_id, command["hiring_owner_id"]):
             return problem(request, 422, "hiring_owner_invalid", "The hiring owner is invalid.")
+        if any(
+            not _eligible_hiring_manager(db, principal.organization_id, manager_id)
+            for manager_id in command["hiring_manager_ids"]
+        ):
+            return problem(request, 422, "hiring_manager_invalid", "A hiring manager is invalid.")
         try:
             status, body = persisted_idempotent(
                 db,
@@ -630,7 +650,7 @@ def create_job_definition(payload: JobDefinitionCommand, request: Request, idemp
                 "job_definition.create",
                 key,
                 command,
-                lambda: (201, {"data": _job_definition_data(*create_job_definition_record(db, principal.organization_id, principal.user_id, command, trace_id=request.state.trace_id))}),
+                lambda: (201, {"data": _job_definition_data(db, *create_job_definition_record(db, principal.organization_id, principal.user_id, command, trace_id=request.state.trace_id))}),
             )
             response = _job_definition_response(request, body, status)
             if response.status_code >= 400:
@@ -657,7 +677,7 @@ def get_job_definition(job_id: UUID, request: Request):
             return _denied(request)
         jd = db.scalar(select(JobJdVersion).where(JobJdVersion.organization_id == principal.organization_id, JobJdVersion.job_id == job_id).order_by(JobJdVersion.version_number.desc()))
         rules = db.scalar(select(ScreeningRuleVersion).where(ScreeningRuleVersion.organization_id == principal.organization_id, ScreeningRuleVersion.job_id == job_id).order_by(ScreeningRuleVersion.version_number.desc()))
-        return _job_definition_response(request, {"data": _job_definition_data(job, jd, rules)}, 200)
+        return _job_definition_response(request, {"data": _job_definition_data(db, job, jd, rules)}, 200)
 
 
 @router.put("/job-definitions/{job_id}", response_model=JobDefinitionResource)
@@ -688,6 +708,11 @@ def replace_job_definition(job_id: UUID, payload: JobDefinitionCommand, request:
             return problem(request, 422, "recruiting_owner_invalid", "The recruiting owner is invalid.")
         if not _eligible_hiring_manager(db, principal.organization_id, command["hiring_owner_id"]):
             return problem(request, 422, "hiring_owner_invalid", "The hiring owner is invalid.")
+        if any(
+            not _eligible_hiring_manager(db, principal.organization_id, manager_id)
+            for manager_id in command["hiring_manager_ids"]
+        ):
+            return problem(request, 422, "hiring_manager_invalid", "A hiring manager is invalid.")
         try:
             status, body = persisted_idempotent(
                 db,
@@ -696,7 +721,7 @@ def replace_job_definition(job_id: UUID, payload: JobDefinitionCommand, request:
                 f"job_definition.replace:{job_id}",
                 key,
                 command,
-                lambda: (200, {"data": _job_definition_data(*replace_job_definition_record(db, principal.organization_id, job_id, principal.user_id, command, expected_version=expected, trace_id=request.state.trace_id))}),
+                lambda: (200, {"data": _job_definition_data(db, *replace_job_definition_record(db, principal.organization_id, job_id, principal.user_id, command, expected_version=expected, trace_id=request.state.trace_id))}),
             )
             response = _job_definition_response(request, body, status)
             if response.status_code >= 400:
@@ -813,12 +838,6 @@ def get_workbench(request: Request, response: Response):
                     notification_item["notification_version"] = workbench_notification_version(row)
                     notification_candidates[row.stage].append(notification_item)
 
-        review_visibility = ApplicationReviewTask.assignee_id == principal.user_id
-        if "hiring_manager" in principal.roles:
-            review_visibility = or_(
-                review_visibility,
-                AUTH.job_predicate(principal, RecruitingAction.RECOMMEND, Job),
-            )
         review_rows=db.execute(select(
             ApplicationReviewTask.id.label("task_id"),
             ApplicationReviewTask.ai_status,
@@ -828,7 +847,7 @@ def get_workbench(request: Request, response: Response):
             Job.hiring_owner_id,
         ).join(Application,and_(Application.organization_id==ApplicationReviewTask.organization_id,Application.id==ApplicationReviewTask.application_id)).join(Candidate,and_(Candidate.organization_id==Application.organization_id,Candidate.id==Application.candidate_id)).join(Job,and_(Job.organization_id==Application.organization_id,Job.id==Application.job_id)).where(
             ApplicationReviewTask.organization_id==principal.organization_id,
-            review_visibility,
+            ApplicationReviewTask.assignee_id == principal.user_id,
             ApplicationReviewTask.status=="open",
             Candidate.deleted_at.is_(None),
             AUTH.job_predicate(principal,RecruitingAction.READ,Job),
@@ -931,6 +950,133 @@ def list_job_recruiter_options(request: Request):
             "data": [{"id": str(user_id), "name": display_name} for user_id, display_name in rows],
             "meta": {"count": len(rows)},
         }
+
+
+@router.get("/jobs/{job_id}/reviewer-options", response_model=JobOwnerOptionCollection)
+def list_job_reviewer_options(job_id: UUID, request: Request):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
+    with request.app.state.identity_store.sync_session() as db:
+        job = _load_job(db, principal, job_id)
+        if job is None:
+            return _denied(request)
+        reviewer_ids = review_manager_user_ids(db, job)
+        users = {
+            user.id: user
+            for user in db.scalars(
+                select(User).where(
+                    User.organization_id == principal.organization_id,
+                    User.id.in_(reviewer_ids),
+                )
+            )
+        } if reviewer_ids else {}
+        rows = [
+            {"id": str(user_id), "name": users[user_id].display_name}
+            for user_id in reviewer_ids
+            if user_id in users
+        ]
+        return {"data": rows, "meta": {"count": len(rows)}}
+
+
+def _review_task_data(task: ApplicationReviewTask) -> dict[str, str]:
+    return {
+        "id": str(task.id),
+        "application_id": str(task.application_id),
+        "assignee_id": str(task.assignee_id),
+        "status": task.status,
+    }
+
+
+@router.put("/review-tasks/{task_id}/assignee", response_model=ReviewTaskResource)
+def reassign_review_task(
+    task_id: UUID,
+    payload: ReviewTaskAssigneeCommand,
+    request: Request,
+    if_match: str | None = Header(None),
+):
+    principal = _principal(request)
+    expected_assignee = _expected_assignee(request, if_match)
+    for value in (principal, expected_assignee):
+        if isinstance(value, JSONResponse):
+            return value
+    with request.app.state.identity_store.sync_session() as db:
+        row = db.execute(
+            select(ApplicationReviewTask, Application, Job)
+            .join(
+                Application,
+                and_(
+                    Application.organization_id == ApplicationReviewTask.organization_id,
+                    Application.id == ApplicationReviewTask.application_id,
+                ),
+            )
+            .join(
+                Job,
+                and_(
+                    Job.organization_id == Application.organization_id,
+                    Job.id == Application.job_id,
+                ),
+            )
+            .where(
+                ApplicationReviewTask.organization_id == principal.organization_id,
+                ApplicationReviewTask.id == task_id,
+                AUTH.job_predicate(principal, RecruitingAction.MANAGE_JOB, Job),
+            )
+        ).first()
+        if row is None:
+            return _denied(request)
+        task, application, job = row
+        if task.status != "open":
+            return problem(request, 409, "review_task_not_open", "Only open review tasks can be reassigned.")
+        if payload.assignee_id not in review_manager_user_ids(db, job):
+            return problem(request, 422, "review_assignee_invalid", "The review assignee is not eligible for this job.")
+        if task.assignee_id == payload.assignee_id:
+            response = JSONResponse({"data": _review_task_data(task)})
+            response.headers["ETag"] = f'"{task.assignee_id}"'
+            return response
+        if task.assignee_id != expected_assignee:
+            return problem(request, 409, "review_task_assignee_conflict", "The review task assignee changed.")
+        previous_assignee_id = task.assignee_id
+        reassigned = db.scalar(
+            update(ApplicationReviewTask)
+            .where(
+                ApplicationReviewTask.organization_id == principal.organization_id,
+                ApplicationReviewTask.id == task_id,
+                ApplicationReviewTask.status == "open",
+                ApplicationReviewTask.assignee_id == expected_assignee,
+            )
+            .values(assignee_id=payload.assignee_id)
+            .returning(ApplicationReviewTask)
+        )
+        if reassigned is None:
+            db.rollback()
+            return problem(request, 409, "review_task_assignee_conflict", "The review task changed.")
+        db.add(AuditLog(
+            organization_id=principal.organization_id,
+            actor_user_id=principal.user_id,
+            event_type="review_task.reassigned",
+            outcome="success",
+            trace_id=request.state.trace_id,
+            metadata_json={
+                "task_id": str(task_id),
+                "application_id": str(application.id),
+                "from_assignee_id": str(previous_assignee_id),
+                "to_assignee_id": str(payload.assignee_id),
+            },
+        ))
+        schedule_feishu_notification(
+            db,
+            organization_id=principal.organization_id,
+            recipient_user_ids=[payload.assignee_id],
+            event_type="review_requested",
+            application_id=application.id,
+            actor_user_id=principal.user_id,
+        )
+        db.commit()
+        response = JSONResponse({"data": _review_task_data(reassigned)})
+        response.headers["ETag"] = f'"{reassigned.assignee_id}"'
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
 
 @router.get("/jobs", response_model=JobCollection)
@@ -1625,12 +1771,58 @@ def applications(candidate_id: UUID, request: Request):
     if isinstance(principal, JSONResponse): return principal
     with request.app.state.identity_store.sync_session() as db:
         if _load_candidate(db, principal, candidate_id) is None: return _denied(request)
-        rows = db.execute(select(Application, Job.title, Job.status).join(Job, and_(Job.organization_id == Application.organization_id, Job.id == Application.job_id)).where(Application.organization_id == principal.organization_id, Application.candidate_id == candidate_id, _job_scope(principal)).order_by(Application.created_at.desc())).all()
-        application_ids = [application.id for application, _, _ in rows]
+        rows = db.execute(
+            select(
+                Application,
+                Job.title.label("job_title"),
+                Job.status.label("job_status"),
+                ApplicationReviewTask.id.label("review_task_id"),
+                ApplicationReviewTask.assignee_id.label("review_assignee_id"),
+                User.display_name.label("review_assignee_name"),
+            )
+            .join(Job, and_(Job.organization_id == Application.organization_id, Job.id == Application.job_id))
+            .outerjoin(
+                ApplicationReviewTask,
+                and_(
+                    ApplicationReviewTask.organization_id == Application.organization_id,
+                    ApplicationReviewTask.application_id == Application.id,
+                    ApplicationReviewTask.status == "open",
+                ),
+            )
+            .outerjoin(
+                User,
+                and_(
+                    User.organization_id == ApplicationReviewTask.organization_id,
+                    User.id == ApplicationReviewTask.assignee_id,
+                ),
+            )
+            .where(
+                Application.organization_id == principal.organization_id,
+                Application.candidate_id == candidate_id,
+                _job_scope(principal),
+            )
+            .order_by(Application.created_at.desc())
+        ).all()
+        application_ids = [row.Application.id for row in rows]
         projections=_screening_projections_for_applications(db,principal.organization_id,application_ids)
         next_rounds = _next_interview_rounds(db, principal.organization_id, application_ids)
         empty={"route_result":None,"ai_score":None,"ai_recommendation":None,"llm_status":None,"llm_error_code":None,"llm_evaluation":None}
-        return {"data": [{**_application_data(application), "job_title": job_title, "job_status": job_status, "next_interview_round": next_rounds.get(application.id), **projections.get(application.id,empty)} for application, job_title, job_status in rows], "meta": {"count": len(rows)}}
+        return {
+            "data": [
+                {
+                    **_application_data(row.Application),
+                    "job_title": row.job_title,
+                    "job_status": row.job_status,
+                    "next_interview_round": next_rounds.get(row.Application.id),
+                    "task_id": str(row.review_task_id) if row.review_task_id else None,
+                    "assignee_id": str(row.review_assignee_id) if row.review_assignee_id else None,
+                    "assignee_name": row.review_assignee_name,
+                    **projections.get(row.Application.id, empty),
+                }
+                for row in rows
+            ],
+            "meta": {"count": len(rows)},
+        }
 
 
 @router.post("/jobs/{job_id}/applications", status_code=201, response_model=ApplicationResource)
@@ -1691,6 +1883,17 @@ def apply_application_workflow_action(application_id: UUID, payload: WorkflowAct
         if isinstance(value, JSONResponse): return value
     required_action = RecruitingAction.TRANSITION if payload.action.startswith("offer_") else RecruitingAction.RECOMMEND
     with request.app.state.identity_store.sync_session() as db:
+        review_task_assignee_id = None
+        if payload.action.startswith("review_"):
+            review_task_assignee_id = db.scalar(
+                select(ApplicationReviewTask.assignee_id).where(
+                    ApplicationReviewTask.organization_id == principal.organization_id,
+                    ApplicationReviewTask.application_id == application_id,
+                    ApplicationReviewTask.status == "open",
+                )
+            )
+        if review_task_assignee_id is not None and review_task_assignee_id != principal.user_id:
+            return _denied(request)
         if _load_application(db, principal, application_id, required_action) is None: return _denied(request)
         try:
             def action():

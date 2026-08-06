@@ -965,9 +965,10 @@ def test_deferred_membership_referral_reuses_application_and_is_idempotent(tmp_p
     with TestClient(app) as client:
         headers,_,membership=create_pool_and_membership(client,seed); membership_id=membership.json()["data"]["id"]
         request_headers={**headers,"Idempotency-Key":"referral-1","If-Match":'"1"'}
-        first=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers=request_headers)
-        replay=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers=request_headers)
-        changed_precondition=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers={**headers,"Idempotency-Key":"referral-1","If-Match":'"2"'})
+        referral={"assignee_id":str(seed["admin_id"])}
+        first=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json=referral,headers=request_headers)
+        replay=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json=referral,headers=request_headers)
+        changed_precondition=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json=referral,headers={**headers,"Idempotency-Key":"referral-1","If-Match":'"2"'})
 
     assert first.status_code==replay.status_code==200
     assert first.json()==replay.json()
@@ -1014,7 +1015,7 @@ def test_deferred_membership_referral_uses_organization_scoped_hiring_manager(
         headers, _, membership = create_pool_and_membership(client, seed)
         response = client.post(
             f"/api/v1/talent-pool-memberships/{membership.json()['data']['id']}/review-referrals",
-            json={},
+            json={"assignee_id": str(manager_id)},
             headers={
                 **headers,
                 "Idempotency-Key": "global-manager-referral",
@@ -1089,7 +1090,7 @@ def test_deferred_membership_referral_allows_visible_hr_with_source_job_transiti
         authorized_headers = login(client, "referral-authorized@example.test")
         ordinary_pool_denied = client.post(
             f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",
-            json={},
+            json={"assignee_id": str(seed["admin_id"])},
             headers={**authorized_headers, "Idempotency-Key": "ordinary-pool-referral", "If-Match": '"1"'},
         )
         mark_deferred_system_pool(app, pool_id)
@@ -1097,13 +1098,13 @@ def test_deferred_membership_referral_allows_visible_hr_with_source_job_transiti
         denied_headers = login(client, "referral-denied@example.test")
         denied = client.post(
             f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",
-            json={},
+            json={"assignee_id": str(seed["admin_id"])},
             headers={**denied_headers, "Idempotency-Key": "referral-denied", "If-Match": '"1"'},
         )
         authorized_headers = login(client, "referral-authorized@example.test")
         referred = client.post(
             f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",
-            json={},
+            json={"assignee_id": str(seed["admin_id"])},
             headers={**authorized_headers, "Idempotency-Key": "referral-authorized", "If-Match": '"1"'},
         )
 
@@ -1129,16 +1130,17 @@ def test_deferred_membership_referral_requires_version_deferred_stage_and_open_j
         other_admin=User(organization=other,email="other-admin@example.test",normalized_email="other-admin@example.test",display_name="Other Admin",password_hash=PasswordService().hash("correct horse")); other_admin.roles.append(UserRole(role="recruiting_admin")); db.add(other_admin); db.commit()
     with TestClient(app) as client:
         headers,_,membership=create_pool_and_membership(client,seed); membership_id=membership.json()["data"]["id"]
-        missing=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers={**headers,"Idempotency-Key":"missing-version"})
-        stale=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers={**headers,"Idempotency-Key":"stale-version","If-Match":'"2"'})
-        missing_manager=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers={**headers,"Idempotency-Key":"missing-manager","If-Match":'"1"'})
+        referral={"assignee_id":str(seed["admin_id"])}
+        missing=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json=referral,headers={**headers,"Idempotency-Key":"missing-version"})
+        stale=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json=referral,headers={**headers,"Idempotency-Key":"stale-version","If-Match":'"2"'})
+        missing_manager=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json=referral,headers={**headers,"Idempotency-Key":"missing-manager","If-Match":'"1"'})
         with app.state.identity_store.sync_session() as db:
             db.get(Job,seed["job_id"]).status="closed"; db.commit()
-        closed=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers={**headers,"Idempotency-Key":"closed-job","If-Match":'"1"'})
+        closed=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json=referral,headers={**headers,"Idempotency-Key":"closed-job","If-Match":'"1"'})
         client.post("/api/v1/auth/logout",headers=headers)
         authenticated=client.post("/api/v1/auth/login",json={"organization_slug":"other","email":"other-admin@example.test","password":"correct horse"},headers={"Origin":"https://hr.example.test"})
         other_headers={"Origin":"https://hr.example.test","X-CSRF-Token":authenticated.headers["X-CSRF-Token"],"Idempotency-Key":"cross-tenant","If-Match":'"1"'}
-        cross_tenant=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers=other_headers)
+        cross_tenant=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json=referral,headers=other_headers)
     assert missing.status_code==428 and missing.json()["code"]=="precondition_required"
     assert stale.status_code==409 and stale.json()["code"]=="version_conflict"
     assert missing_manager.status_code==409 and missing_manager.json()["code"]=="review_referral_hiring_manager_missing"
@@ -1164,7 +1166,7 @@ def test_deferred_membership_referral_rejects_a_recruiter_as_the_hiring_manager(
         headers, _, membership = create_pool_and_membership(client, seed)
         response = client.post(
             f"/api/v1/talent-pool-memberships/{membership.json()['data']['id']}/review-referrals",
-            json={},
+            json={"assignee_id": str(recruiter_id)},
             headers={**headers, "Idempotency-Key": "invalid-hiring-manager", "If-Match": '"1"'},
         )
 

@@ -68,7 +68,8 @@ test("membership request generations reject a late response from the previous po
 });
 
 test("referral replaces the membership in place and refreshes the workbench without changing route state", () => {
-  assert.match(source, /controller\.referToReview\(member\.id, member\.version\)/);
+  assert.match(source, /controller\.referToReview\(member\.id, member\.version, assigneeId\)/);
+  assert.match(source, /controller\.listReviewerOptions\(jobId, options\)/);
   assert.match(source, /memberships: current\.memberships\.map\(\(item\) => item\.id === result\.membership\.id \? result\.membership : item\)/);
   assert.match(source, /onReferralComplete\(result\.application\)/);
   assert.doesNotMatch(source, /referToReview[\s\S]{0,500}setSelectedPoolId/);
@@ -78,7 +79,11 @@ test("referral replaces the membership in place and refreshes the workbench with
 test("referral status is perceivable and the primary action does not depend on hover", () => {
   assert.match(source, /role="status"/);
   assert.match(source, /aria-live="polite"/);
-  assert.match(source, /aria-label=\{`转交用人经理：\$\{candidate\.name\}`\}/);
+  assert.match(source, /aria-label=\{`选择评审接收人：\$\{candidate\.name\}`\}/);
+  assert.match(source, /aria-labelledby="review-referral-title"/);
+  assert.match(source, /原岗位/);
+  assert.match(source, /请选择接收人/);
+  assert.match(source, /disabled=\{submitting \|\| status !== "ready" \|\| !assigneeId\}/);
   assert.doesNotMatch(source, /onMouseEnter|onMouseLeave/);
 });
 

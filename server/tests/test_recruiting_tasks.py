@@ -204,7 +204,7 @@ def test_review_task_falls_back_to_job_owner_and_closes_only_in_tenant(tmp_path)
         assert task.closed_at == closed_at
 
 
-def test_review_task_uses_organization_scoped_hiring_manager_without_job_assignment(
+def test_review_task_does_not_assign_or_notify_scope_only_hiring_manager(
     tmp_path,
 ):
     app = make_app(tmp_path)
@@ -240,9 +240,9 @@ def test_review_task_uses_organization_scoped_hiring_manager_without_job_assignm
             )
         )
 
-        assert task.assignee_id == case.manager_id
+        assert task.assignee_id == case.creator_id
         assert [(event.payload["event_type"], event.aggregate_id) for event in events] == [
-            ("review_requested", case.manager_id)
+            ("review_requested", case.creator_id)
         ]
 
 

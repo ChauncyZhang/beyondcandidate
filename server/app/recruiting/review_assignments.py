@@ -90,5 +90,28 @@ def review_manager_user_ids(db, job) -> tuple[UUID, ...]:
     return tuple(ordered_ids)
 
 
+def explicit_review_manager_user_ids(db, job) -> tuple[UUID, ...]:
+    manager_ids = tuple(
+        db.scalars(
+            select(JobCollaborator.user_id)
+            .where(
+                JobCollaborator.organization_id == job.organization_id,
+                JobCollaborator.job_id == job.id,
+                JobCollaborator.access_role == "job_manager",
+            )
+            .order_by(JobCollaborator.created_at.asc(), JobCollaborator.id.asc())
+        )
+    )
+    if job.hiring_owner_id is None:
+        return manager_ids
+    return (job.hiring_owner_id, *(
+        manager_id for manager_id in manager_ids
+        if manager_id != job.hiring_owner_id
+    ))
+
+
 def review_notification_user_ids(db, job) -> tuple[UUID, ...]:
-    return review_manager_user_ids(db, job) or (job.owner_id,)
+    eligible_ids = review_manager_user_ids(db, job)
+    if job.hiring_owner_id in eligible_ids:
+        return (job.hiring_owner_id,)
+    return (job.owner_id,)

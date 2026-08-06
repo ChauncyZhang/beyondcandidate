@@ -349,6 +349,73 @@ body .field-error {
   font-size: 13px;
 }
 
+body .job-reviewer-field {
+  min-width: 0;
+  margin: 0;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  grid-column: 1 / -1;
+}
+
+body .job-reviewer-field legend {
+  padding: 0 5px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+body .job-reviewer-field > p {
+  margin: 0 0 11px;
+  color: var(--ink-secondary);
+  line-height: 1.55;
+}
+
+body .job-reviewer-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+body .job-reviewer-options > label {
+  min-width: 0;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+}
+
+body .job-reviewer-options > label.selected {
+  border-color: #8bb8d8;
+  background: #f1f7fb;
+}
+
+body .job-reviewer-options input[type="checkbox"] {
+  width: 17px;
+  min-height: 17px;
+  padding: 0;
+  flex: 0 0 auto;
+  accent-color: var(--blue);
+}
+
+body .job-reviewer-field > label {
+  margin-top: 12px;
+}
+
+body .reviewer-directory-state {
+  min-height: 42px;
+  padding: 9px 10px;
+  border-radius: 6px;
+  background: #f5f7f9;
+  color: var(--ink-secondary);
+  display: flex;
+  align-items: center;
+}
+
 body .toggle-row {
   min-height: 66px;
   padding: 12px;
@@ -1197,6 +1264,10 @@ body .screening-candidate-link:disabled {
   }
 
   body .job-fields.two-columns {
+    grid-template-columns: 1fr;
+  }
+
+  body .job-reviewer-options {
     grid-template-columns: 1fr;
   }
 

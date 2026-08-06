@@ -81,9 +81,13 @@ export function failJobRequest(state, requestId, error) {
 
 export function getJobDefinitionErrors(values) {
   const errors = {};
+  const hiringManagerIds = Array.isArray(values?.hiringManagerIds) ? values.hiringManagerIds : [];
   if (!values?.name?.trim()) errors.name = "请输入职位名称";
   if (!values?.jd?.trim()) errors.jd = "请输入公开职位描述";
   if (!values?.process?.trim()) errors.process = "请输入招聘流程模板";
+  if (hiringManagerIds.length === 0) errors.hiringManagerIds = "请至少选择一位用人经理";
+  if (!values?.hiringOwnerId) errors.hiringOwnerId = "请选择默认评审人";
+  else if (!hiringManagerIds.includes(values.hiringOwnerId)) errors.hiringOwnerId = "默认评审人必须来自已选用人经理";
   return errors;
 }
 

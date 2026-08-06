@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from server.app.screening.rules import MAX_JD_TEXT_CHARS,MAX_RULE_TERM_CHARS,MAX_RULE_TERMS
 from server.app.screening.schemas import LlmEvaluationOut
 
@@ -89,6 +89,7 @@ class JobDefinitionCommand(ApiModel):
     priority: Literal["high", "normal", "low"]
     recruiting_owner_id: UUID | None = None
     hiring_owner_id: UUID | None = None
+    hiring_manager_ids: list[UUID] | None = Field(default=None, max_length=100)
     description: str = Field(min_length=1, max_length=MAX_JD_TEXT_CHARS)
     location: str = Field(max_length=200)
     process_template: str = Field(min_length=1, max_length=100)
@@ -112,6 +113,20 @@ class JobDefinitionCommand(ApiModel):
             raise ValueError("rule items must not be blank")
         return [value.strip() for value in values]
 
+    @model_validator(mode="after")
+    def normalize_hiring_managers(self):
+        if self.hiring_manager_ids is None:
+            if self.hiring_owner_id is None:
+                raise ValueError("hiring_owner_id is required")
+            self.hiring_manager_ids = [self.hiring_owner_id]
+        if len(set(self.hiring_manager_ids)) != len(self.hiring_manager_ids):
+            raise ValueError("hiring_manager_ids must be unique")
+        if self.hiring_owner_id is None:
+            raise ValueError("hiring_owner_id is required")
+        if self.hiring_owner_id not in self.hiring_manager_ids:
+            raise ValueError("hiring_owner_id must be included in hiring_manager_ids")
+        return self
+
 
 class JobJdDefinitionOut(ApiModel):
     id: str
@@ -134,6 +149,22 @@ class JobDefinitionOut(ApiModel):
     job: JobOut
     jd: JobJdDefinitionOut | None
     rules: ScreeningRulesDefinitionOut | None
+    hiring_manager_ids: list[str]
+
+
+class ReviewTaskAssigneeCommand(ApiModel):
+    assignee_id: UUID
+
+
+class ReviewTaskOut(ApiModel):
+    id: str
+    application_id: str
+    assignee_id: str
+    status: Literal["open", "closed", "cancelled"]
+
+
+class ReviewTaskResource(ApiModel):
+    data: ReviewTaskOut
 
 
 class CandidateOut(ApiModel):
@@ -199,6 +230,9 @@ class ApplicationHistoryOut(ApplicationOut):
     llm_status: str | None
     llm_error_code: str | None
     llm_evaluation: LlmEvaluationOut | None
+    task_id: str | None = None
+    assignee_id: str | None = None
+    assignee_name: str | None = None
 
 
 class VersionOut(ApiModel):

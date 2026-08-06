@@ -1,8 +1,10 @@
+from uuid import UUID
+
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from server.app.identity.models import Job, JobCollaborator, User
-from server.app.recruiting.models import Application, ApplicationStageEvent, Candidate, FileObject, Resume
+from server.app.identity.models import AuditLog, Job, JobCollaborator, User
+from server.app.recruiting.models import Application, ApplicationReviewTask, ApplicationStageEvent, Candidate, FileObject, Resume
 from server.tests.test_recruiting_api import login, make_app, seed_user
 
 
@@ -83,6 +85,67 @@ def test_hiring_manager_review_action_advances_directly_to_interview_queue(tmp_p
             ("review", "contact"),
             ("contact", "interview_pending"),
         ]
+
+
+def test_hr_reassigns_open_review_task_with_assignee_etag_and_only_new_assignee_can_complete(tmp_path):
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "admin-reassign@example.test")
+    manager_id = seed_user(app, "hiring_manager", "manager-reassign@example.test")
+    next_manager_id = seed_user(app, "hiring_manager", "next-manager@example.test")
+    application_id = seed_workflow_application(app, admin_id, manager_id, "review")
+    with app.state.identity_store.sync_session() as db:
+        application = db.get(Application, UUID(application_id))
+        db.add(JobCollaborator(
+            organization_id=application.organization_id,
+            job_id=application.job_id,
+            user_id=next_manager_id,
+            access_role="job_manager",
+        ))
+        task = ApplicationReviewTask(
+            organization_id=application.organization_id,
+            application_id=application.id,
+            assignee_id=manager_id,
+            status="open",
+            ai_status="succeeded",
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    with TestClient(app) as client:
+        admin_headers = login(client, "admin-reassign@example.test")
+        reassigned = client.put(
+            f"/api/v1/review-tasks/{task_id}/assignee",
+            json={"assignee_id": str(next_manager_id)},
+            headers={**admin_headers, "If-Match": f'"{manager_id}"'},
+        )
+        stale = client.put(
+            f"/api/v1/review-tasks/{task_id}/assignee",
+            json={"assignee_id": str(manager_id)},
+            headers={**admin_headers, "If-Match": f'"{manager_id}"'},
+        )
+        old_headers = login(client, "manager-reassign@example.test")
+        old_assignee = client.post(
+            f"/api/v1/applications/{application_id}/workflow-actions",
+            json={"action": "review_approved"},
+            headers={**old_headers, "If-Match": '"1"', "Idempotency-Key": "old-assignee"},
+        )
+        new_headers = login(client, "next-manager@example.test")
+        new_assignee = client.post(
+            f"/api/v1/applications/{application_id}/workflow-actions",
+            json={"action": "review_approved"},
+            headers={**new_headers, "If-Match": '"1"', "Idempotency-Key": "new-assignee"},
+        )
+
+    assert reassigned.status_code == 200
+    assert reassigned.headers["etag"] == f'"{next_manager_id}"'
+    assert stale.status_code == 409 and stale.json()["code"] == "review_task_assignee_conflict"
+    assert old_assignee.status_code == 404
+    assert new_assignee.status_code == 200
+    with app.state.identity_store.sync_session() as db:
+        audit = db.query(AuditLog).filter_by(event_type="review_task.reassigned").one()
+        assert audit.metadata_json["from_assignee_id"] == str(manager_id)
+        assert audit.metadata_json["to_assignee_id"] == str(next_manager_id)
 
 
 def test_workflow_actions_require_the_expected_business_stage_and_rejection_reason(tmp_path):

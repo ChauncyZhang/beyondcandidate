@@ -151,6 +151,7 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
     location: initialJob?.location || initialDraft?.location || "",
     headcount: initialJob?.headcount || initialDraft?.headcount || 1,
     recruitingOwnerId: initialJob?.recruitingOwnerId || initialJob?.ownerId || initialDraft?.recruitingOwnerId || initialDraft?.ownerId || "",
+    hiringManagerIds: initialJob?.hiringManagerIds || initialDraft?.hiringManagerIds || ((initialJob?.hiringOwnerId || initialDraft?.hiringOwnerId) ? [initialJob?.hiringOwnerId || initialDraft.hiringOwnerId] : []),
     hiringOwnerId: initialJob?.hiringOwnerId || initialDraft?.hiringOwnerId || "",
     priority: initialJob?.priority || initialDraft?.priority || "中",
     jd: initialJob?.jd || initialDraft?.jd || "",
@@ -207,6 +208,24 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
     setErrors((current) => ({ ...current, process: "" }));
   }
 
+  function changeHiringManager(id, selected) {
+    setValues((current) => {
+      const hiringManagerIds = selected
+        ? [...new Set([...current.hiringManagerIds, id])]
+        : current.hiringManagerIds.filter((item) => item !== id);
+      const next = {
+        ...current,
+        hiringManagerIds,
+        hiringOwnerId: hiringManagerIds.includes(current.hiringOwnerId) ? current.hiringOwnerId : "",
+      };
+      if (!initialJob && onDraftChange) onDraftChange(next);
+      return next;
+    });
+    setDirty(true);
+    if (!conflictRefreshFailed) setSubmitError("");
+    setErrors((current) => ({ ...current, hiringManagerIds: "", hiringOwnerId: "" }));
+  }
+
   function validate() {
     const next = getJobDefinitionErrors(values);
     setErrors(next);
@@ -247,10 +266,11 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
   }
 
   const completion = [values.name, values.departmentId, values.jd, values.mustHave, values.process].filter(Boolean).length;
+  const reviewerSelectionInvalid = !values.hiringOwnerId || !values.hiringManagerIds.includes(values.hiringOwnerId);
   const workflowUnavailable = workflowTemplatesStatus !== "ready" || !values.workflowTemplateId;
   return (
     <div className="job-page job-form-page">
-      <PagePrimaryAction host={pageActionHost}><>{actions.secondary && <button className="button secondary" type="button" onClick={() => submit(actions.secondary.publish)} disabled={saving || workflowUnavailable}>{saving ? "正在保存…" : actions.secondary.label}</button>}<button className="button primary" type="button" onClick={() => submit(actions.primary.publish)} disabled={saving || workflowUnavailable}>{saving ? "正在保存…" : actions.primary.label}</button></></PagePrimaryAction>
+      <PagePrimaryAction host={pageActionHost}><>{actions.secondary && <button className="button secondary" type="button" onClick={() => submit(actions.secondary.publish)} disabled={saving || workflowUnavailable || reviewerSelectionInvalid}>{saving ? "正在保存…" : actions.secondary.label}</button>}<button className="button primary" type="button" onClick={() => submit(actions.primary.publish)} disabled={saving || workflowUnavailable || reviewerSelectionInvalid}>{saving ? "正在保存…" : actions.primary.label}</button></></PagePrimaryAction>
       <button className="back-link" type="button" onClick={() => dirty ? setConfirmExit(true) : onBack()} disabled={saving}><ArrowLeft size={17} />返回职位列表</button>
       <div className="job-page-heading form-heading"><div><h2>{initialJob ? "编辑职位" : "新建职位"}</h2><p>填写职位信息和筛选标准，保存后以服务端记录为准。</p></div></div>
       {submitError && <div ref={submitErrorRef} tabIndex="-1" className="job-request-state error" role="alert"><CircleAlert size={17} /><span>{submitError}</span>{conflictRefreshFailed && <button type="button" onClick={retryConflictRefresh} disabled={saving}>{saving ? "正在刷新…" : "重试刷新"}</button>}</div>}
@@ -263,7 +283,7 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
               <label>工作地点<input value={values.location} onChange={(event) => change("location", event.target.value)} placeholder="例如：上海或远程" /></label>
               <label>招聘人数<input type="number" min="1" max="99" value={values.headcount} onChange={(event) => change("headcount", Number(event.target.value))} /></label>
               <label>招聘负责人（HR）<select value={values.recruitingOwnerId} onChange={(event) => change("recruitingOwnerId", event.target.value)} disabled={recruitersStatus === "loading"}><option value="">{recruitersStatus === "loading" ? "正在加载招聘负责人…" : "未分配招聘负责人"}</option>{recruiters.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{recruitersStatus === "error" && <span className="field-state owner-directory-error" role="alert">招聘负责人加载失败。<button type="button" onClick={onRetryRecruiters}>重试</button></span>}</label>
-              <label>用人经理（简历评审）<select value={values.hiringOwnerId} onChange={(event) => change("hiringOwnerId", event.target.value)} disabled={hiringManagersStatus === "loading"}><option value="">{hiringManagersStatus === "loading" ? "正在加载用人经理…" : "由负责范围自动覆盖"}</option>{hiringManagers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><span className="field-state">未单独指定时，符合部门或全公司范围的用人经理会收到评审任务。</span>{hiringManagersStatus === "error" && <span className="field-state owner-directory-error" role="alert">用人经理加载失败。<button type="button" onClick={onRetryHiringManagers}>重试</button></span>}</label>
+              <fieldset className="job-reviewer-field" aria-describedby="job-reviewer-help"><legend>用人经理（简历评审）</legend><p id="job-reviewer-help">选择可查看该职位评审的负责人，再指定一位默认评审人。AI 自动流转只通知默认评审人；其他负责人可查看，但不会自动收到每份简历通知。</p>{hiringManagersStatus === "loading" ? <span className="reviewer-directory-state" role="status">正在加载用人经理…</span> : hiringManagersStatus === "error" ? <span className="reviewer-directory-state owner-directory-error" role="alert">用人经理加载失败。<button type="button" onClick={onRetryHiringManagers}>重试</button></span> : hiringManagers.length === 0 ? <span className="reviewer-directory-state" role="status">暂无可选用人经理，请先在组织设置中添加。</span> : <div className="job-reviewer-options">{hiringManagers.map((item) => <label className={values.hiringManagerIds.includes(item.id) ? "selected" : ""} key={item.id}><input type="checkbox" checked={values.hiringManagerIds.includes(item.id)} onChange={(event) => changeHiringManager(item.id, event.target.checked)} /><span>{item.name}</span></label>)}</div>}{errors.hiringManagerIds && <small className="field-error" role="alert">{errors.hiringManagerIds}</small>}<label htmlFor="job-default-reviewer">默认评审人<select id="job-default-reviewer" value={values.hiringOwnerId} onChange={(event) => change("hiringOwnerId", event.target.value)} disabled={hiringManagersStatus !== "ready" || values.hiringManagerIds.length === 0}><option value="">请选择默认评审人</option>{hiringManagers.filter((item) => values.hiringManagerIds.includes(item.id)).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{errors.hiringOwnerId && <small className="field-error" role="alert">{errors.hiringOwnerId}</small>}{reviewerSelectionInvalid && !errors.hiringOwnerId && <small className="field-state">选择默认评审人后才可保存职位。</small>}</fieldset>
               <label>优先级<span className="segmented-control" role="group" aria-label="职位优先级">{["高", "中", "低"].map((item) => <button key={item} type="button" aria-pressed={values.priority === item} className={values.priority === item ? "active" : ""} onClick={() => change("priority", item)}>{item}</button>)}</span></label>
             </div></section>
             <section className="form-section"><header><span>2</span><div><h3>职位描述与筛选标准</h3><p>JD 面向候选人展示，筛选标准仅供招聘团队使用。</p></div></header><div className="job-fields">
@@ -274,7 +294,7 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
             <section className="form-section recruitment-config"><header><span>3</span><div><h3>招聘配置</h3><p>选择招聘流程；LLM 是当前唯一的评分和路由来源。</p></div></header><div className="job-fields">
               <div className="job-template-field"><span className="field-label-row"><label htmlFor="job-workflow-template">流程模板</label><button type="button" onClick={onManageTemplates}>管理模板</button></span><select id="job-workflow-template" aria-label="流程模板" value={values.workflowTemplateId} disabled={workflowTemplatesStatus === "loading" || !workflowTemplates.length} onChange={(event) => changeWorkflowTemplate(event.target.value)}><option value="">{workflowTemplatesStatus === "loading" ? "正在加载流程模板…" : "请选择流程模板"}</option>{workflowTemplates.map((template) => <option key={template.id} value={template.id} disabled={template.status === "inactive" && template.id !== values.workflowTemplateId}>{template.name}{template.status === "inactive" ? "（已停用）" : ""}</option>)}</select>{workflowTemplatesStatus === "error" && <small className="field-error">流程模板加载失败，请稍后重试。</small>}{errors.process && <small className="field-error">{errors.process}</small>}</div>
               <div className="process-summary"><strong>阶段摘要</strong><span>新简历 → 用人经理评审 → 待安排面试 → {(workflowTemplates.find((item) => item.id === values.workflowTemplateId)?.rounds || []).join(" → ") || "请选择模板"} → 用人经理录用决策</span></div>
-              <div className="toggle-row ai-evaluation-row"><span><Bot size={18} /><span><strong>AI 简历评估</strong><small>启用后由 LLM 生成评分、结论与依据，并自动转交用人经理评审。</small></span></span><label className="compact-switch"><input aria-label="AI 简历评估" type="checkbox" checked={values.llmEnabled} onChange={(event) => change("llmEnabled", event.target.checked)} /><span aria-hidden="true" /></label></div>
+              <div className="toggle-row ai-evaluation-row"><span><Bot size={18} /><span><strong>AI 简历评估</strong><small>启用后由 LLM 生成评分、结论与依据，并自动转交默认评审人；其他负责人可查看评审。</small></span></span><label className="compact-switch"><input aria-label="AI 简历评估" type="checkbox" checked={values.llmEnabled} onChange={(event) => change("llmEnabled", event.target.checked)} /><span aria-hidden="true" /></label></div>
             </div></section>
           </div>
           <aside className="form-summary"><h3>发布检查</h3><div className="completion-ring"><strong>{completion}/5</strong><span>关键项已完成</span></div>{[["职位名称", values.name], ["所属部门", values.departmentId], ["公开 JD", values.jd], ["筛选条件", values.mustHave], ["招聘流程", values.process]].map(([label, value]) => <div className={value ? "check-row done" : "check-row"} key={label}>{value ? <Check size={15} /> : <Clock3 size={15} />}<span>{label}</span></div>)}</aside>

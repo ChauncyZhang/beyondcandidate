@@ -333,17 +333,14 @@ def _notification_recipient_is_current(
     if application is None or job is None:
         return False
     if event_type == "review_requested":
-        return application.stage == "review" and (
-            recipient_user_id in review_notification_user_ids(db, job)
-            or db.scalar(
+        return application.stage == "review" and db.scalar(
             select(ApplicationReviewTask.id).where(
                 ApplicationReviewTask.organization_id == organization_id,
                 ApplicationReviewTask.application_id == application.id,
                 ApplicationReviewTask.assignee_id == recipient_user_id,
                 ApplicationReviewTask.status == "open",
             )
-            ) is not None
-        )
+        ) is not None
     if event_type in {"interview_arrangement_requested", "next_interview_requested"}:
         return application.stage == "interview_pending" and application.owner_id == recipient_user_id
     if event_type == "hiring_decision_requested":

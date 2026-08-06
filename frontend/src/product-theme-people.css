@@ -483,3 +483,35 @@
   .candidate-page *,
   .talent-page * { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
+body .review-referral-context {
+  margin: 0;
+  padding: 11px 12px;
+  border-radius: 7px;
+  background: #f5f7f9;
+  display: grid;
+  gap: 8px;
+}
+
+body .review-referral-context > div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+}
+
+body .review-referral-context dt { color: var(--ink-secondary); }
+body .review-referral-context dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+
+body .review-referral-state {
+  min-height: 48px;
+  padding: 10px 11px;
+  border-radius: 6px;
+  color: var(--ink-secondary);
+  background: #f5f7f9;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+body .review-referral-state.error { color: var(--red); background: #fff2f3; }
+body .review-referral-state span { min-width: 0; flex: 1; }
+body .review-referral-state button { border: 0; color: var(--blue); background: transparent; cursor: pointer; }

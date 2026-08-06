@@ -13,6 +13,7 @@ const JOB_ID = "11111111-1111-4111-8111-111111111111";
 const DEPARTMENT_ID = "22222222-2222-4222-8222-222222222222";
 const OWNER_ID = "33333333-3333-4333-8333-333333333333";
 const HIRING_OWNER_ID = "44444444-4444-4444-8444-444444444444";
+const HIRING_MANAGER_ID = "66666666-6666-4666-8666-666666666666";
 const WORKFLOW_TEMPLATE_ID = "55555555-5555-4555-8555-555555555555";
 
 function apiJob(changes = {}) {
@@ -58,6 +59,7 @@ function definitionResource(changes = {}) {
         nice_to_have: ["Vite"],
         ...changes.rules,
       },
+      hiring_manager_ids: changes.hiring_manager_ids ?? [HIRING_OWNER_ID],
     },
   };
 }
@@ -144,7 +146,7 @@ test("job form actions execute the correct publish payload for create and every 
   const actionCount = cases.reduce((count, { expected }) => count + (expected.secondary ? 2 : 1), 0);
   const { client, calls } = queuedClient(Array.from({ length: actionCount }, () => definitionResource()));
   const controller = createJobController({ client, idempotencyKey: () => "job-form-action" });
-  const values = { name: "平台工程师", priority: "中" };
+  const values = { name: "平台工程师", priority: "中", hiringManagerIds: [HIRING_OWNER_ID], hiringOwnerId: HIRING_OWNER_ID };
 
   for (const { job, expected } of cases) {
     const actions = getJobFormActions(job);
@@ -304,7 +306,7 @@ test("status and priority mappings ignore prototype-chain keys", async () => {
   assert.equal(typeof result.records[0].status, "string");
   assert.equal(typeof result.records[0].priority, "string");
   await assert.rejects(
-    () => controller.saveDefinition({ name: "职位", priority: "constructor" }, { publish: false }),
+    () => controller.saveDefinition({ name: "职位", priority: "constructor", hiringManagerIds: [HIRING_OWNER_ID], hiringOwnerId: HIRING_OWNER_ID }, { publish: false }),
     { code: "JOB_PRIORITY_UNSUPPORTED" },
   );
   assert.equal(calls.length, 1);
@@ -406,6 +408,18 @@ test("loadDefinition starts definition and funnel requests concurrently and prop
   assert.equal(result.interview, 1);
 });
 
+test("loadDefinition preserves top-level hiring manager ids for edit", async () => {
+  const { client } = queuedClient([
+    definitionResource({ hiring_manager_ids: [HIRING_OWNER_ID, HIRING_MANAGER_ID] }),
+    { data: { stages: {}, total: 0 } },
+  ]);
+
+  const definition = await createJobController({ client }).loadDefinition(JOB_ID);
+
+  assert.deepEqual(definition.hiringManagerIds, [HIRING_OWNER_ID, HIRING_MANAGER_ID]);
+  assert.equal(definition.hiringOwnerId, HIRING_OWNER_ID);
+});
+
 test("loadDefinition gives legacy definitions safe blanks without invented version identity", async () => {
   const { client } = queuedClient([
     { data: { job: apiJob({ funnel: undefined }), jd: null, rules: null } },
@@ -449,6 +463,7 @@ test("saveDefinition maps the complete UI form for draft, publish, and versioned
     headcount: 3,
     recruitingOwnerId: OWNER_ID,
     hiringOwnerId: HIRING_OWNER_ID,
+    hiringManagerIds: [HIRING_OWNER_ID],
     priority: "高",
     jd: "  建设可靠的招聘平台。  ",
     mustHave: " JavaScript、React， ",
@@ -469,6 +484,7 @@ test("saveDefinition maps the complete UI form for draft, publish, and versioned
     priority: "high",
     recruiting_owner_id: OWNER_ID,
     hiring_owner_id: HIRING_OWNER_ID,
+    hiring_manager_ids: [HIRING_OWNER_ID],
     description: "建设可靠的招聘平台。",
     location: "上海",
     process_template: "技术岗位标准流程",
@@ -497,7 +513,7 @@ test("409 recovery preserves form values, refreshes the version baseline, and re
   ]);
   const keys = ["stale-save", "retry-save"];
   const controller = createJobController({ client, idempotencyKey: () => keys.shift() });
-  const values = { name: "用户尚未提交的职位名称", priority: "中", location: "远程" };
+  const values = { name: "用户尚未提交的职位名称", priority: "中", location: "远程", hiringManagerIds: [HIRING_OWNER_ID], hiringOwnerId: HIRING_OWNER_ID };
   const staleJob = { id: JOB_ID, version: 7, status: "招聘中", formMode: "edit" };
 
   await assert.rejects(
@@ -546,11 +562,11 @@ test("failed conflict refresh preserves the form and stale baseline with a stabl
   assert.equal(retried.error, "");
 });
 
-test("definition update submits the recruiting owner separately from an unassigned hiring manager", async () => {
+test("definition update rejects an unassigned default reviewer before network I/O", async () => {
   const { client, calls } = queuedClient([definitionResource()]);
   const controller = createJobController({ client, idempotencyKey: () => "clear-assignment-key" });
 
-  await controller.saveDefinition({
+  await assert.rejects(() => controller.saveDefinition({
     name: "平台工程师",
     departmentId: "",
     recruitingOwnerId: OWNER_ID,
@@ -563,11 +579,10 @@ test("definition update submits the recruiting owner separately from an unassign
     llmEnabled: false,
     mustHave: [],
     niceToHave: [],
-  }, { job: { id: JOB_ID, version: 7, departmentId: DEPARTMENT_ID, recruitingOwnerId: OWNER_ID, hiringOwnerId: HIRING_OWNER_ID } });
+    hiringManagerIds: [],
+  }, { job: { id: JOB_ID, version: 7, departmentId: DEPARTMENT_ID, recruitingOwnerId: OWNER_ID, hiringOwnerId: HIRING_OWNER_ID, hiringManagerIds: [HIRING_OWNER_ID] } }), { code: "JOB_HIRING_OWNER_REQUIRED" });
 
-  assert.equal(calls[0].options.body.department_id, null);
-  assert.equal(calls[0].options.body.recruiting_owner_id, OWNER_ID);
-  assert.equal(calls[0].options.body.hiring_owner_id, null);
+  assert.equal(calls.length, 0);
 });
 
 test("mergeDefinition keeps list metadata and complete definition fields", () => {

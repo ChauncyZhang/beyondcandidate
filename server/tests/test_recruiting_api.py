@@ -16,7 +16,7 @@ from server.app.identity.security import PasswordService
 from server.app.main import create_app
 from server.app.llm.models import LlmInvocation, LlmProviderConfig, LlmScreeningEvaluation, PromptVersion
 from server.app.recruiting import api as recruiting_api
-from server.app.recruiting.models import Application, ApplicationStageEvent, Candidate, CandidateEvent, CandidateNote, DownloadTicket, FileObject, IdempotencyRecord, JobJdVersion, Resume, ScreeningRuleVersion
+from server.app.recruiting.models import Application, ApplicationReviewTask, ApplicationStageEvent, Candidate, CandidateEvent, CandidateNote, DownloadTicket, FileObject, IdempotencyRecord, JobJdVersion, Resume, ScreeningRuleVersion
 from server.app.screening.models import ScreeningItem, ScreeningResult, ScreeningRun
 from server.app.identity.models import AuditLog
 from server.app.recruiting.storage import StorageReadFailed
@@ -376,6 +376,38 @@ def test_admin_happy_path_preconditions_idempotency_and_private_download(tmp_pat
         assert client.post("/api/v1/download-tickets/consume", json={"token": raw}, headers=headers).status_code == 404
         with app.state.identity_store.sync_session() as db:
             assert raw not in repr([row.metadata_json for row in db.query(AuditLog).all()])
+
+
+def test_candidate_application_detail_includes_open_review_task_assignee(tmp_path) -> None:
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "detail-admin@example.test")
+    manager_id = seed_user(app, "hiring_manager", "detail-manager@example.test")
+    with app.state.identity_store.sync_session() as db:
+        admin = db.get(User, admin_id)
+        manager = db.get(User, manager_id)
+        job = Job(organization_id=admin.organization_id, title="Review detail", owner_id=admin.id, hiring_owner_id=manager.id, status="open")
+        candidate = Candidate(organization_id=admin.organization_id, display_name="Candidate", owner_id=admin.id)
+        file = FileObject(organization_id=admin.organization_id, storage_key="private/review-detail", original_filename="review.pdf", mime_type="application/pdf", size_bytes=1, sha256="d" * 64, uploaded_by=admin.id)
+        db.add_all([job, candidate, file]); db.flush()
+        db.add(JobCollaborator(organization_id=admin.organization_id, job_id=job.id, user_id=manager.id, access_role="job_manager"))
+        resume = Resume(organization_id=admin.organization_id, candidate_id=candidate.id, file_object_id=file.id, version_number=1)
+        db.add(resume); db.flush()
+        application = Application(organization_id=admin.organization_id, candidate_id=candidate.id, job_id=job.id, resume_id=resume.id, owner_id=admin.id, stage="review")
+        db.add(application); db.flush()
+        task = ApplicationReviewTask(organization_id=admin.organization_id, application_id=application.id, assignee_id=manager.id, status="open", ai_status="succeeded")
+        db.add(task); db.commit()
+        candidate_id, task_id, assignee_name = candidate.id, task.id, manager.display_name
+
+    with TestClient(app) as client:
+        headers = login(client, "detail-admin@example.test")
+        response = client.get(f"/api/v1/candidates/{candidate_id}/applications", headers=headers)
+
+    assert response.status_code == 200
+    detail = response.json()["data"][0]
+    assert detail["stage"] == "review"
+    assert detail["task_id"] == str(task_id)
+    assert detail["assignee_id"] == str(manager_id)
+    assert detail["assignee_name"] == assignee_name
 
 
 def test_system_admin_and_interviewer_have_no_recruiting_access_by_role_alone(tmp_path) -> None:
@@ -1277,8 +1309,8 @@ def test_candidate_list_cursor_uses_selected_application_time_and_candidate_id_t
 @pytest.mark.parametrize(("publish", "expected_status"), [(False, "draft"), (True, "open")])
 def test_create_job_definition_atomically_creates_typed_versions(tmp_path, publish, expected_status) -> None:
     app = make_app(tmp_path)
-    seed_user(app, "recruiting_admin", "admin@example.test")
-    payload = job_definition_payload(publish=publish)
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
+    payload = job_definition_payload(hiring_owner_id=str(admin_id), publish=publish)
     with TestClient(app) as client:
         headers = {**login(client, "admin@example.test"), "Idempotency-Key": f"create-{expected_status}"}
         response = client.post("/api/v1/job-definitions", json=payload, headers=headers)
@@ -1363,6 +1395,7 @@ def test_job_owner_options_and_definition_writes_enforce_active_tenant_hiring_ma
             json=job_definition_payload(
                 recruiting_owner_id=str(wrong_role_id),
                 hiring_owner_id=str(admin_id),
+                hiring_manager_ids=[str(admin_id), str(eligible_id)],
             ),
             headers={**headers, "Idempotency-Key": "valid-owner"},
         )
@@ -1371,7 +1404,10 @@ def test_job_owner_options_and_definition_writes_enforce_active_tenant_hiring_ma
 
         replaced = client.put(
             f"/api/v1/job-definitions/{job_id}",
-            json=job_definition_payload(hiring_owner_id=str(replacement_id)),
+            json=job_definition_payload(
+                hiring_owner_id=str(replacement_id),
+                hiring_manager_ids=[str(replacement_id), str(eligible_id)],
+            ),
             headers={**headers, "Idempotency-Key": "replace-owner", "If-Match": '"1"'},
         )
         assert replaced.status_code == 200
@@ -1381,9 +1417,7 @@ def test_job_owner_options_and_definition_writes_enforce_active_tenant_hiring_ma
             JobCollaborator.job_id == job_id,
             JobCollaborator.access_role == "job_manager",
         )).all()
-        assert [(item.organization_id, item.user_id) for item in managers] == [
-            (db.get(User, replacement_id).organization_id, replacement_id),
-        ]
+        assert {item.user_id for item in managers} == {replacement_id, eligible_id}
         job = db.get(Job, job_id)
         owners = db.scalars(select(JobCollaborator).where(
             JobCollaborator.job_id == job_id,
@@ -1391,6 +1425,59 @@ def test_job_owner_options_and_definition_writes_enforce_active_tenant_hiring_ma
         )).all()
         assert job.owner_id == wrong_role_id
         assert [item.user_id for item in owners] == [wrong_role_id]
+
+
+def test_job_definition_requires_default_manager_and_reviewer_options_union_explicit_and_scope(tmp_path) -> None:
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
+    default_id = seed_user(app, "hiring_manager", "default@example.test")
+    explicit_id = seed_user(app, "hiring_manager", "explicit@example.test")
+    scoped_id = seed_user(app, "hiring_manager", "scoped@example.test")
+    with app.state.identity_store.sync_session() as db:
+        db.get(User, scoped_id).recruiting_scope_type = "organization"
+        db.commit()
+
+    with TestClient(app) as client:
+        headers = login(client, "admin@example.test")
+        missing_default = client.post(
+            "/api/v1/job-definitions",
+            json=job_definition_payload(hiring_manager_ids=[str(explicit_id)]),
+            headers={**headers, "Idempotency-Key": "missing-default"},
+        )
+        default_outside_list = client.post(
+            "/api/v1/job-definitions",
+            json=job_definition_payload(
+                hiring_owner_id=str(default_id),
+                hiring_manager_ids=[str(explicit_id)],
+            ),
+            headers={**headers, "Idempotency-Key": "default-outside-list"},
+        )
+        legacy = client.post(
+            "/api/v1/job-definitions",
+            json=job_definition_payload(hiring_owner_id=str(default_id)),
+            headers={**headers, "Idempotency-Key": "legacy-single-manager"},
+        )
+        created = client.post(
+            "/api/v1/job-definitions",
+            json=job_definition_payload(
+                hiring_owner_id=str(default_id),
+                hiring_manager_ids=[str(explicit_id), str(default_id)],
+            ),
+            headers={**headers, "Idempotency-Key": "multiple-managers"},
+        )
+        options = client.get(
+            f"/api/v1/jobs/{created.json()['data']['job']['id']}/reviewer-options",
+            headers=headers,
+        )
+
+    assert missing_default.status_code == default_outside_list.status_code == 422
+    assert legacy.status_code == created.status_code == 201
+    assert legacy.json()["data"]["hiring_manager_ids"] == [str(default_id)]
+    assert created.json()["data"]["hiring_manager_ids"][0] == str(default_id)
+    option_ids = [row["id"] for row in options.json()["data"]]
+    assert options.status_code == 200
+    assert option_ids[0] == str(default_id)
+    assert set(option_ids) == {str(default_id), str(explicit_id), str(scoped_id)}
 
 
 def test_get_job_definition_returns_latest_versions_and_legacy_nulls(tmp_path) -> None:
@@ -1402,9 +1489,9 @@ def test_get_job_definition_returns_latest_versions_and_legacy_nulls(tmp_path) -
         db.add(legacy); db.commit(); legacy_id = str(legacy.id)
     with TestClient(app) as client:
         headers = login(client, "admin@example.test")
-        created = client.post("/api/v1/job-definitions", json=job_definition_payload(), headers={**headers, "Idempotency-Key": "latest-definition"})
+        created = client.post("/api/v1/job-definitions", json=job_definition_payload(hiring_owner_id=str(admin_id)), headers={**headers, "Idempotency-Key": "latest-definition"})
         job_id = created.json()["data"]["job"]["id"]
-        updated = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(description="Latest description", must_have=["Python 3.12"]), headers={**headers, "Idempotency-Key": "replace-definition", "If-Match": '"1"'})
+        updated = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(hiring_owner_id=str(admin_id), description="Latest description", must_have=["Python 3.12"]), headers={**headers, "Idempotency-Key": "replace-definition", "If-Match": '"1"'})
         latest = client.get(f"/api/v1/job-definitions/{job_id}")
         legacy_response = client.get(f"/api/v1/job-definitions/{legacy_id}")
     assert updated.status_code == latest.status_code == legacy_response.status_code == 200
@@ -1417,17 +1504,18 @@ def test_get_job_definition_returns_latest_versions_and_legacy_nulls(tmp_path) -
 
 def test_replace_job_definition_appends_history_and_obeys_publish_state_rules(tmp_path) -> None:
     app = make_app(tmp_path)
-    seed_user(app, "recruiting_admin", "admin@example.test")
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
+    definition = lambda **changes: job_definition_payload(hiring_owner_id=str(admin_id), **changes)
     with TestClient(app) as client:
         headers = login(client, "admin@example.test")
-        created = client.post("/api/v1/job-definitions", json=job_definition_payload(), headers={**headers, "Idempotency-Key": "create"})
+        created = client.post("/api/v1/job-definitions", json=definition(), headers={**headers, "Idempotency-Key": "create"})
         job_id = created.json()["data"]["job"]["id"]
-        replaced = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(title="Principal Engineer", publish=True), headers={**headers, "Idempotency-Key": "replace", "If-Match": '"1"'})
-        stale = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(title="Stale"), headers={**headers, "Idempotency-Key": "stale", "If-Match": '"1"'})
-        invalid_publish = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(title="Still open", publish=True), headers={**headers, "Idempotency-Key": "publish-again", "If-Match": '"2"'})
-        preserved = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(title="Open replacement"), headers={**headers, "Idempotency-Key": "preserve-open", "If-Match": '"2"'})
-        replay = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(title="Open replacement"), headers={**headers, "Idempotency-Key": "preserve-open", "If-Match": '"2"'})
-        replay_conflict = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(title="Different replacement"), headers={**headers, "Idempotency-Key": "preserve-open", "If-Match": '"3"'})
+        replaced = client.put(f"/api/v1/job-definitions/{job_id}", json=definition(title="Principal Engineer", publish=True), headers={**headers, "Idempotency-Key": "replace", "If-Match": '"1"'})
+        stale = client.put(f"/api/v1/job-definitions/{job_id}", json=definition(title="Stale"), headers={**headers, "Idempotency-Key": "stale", "If-Match": '"1"'})
+        invalid_publish = client.put(f"/api/v1/job-definitions/{job_id}", json=definition(title="Still open", publish=True), headers={**headers, "Idempotency-Key": "publish-again", "If-Match": '"2"'})
+        preserved = client.put(f"/api/v1/job-definitions/{job_id}", json=definition(title="Open replacement"), headers={**headers, "Idempotency-Key": "preserve-open", "If-Match": '"2"'})
+        replay = client.put(f"/api/v1/job-definitions/{job_id}", json=definition(title="Open replacement"), headers={**headers, "Idempotency-Key": "preserve-open", "If-Match": '"2"'})
+        replay_conflict = client.put(f"/api/v1/job-definitions/{job_id}", json=definition(title="Different replacement"), headers={**headers, "Idempotency-Key": "preserve-open", "If-Match": '"3"'})
     assert replaced.status_code == 200 and replaced.headers["etag"] == '"2"'
     assert replaced.json()["data"]["job"]["status"] == "open"
     assert replaced.json()["data"]["jd"]["version_number"] == replaced.json()["data"]["rules"]["version_number"] == 2
@@ -1445,12 +1533,13 @@ def test_replace_job_definition_appends_history_and_obeys_publish_state_rules(tm
 
 def test_job_definition_idempotency_replays_and_rejects_body_conflicts(tmp_path) -> None:
     app = make_app(tmp_path)
-    seed_user(app, "recruiting_admin", "admin@example.test")
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
+    definition = lambda **changes: job_definition_payload(hiring_owner_id=str(admin_id), **changes)
     with TestClient(app) as client:
         headers = {**login(client, "admin@example.test"), "Idempotency-Key": "same-create"}
-        first = client.post("/api/v1/job-definitions", json=job_definition_payload(), headers=headers)
-        replay = client.post("/api/v1/job-definitions", json=job_definition_payload(), headers=headers)
-        conflict = client.post("/api/v1/job-definitions", json=job_definition_payload(title="Different"), headers=headers)
+        first = client.post("/api/v1/job-definitions", json=definition(), headers=headers)
+        replay = client.post("/api/v1/job-definitions", json=definition(), headers=headers)
+        conflict = client.post("/api/v1/job-definitions", json=definition(title="Different"), headers=headers)
     assert first.status_code == replay.status_code == 201
     assert first.json() == replay.json()
     assert first.headers["etag"] == replay.headers["etag"] == '"1"'
@@ -1461,13 +1550,13 @@ def test_job_definition_idempotency_replays_and_rejects_body_conflicts(tmp_path)
 
 def test_job_definition_failure_rolls_back_aggregate_and_idempotency(tmp_path) -> None:
     app = make_app(tmp_path)
-    seed_user(app, "recruiting_admin", "admin@example.test")
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
     def fail_rule_write(mapper, connection, target):
         raise RuntimeError("injected rule write failure")
     event.listen(ScreeningRuleVersion, "before_insert", fail_rule_write)
     try:
         with TestClient(app, raise_server_exceptions=False) as client:
-            response = client.post("/api/v1/job-definitions", json=job_definition_payload(), headers={**login(client, "admin@example.test"), "Idempotency-Key": "will-rollback"})
+            response = client.post("/api/v1/job-definitions", json=job_definition_payload(hiring_owner_id=str(admin_id)), headers={**login(client, "admin@example.test"), "Idempotency-Key": "will-rollback"})
     finally:
         event.remove(ScreeningRuleVersion, "before_insert", fail_rule_write)
     assert response.status_code == 500
@@ -1480,8 +1569,9 @@ def test_job_definition_failure_rolls_back_aggregate_and_idempotency(tmp_path) -
 
 def test_job_definition_access_is_non_disclosing_and_audit_metadata_is_redacted(tmp_path) -> None:
     app = make_app(tmp_path)
-    seed_user(app, "recruiting_admin", "admin@example.test")
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
     seed_user(app, "system_admin", "system@example.test")
+    definition = lambda **changes: job_definition_payload(hiring_owner_id=str(admin_id), **changes)
     with app.state.identity_store.sync_session() as db:
         other_org = Organization(slug="other", name="Other", status="active")
         other_user = User(organization=other_org, email="other@example.test", normalized_email="other@example.test", display_name="other", password_hash=PasswordService().hash("correct horse"))
@@ -1493,16 +1583,16 @@ def test_job_definition_access_is_non_disclosing_and_audit_metadata_is_redacted(
     secret_rule = "secret rule content marker"
     with TestClient(app) as client:
         admin_headers = login(client, "admin@example.test")
-        denied_post = client.post("/api/v1/job-definitions", json=job_definition_payload(), headers={**login(client, "system@example.test"), "Idempotency-Key": "denied-post"})
+        denied_post = client.post("/api/v1/job-definitions", json=definition(), headers={**login(client, "system@example.test"), "Idempotency-Key": "denied-post"})
         admin_headers = login(client, "admin@example.test")
-        created = client.post("/api/v1/job-definitions", json=job_definition_payload(description=secret_description, must_have=[secret_rule]), headers={**admin_headers, "Idempotency-Key": "secure-create"})
+        created = client.post("/api/v1/job-definitions", json=definition(description=secret_description, must_have=[secret_rule]), headers={**admin_headers, "Idempotency-Key": "secure-create"})
         job_id = created.json()["data"]["job"]["id"]
         cross_tenant = client.get(f"/api/v1/job-definitions/{cross_tenant_job_id}")
-        cross_tenant_put = client.put(f"/api/v1/job-definitions/{cross_tenant_job_id}", json=job_definition_payload(), headers={**admin_headers, "If-Match": '"1"', "Idempotency-Key": "cross-tenant-put"})
-        updated = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(description="updated secret JD", must_have=["updated secret rule"]), headers={**admin_headers, "If-Match": '"1"', "Idempotency-Key": "secure-update"})
+        cross_tenant_put = client.put(f"/api/v1/job-definitions/{cross_tenant_job_id}", json=definition(), headers={**admin_headers, "If-Match": '"1"', "Idempotency-Key": "cross-tenant-put"})
+        updated = client.put(f"/api/v1/job-definitions/{job_id}", json=definition(description="updated secret JD", must_have=["updated secret rule"]), headers={**admin_headers, "If-Match": '"1"', "Idempotency-Key": "secure-update"})
         system_headers = login(client, "system@example.test")
         denied_get = client.get(f"/api/v1/job-definitions/{job_id}")
-        denied_put = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(), headers={**system_headers, "If-Match": '"1"', "Idempotency-Key": "denied"})
+        denied_put = client.put(f"/api/v1/job-definitions/{job_id}", json=definition(), headers={**system_headers, "If-Match": '"1"', "Idempotency-Key": "denied"})
     assert denied_post.status_code == denied_get.status_code == denied_put.status_code == 404
     assert denied_get.json()["code"] == denied_put.json()["code"] == "resource_not_found"
     assert cross_tenant.status_code == cross_tenant_put.status_code == 404
@@ -1518,17 +1608,18 @@ def test_job_definition_access_is_non_disclosing_and_audit_metadata_is_redacted(
 
 def test_job_definition_preconditions_and_bounded_validation_are_enforced(tmp_path) -> None:
     app = make_app(tmp_path)
-    seed_user(app, "recruiting_admin", "admin@example.test")
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
+    definition = lambda **changes: job_definition_payload(hiring_owner_id=str(admin_id), **changes)
     with TestClient(app) as client:
         headers = login(client, "admin@example.test")
-        missing_key = client.post("/api/v1/job-definitions", json=job_definition_payload(), headers=headers)
-        blank_description = client.post("/api/v1/job-definitions", json=job_definition_payload(description="   "), headers={**headers, "Idempotency-Key": "blank-description"})
-        blank_rule = client.post("/api/v1/job-definitions", json=job_definition_payload(must_have=["Python", " "]), headers={**headers, "Idempotency-Key": "blank-rule"})
-        invalid_priority = client.post("/api/v1/job-definitions", json=job_definition_payload(priority="urgent"), headers={**headers, "Idempotency-Key": "bad-priority"})
-        created = client.post("/api/v1/job-definitions", json=job_definition_payload(), headers={**headers, "Idempotency-Key": "valid"})
+        missing_key = client.post("/api/v1/job-definitions", json=definition(), headers=headers)
+        blank_description = client.post("/api/v1/job-definitions", json=definition(description="   "), headers={**headers, "Idempotency-Key": "blank-description"})
+        blank_rule = client.post("/api/v1/job-definitions", json=definition(must_have=["Python", " "]), headers={**headers, "Idempotency-Key": "blank-rule"})
+        invalid_priority = client.post("/api/v1/job-definitions", json=definition(priority="urgent"), headers={**headers, "Idempotency-Key": "bad-priority"})
+        created = client.post("/api/v1/job-definitions", json=definition(), headers={**headers, "Idempotency-Key": "valid"})
         job_id = created.json()["data"]["job"]["id"]
-        missing_match = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(), headers={**headers, "Idempotency-Key": "missing-match"})
-        malformed_match = client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(), headers={**headers, "Idempotency-Key": "malformed-match", "If-Match": "1"})
+        missing_match = client.put(f"/api/v1/job-definitions/{job_id}", json=definition(), headers={**headers, "Idempotency-Key": "missing-match"})
+        malformed_match = client.put(f"/api/v1/job-definitions/{job_id}", json=definition(), headers={**headers, "Idempotency-Key": "malformed-match", "If-Match": "1"})
     assert missing_key.status_code == 428 and missing_key.json()["code"] == "idempotency_key_required"
     assert blank_description.status_code == blank_rule.status_code == invalid_priority.status_code == 422
     assert missing_match.status_code == 428 and missing_match.json()["code"] == "precondition_required"
@@ -1537,19 +1628,20 @@ def test_job_definition_preconditions_and_bounded_validation_are_enforced(tmp_pa
 
 def test_job_definition_rejects_unknown_fields_and_all_size_boundaries(tmp_path) -> None:
     app = make_app(tmp_path)
-    seed_user(app, "recruiting_admin", "admin@example.test")
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
+    definition = lambda **changes: job_definition_payload(hiring_owner_id=str(admin_id), **changes)
     invalid_payloads = [
-        job_definition_payload(unknown="field"),
-        job_definition_payload(title="x" * 201),
-        job_definition_payload(description="x" * 50_001),
-        job_definition_payload(location="x" * 201),
-        job_definition_payload(process_template="x" * 101),
-        job_definition_payload(must_have=["x" * 101]),
-        job_definition_payload(nice_to_have=["x"] * 51),
-        job_definition_payload(headcount=0),
-        job_definition_payload(headcount=1001),
+        definition(unknown="field"),
+        definition(title="x" * 201),
+        definition(description="x" * 50_001),
+        definition(location="x" * 201),
+        definition(process_template="x" * 101),
+        definition(must_have=["x" * 101]),
+        definition(nice_to_have=["x"] * 51),
+        definition(headcount=0),
+        definition(headcount=1001),
     ]
-    valid_boundary = job_definition_payload(title="x" * 200, description="x" * 50_000, location="x" * 200, process_template="x" * 100, must_have=["x" * 100], nice_to_have=["x"] * 50, headcount=1000)
+    valid_boundary = definition(title="x" * 200, description="x" * 50_000, location="x" * 200, process_template="x" * 100, must_have=["x" * 100], nice_to_have=["x"] * 50, headcount=1000)
     with TestClient(app) as client:
         headers = login(client, "admin@example.test")
         rejected = [client.post("/api/v1/job-definitions", json=payload, headers={**headers, "Idempotency-Key": f"invalid-{index}"}) for index, payload in enumerate(invalid_payloads)]
@@ -1657,10 +1749,10 @@ def test_job_definition_non_object_legacy_rules_return_stable_problem(tmp_path) 
 
 def test_replace_job_definition_failure_rolls_back_every_change(tmp_path) -> None:
     app = make_app(tmp_path)
-    seed_user(app, "recruiting_admin", "admin@example.test")
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
     with TestClient(app) as client:
         headers = login(client, "admin@example.test")
-        created = client.post("/api/v1/job-definitions", json=job_definition_payload(), headers={**headers, "Idempotency-Key": "replace-rollback-create"})
+        created = client.post("/api/v1/job-definitions", json=job_definition_payload(hiring_owner_id=str(admin_id)), headers={**headers, "Idempotency-Key": "replace-rollback-create"})
         job_id = created.json()["data"]["job"]["id"]
 
         def fail_rule_write(mapper, connection, target):
@@ -1671,7 +1763,7 @@ def test_replace_job_definition_failure_rolls_back_every_change(tmp_path) -> Non
         try:
             with TestClient(app, raise_server_exceptions=False) as failing_client:
                 failing_headers = login(failing_client, "admin@example.test")
-                response = failing_client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(title="Must rollback", description="rollback JD", must_have=["rollback rule"], publish=True), headers={**failing_headers, "If-Match": '"1"', "Idempotency-Key": "replace-rollback"})
+                response = failing_client.put(f"/api/v1/job-definitions/{job_id}", json=job_definition_payload(hiring_owner_id=str(admin_id), title="Must rollback", description="rollback JD", must_have=["rollback rule"], publish=True), headers={**failing_headers, "If-Match": '"1"', "Idempotency-Key": "replace-rollback"})
         finally:
             event.remove(ScreeningRuleVersion, "before_insert", fail_rule_write)
 
@@ -1687,9 +1779,9 @@ def test_replace_job_definition_failure_rolls_back_every_change(tmp_path) -> Non
 
 def test_published_creation_audit_records_created_open_fact_without_fake_transition(tmp_path) -> None:
     app = make_app(tmp_path)
-    seed_user(app, "recruiting_admin", "admin@example.test")
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
     with TestClient(app) as client:
-        response = client.post("/api/v1/job-definitions", json=job_definition_payload(publish=True), headers={**login(client, "admin@example.test"), "Idempotency-Key": "created-open-audit"})
+        response = client.post("/api/v1/job-definitions", json=job_definition_payload(hiring_owner_id=str(admin_id), publish=True), headers={**login(client, "admin@example.test"), "Idempotency-Key": "created-open-audit"})
     assert response.status_code == 201
     with app.state.identity_store.sync_session() as db:
         created = db.query(AuditLog).filter_by(event_type="job.definition_created").one()

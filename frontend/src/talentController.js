@@ -70,7 +70,7 @@ export function reviewReferralErrorMessage(error) {
   const messages = {
     review_referral_job_closed: "原岗位已关闭，无法再转交评审。",
     review_referral_hiring_manager_missing: "原岗位尚未配置用人经理，请先编辑职位并选择用人经理。",
-    review_referral_hiring_manager_invalid: "原岗位的用人经理账号不可用，请先编辑职位并重新选择。",
+    review_referral_hiring_manager_invalid: "所选负责人已不可用，请重新打开转交对话框并选择。",
     version_conflict: "该人才信息已更新，请刷新后重试。",
   };
   return messages[error?.code] || "转交失败，请刷新后重试";
@@ -304,6 +304,13 @@ export function createTalentController({ client = apiClient, idSource = () => gl
   }
 
   return {
+    async listReviewerOptions(jobId, options = {}) {
+      const id = requireId(jobId, "talent_source_job_required");
+      const payload = await client.request(`/api/v1/jobs/${encodeURIComponent(id)}/reviewer-options`, options);
+      return safeArray(payload?.data)
+        .map((item) => ({ id: safeString(item?.id).trim(), name: safeString(item?.name).trim() }))
+        .filter((item) => item.id && item.name);
+    },
     async listPools(filters = {}, options = {}) {
       const params = new URLSearchParams();
       if (filters.q) params.set("q", filters.q);
@@ -420,11 +427,12 @@ export function createTalentController({ client = apiClient, idSource = () => gl
       }));
       return payload?.data ?? null;
     },
-    async referToReview(memberId, memberVersion, options = {}) {
+    async referToReview(memberId, memberVersion, assigneeId, options = {}) {
       const id = requireId(memberId, "talent_membership_required");
       const version = requireVersion(memberVersion);
-      const body = {};
-      const intent = `membership:review-referral:${id}:${version}`;
+      const assignee = requireId(assigneeId, "review_referral_assignee_required");
+      const body = { assignee_id: assignee };
+      const intent = `membership:review-referral:${id}:${version}:${assignee}`;
       const payload = await mutate(intent, body, (idempotencyKey, retainedBody) => client.request(`/api/v1/talent-pool-memberships/${encodeURIComponent(id)}/review-referrals`, {
         method: "POST",
         body: retainedBody,

@@ -66,6 +66,10 @@ function safeUuid(value) {
   return UUID_PATTERN.test(candidate) ? candidate : "";
 }
 
+function safeUuidArray(value) {
+  return [...new Set(safeArray(value).map(safeUuid).filter(Boolean))];
+}
+
 function codedError(code, message) {
   const error = new Error(message);
   error.code = code;
@@ -149,8 +153,13 @@ function normalizeDefinition(resource, funnel) {
   const data = resource?.data || {};
   const jd = data.jd;
   const rules = data.rules;
+  const base = normalizeJob(data.job, funnel);
+  const hiringManagerIds = safeUuidArray(data.hiring_manager_ids);
   return {
-    ...normalizeJob(data.job, funnel),
+    ...base,
+    hiringManagerIds: base.hiringOwnerId && !hiringManagerIds.includes(base.hiringOwnerId)
+      ? [base.hiringOwnerId, ...hiringManagerIds]
+      : hiringManagerIds,
     jd: safeString(jd?.description),
     location: safeString(jd?.location),
     process: safeString(jd?.process_template),
@@ -215,6 +224,11 @@ function definitionCommand(values, job, publish) {
   const hiringOwnerId = Object.prototype.hasOwnProperty.call(values || {}, "hiringOwnerId")
     ? safeUuid(values.hiringOwnerId) || null
     : safeUuid(job?.hiringOwnerId) || null;
+  const hiringManagerIds = Object.prototype.hasOwnProperty.call(values || {}, "hiringManagerIds")
+    ? safeUuidArray(values.hiringManagerIds)
+    : safeUuidArray(job?.hiringManagerIds);
+  if (!hiringOwnerId) throw codedError("JOB_HIRING_OWNER_REQUIRED", "job hiring owner required");
+  if (!hiringManagerIds.includes(hiringOwnerId)) throw codedError("JOB_HIRING_OWNER_NOT_SELECTED", "job hiring owner must be selected");
   const priorityValue = safeString(values?.priority).trim();
   const priority = UI_TO_API_PRIORITY.get(priorityValue) || (API_TO_UI_PRIORITY.has(priorityValue) ? priorityValue : "");
   if (!priority) throw codedError("JOB_PRIORITY_UNSUPPORTED", "job priority unsupported");
@@ -225,6 +239,7 @@ function definitionCommand(values, job, publish) {
     priority,
     recruiting_owner_id: recruitingOwnerId,
     hiring_owner_id: hiringOwnerId,
+    hiring_manager_ids: hiringManagerIds,
     description: safeString(values?.jd).trim(),
     location: safeString(values?.location).trim(),
     process_template: safeString(values?.process).trim(),

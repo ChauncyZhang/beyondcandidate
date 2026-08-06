@@ -272,6 +272,42 @@ function WorkflowActionDialog({ candidate, action, onClose, onCommit, onConflict
   </section></div>;
 }
 
+function ReviewReassignmentDialog({ candidate, controller, submitting, onClose, onConfirm }) {
+  const [options, setOptions] = useState([]);
+  const [assigneeId, setAssigneeId] = useState(candidate.reviewTask?.assigneeId || "");
+  const [status, setStatus] = useState("loading");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const abortController = new AbortController();
+    setStatus("loading");
+    setError("");
+    void controller.listReviewerOptions(candidate.jobId, { signal: abortController.signal }).then((records) => {
+      if (abortController.signal.aborted) return;
+      setOptions(records);
+      setStatus("ready");
+    }).catch((requestError) => {
+      if (requestError?.name === "AbortError") return;
+      setStatus("error");
+      setError("可选用人经理加载失败，请重试。");
+    });
+    return () => abortController.abort();
+  }, [candidate.jobId, controller]);
+
+  const unchanged = assigneeId === candidate.reviewTask?.assigneeId;
+  return <div className="candidate-dialog-backdrop" role="presentation" onMouseDown={onClose}><section className="candidate-dialog" role="dialog" aria-modal="true" aria-label="改派评审人" onMouseDown={(event) => event.stopPropagation()}>
+    <header><div><h3>改派评审人</h3><p>{candidate.name} · {candidate.position}</p></div><button className="icon-button" type="button" aria-label="关闭" disabled={submitting} onClick={onClose}><X size={19} /></button></header>
+    <div className="candidate-dialog-body">
+      <div className="transition-current"><span>当前评审人</span><strong>{candidate.reviewTask?.assigneeName || "未分配"}</strong></div>
+      <p className="workflow-action-description">改派后，仅新评审人收到待办和飞书通知，原评审人的待办会立即失效。</p>
+      <label>新的评审人<select aria-label="新的评审人" value={assigneeId} disabled={status !== "ready" || submitting} onChange={(event) => setAssigneeId(event.target.value)}><option value="">请选择用人经理</option>{options.map((item) => <option value={item.id} key={item.id}>{item.name}{item.id === candidate.reviewTask?.assigneeId ? "（当前）" : ""}</option>)}</select></label>
+      {status === "loading" && <p className="candidate-muted" role="status">正在加载可选用人经理…</p>}
+      {status === "error" && <p className="field-error" role="alert"><CircleAlert size={14} />{error}</p>}
+    </div>
+    <footer><button className="button secondary" type="button" disabled={submitting} onClick={onClose}>取消</button><button className="button primary" type="button" disabled={status !== "ready" || !assigneeId || unchanged || submitting} onClick={() => void onConfirm(assigneeId)}>{submitting ? "正在改派" : "确认改派"}</button></footer>
+  </section></div>;
+}
+
 function ResumePreview({ candidate, file, status, error, downloading, onClose, onRetry, onDownload }) {
   const dialogRef = useRef(null);
   const restoreRef = useRef(typeof document === "undefined" ? null : document.activeElement);
@@ -386,6 +422,7 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
   const [actionError, setActionError] = useState("");
   const [conflict, setConflict] = useState(false);
   const [previewState, setPreviewState] = useState(null);
+  const [reassignOpen, setReassignOpen] = useState(false);
   const previewRequestRef = useRef(null);
 
   useEffect(() => {
@@ -439,6 +476,15 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
     setSelectedWorkflowAction(null); onNotify(`${action.label}已提交`);
   }
 
+  async function commitReviewReassignment(assigneeId) {
+    const reassigned = await runServerAction(
+      "review-reassignment",
+      () => controller.reassignOpenReviewTask(candidate.reviewTask.id, candidate.reviewTask.assigneeId, assigneeId),
+      "评审人已改派",
+    );
+    if (reassigned) setReassignOpen(false);
+  }
+
   async function loadPreview() {
     if (!candidate.resume?.id) return;
     previewRequestRef.current?.abort();
@@ -483,6 +529,7 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
   const availableWorkflowActions = candidate.application || !candidate.serverBacked ? candidateWorkflowActions(candidate.stage, role) : [];
   const nextStep = candidateNextStep(candidate.stage, candidate.jobStatus);
   const canScheduleCurrent = canScheduleCandidateInterview(candidate.stage, role, onScheduleInterview, candidate.jobStatus);
+  const canReassignReview = candidate.serverBacked && candidate.stage === "待复核" && candidate.reviewTask && canPerformAction(role, "推进候选人");
   const tabs = candidateDetailTabs(candidate.serverBacked);
   const notes = candidate.notes || [];
   const profileLine = [candidate.role, candidate.company, candidate.city].filter(Boolean).join(" · ");
@@ -496,8 +543,9 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
       {tab === "筛选证据" && <div className="candidate-tab-content evidence-grid"><section className="llm-evidence" aria-labelledby="candidate-llm-evidence-title"><header><Sparkles size={18} /><div><h3 id="candidate-llm-evidence-title">AI 筛选结果</h3><span>当前持久化评估</span></div><strong aria-label={candidate.score == null ? "AI评分不可用" : `AI 匹配分 ${candidate.score}`}>{candidate.score ?? "—"}</strong></header>{candidate.recommendation === "AI评分不可用" ? <div className="candidate-muted" role="status">AI 评分失败，已保护性转交用人经理评审</div> : <><p><strong>流转结论：</strong>{aiRecommendationLabel(candidate.recommendation || "—")}</p><p>{candidate.llmSummary || "暂无评估摘要。"}</p><div className="llm-dimensions">{(candidate.dimensions || []).map((dimension) => <section key={dimension.key || dimension.label}><header><h4>{dimension.label || llmDimensionLabels[dimension.key]}</h4><strong>{dimension.score ?? "—"}</strong></header><div><strong>证据</strong>{dimension.evidence?.length ? <ul>{dimension.evidence.map((item) => <li key={item}>{item}</li>)}</ul> : <p>暂无证据</p>}</div><div><strong>缺口</strong>{dimension.gaps?.length ? <ul>{dimension.gaps.map((item) => <li key={item}>{item}</li>)}</ul> : <p>暂无缺口</p>}</div></section>)}</div><div className="llm-evidence-groups"><section><h4>优势</h4>{candidate.strengths?.length ? <ul>{candidate.strengths.map((item) => <li key={item}>{item}</li>)}</ul> : <p>暂无优势记录</p>}</section><section><h4>缺口</h4>{candidate.gaps?.length ? <ul>{candidate.gaps.map((item) => <li key={item}>{item}</li>)}</ul> : <p>暂无缺口记录</p>}</section><section><h4>风险</h4>{candidate.risks?.length ? <ul>{candidate.risks.map((item) => <li key={item}>{item}</li>)}</ul> : <p>暂无风险记录</p>}</section><section><h4>建议问题</h4>{candidate.questions?.length ? <ul>{candidate.questions.map((item) => <li key={item}>{item}</li>)}</ul> : <p>暂无建议问题</p>}</section></div></>}</section>{candidate.historicalRule && <details className="historical-rule"><summary>旧版规则结果</summary><p>历史分数：{candidate.historicalRule.score ?? "—"}</p><p>历史建议：{candidate.historicalRule.recommendation || "—"}</p></details>}</div>}
       {tab === "面试与反馈" && <div className="candidate-tab-content"><div className="candidate-interview-toolbar"><div><h3>面试记录</h3><span>安排、通知和反馈统一记录在候选人时间线中。</span></div>{canScheduleCurrent && <button className="button primary" type="button" onClick={() => onScheduleInterview(candidate)}><CalendarDays size={16} />安排面试</button>}</div>{candidate.interviews.length ? <div className="interview-feedback-list">{candidate.interviews.map((item) => <section key={item.time}><header><div><strong>{item.round}</strong><span>{item.time}</span></div><span className="feedback-result">{item.result}</span></header><p>面试官：{item.interviewer}</p><blockquote>{item.feedback}</blockquote>{onOpenInterviewFeedback && item.interviewId && <button className="button secondary" type="button" onClick={() => onOpenInterviewFeedback(item.interviewId)}>查看面试详情</button>}</section>)}</div> : <div className="candidate-empty compact"><MessageSquareText size={23} /><strong>暂无面试记录</strong><span>{candidate.stage === "待安排" ? "可以为该候选人创建第一场面试。" : "面试将在 HR 完成安排后显示。"}</span>{canScheduleCurrent && <button className="button primary" type="button" onClick={() => onScheduleInterview(candidate)}><CalendarDays size={16} />安排面试</button>}</div>}</div>}
       {tab === "时间线" && <div className="candidate-tab-content candidate-timeline">{candidate.timeline.map((item, index) => <div key={`${item.time}-${index}`}><span /><div><strong>{item.action}</strong><p>{item.actor} · {item.time}</p></div></div>)}{candidate.timeline.length === 0 && <div className="candidate-muted">暂无可见时间线记录</div>}</div>}
-    </section></main><aside className="candidate-context"><section><h3>当前申请</h3><dl><div><dt>应聘职位</dt><dd>{candidate.position}</dd></div><div><dt>当前状态</dt><dd><StageTag stage={candidate.stage} /></dd></div><div><dt>招聘负责人（HR）</dt><dd>{candidate.owner}</dd></div><div><dt>下一步</dt><dd>{nextStep}</dd></div><div><dt>最近进展</dt><dd>{candidate.lastActivity || "未记录"}</dd></div></dl><p className="candidate-auto-stage-note">状态会在完成业务动作后自动更新，无需手动维护。</p></section><CandidateGovernance candidate={candidate} role={role} onNotify={onNotify} />{!candidate.serverBacked && <section><h3>标签</h3><div className="context-tags">{candidate.tags.map((item) => <span key={item}>{item}</span>)}</div><div className="inline-add"><input value={tagInput} onChange={(event) => setTagInput(event.target.value)} placeholder="添加标签" /><button type="button" aria-label="添加标签" onClick={addTag}><Plus size={15} /></button></div></section>}<section><h3>招聘备注</h3>{notes.map((item, index) => <p className="saved-note" key={typeof item === "object" ? item.id : `${item}-${index}`}>{typeof item === "object" ? item.body : item}</p>)}{notes.length === 0 && <p className="candidate-muted">暂无招聘备注</p>}<textarea rows="4" disabled={pendingAction === "note"} value={note} onChange={(event) => setNote(event.target.value)} placeholder="记录沟通重点或后续事项" /><button className="button secondary full" type="button" disabled={!note.trim() || pendingAction === "note"} onClick={() => void addNote()}>{pendingAction === "note" ? "保存中" : "保存备注"}</button></section></aside></div>
+    </section></main><aside className="candidate-context"><section><h3>当前申请</h3><dl><div><dt>应聘职位</dt><dd>{candidate.position}</dd></div><div><dt>当前状态</dt><dd><StageTag stage={candidate.stage} /></dd></div><div><dt>招聘负责人（HR）</dt><dd>{candidate.owner}</dd></div><div><dt>下一步</dt><dd>{nextStep}</dd></div><div><dt>最近进展</dt><dd>{candidate.lastActivity || "未记录"}</dd></div></dl><p className="candidate-auto-stage-note">状态会在完成业务动作后自动更新，无需手动维护。</p></section>{candidate.reviewTask && candidate.stage === "待复核" && <section className="candidate-review-assignee"><h3>简历评审</h3><dl><div><dt>当前评审人</dt><dd>{candidate.reviewTask.assigneeName}</dd></div></dl>{canReassignReview && <button className="button secondary full" type="button" disabled={pendingAction === "review-reassignment"} onClick={() => { setActionError(""); setConflict(false); setReassignOpen(true); }}><UserRoundCheck size={16} />改派评审人</button>}</section>}<CandidateGovernance candidate={candidate} role={role} onNotify={onNotify} />{!candidate.serverBacked && <section><h3>标签</h3><div className="context-tags">{candidate.tags.map((item) => <span key={item}>{item}</span>)}</div><div className="inline-add"><input value={tagInput} onChange={(event) => setTagInput(event.target.value)} placeholder="添加标签" /><button type="button" aria-label="添加标签" onClick={addTag}><Plus size={15} /></button></div></section>}<section><h3>招聘备注</h3>{notes.map((item, index) => <p className="saved-note" key={typeof item === "object" ? item.id : `${item}-${index}`}>{typeof item === "object" ? item.body : item}</p>)}{notes.length === 0 && <p className="candidate-muted">暂无招聘备注</p>}<textarea rows="4" disabled={pendingAction === "note"} value={note} onChange={(event) => setNote(event.target.value)} placeholder="记录沟通重点或后续事项" /><button className="button secondary full" type="button" disabled={!note.trim() || pendingAction === "note"} onClick={() => void addNote()}>{pendingAction === "note" ? "保存中" : "保存备注"}</button></section></aside></div>
     {selectedWorkflowAction && <WorkflowActionDialog candidate={candidate} action={selectedWorkflowAction} serverBacked={candidate.serverBacked} submitting={pendingAction === "workflow"} actionError={actionError} conflict={conflict} onClose={() => setSelectedWorkflowAction(null)} onCommit={commitWorkflowAction} onConflictRefresh={(latestStage) => { if (candidate.serverBacked) { void onRefresh(); setSelectedWorkflowAction(null); return; } update({ stage: latestStage, version: 3, lastActivity: "刚刚", timeline: [{ time: "刚刚", actor: "系统", action: `检测到其他成员已更新流程` }, ...candidate.timeline] }); setSelectedWorkflowAction(null); onNotify("已刷新为服务端最新状态"); }} />}
+    {reassignOpen && <ReviewReassignmentDialog candidate={candidate} controller={controller} submitting={pendingAction === "review-reassignment"} onClose={() => setReassignOpen(false)} onConfirm={commitReviewReassignment} />}
     {previewState && <ResumePreview candidate={candidate} file={previewState.file} status={previewState.status} error={previewState.error} downloading={pendingAction === "download"} onClose={closePreview} onRetry={() => void loadPreview()} onDownload={() => void downloadResume()} />}
   </div>;
 }

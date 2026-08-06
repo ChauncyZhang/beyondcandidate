@@ -422,8 +422,15 @@ def create_job_definition_record(db, organization_id, actor_user_id, command, *,
         jd,
         rules,
     ])
-    if command["hiring_owner_id"] is not None:
-        db.add(JobCollaborator(organization_id=organization_id, job_id=job.id, user_id=command["hiring_owner_id"], access_role="job_manager"))
+    db.add_all([
+        JobCollaborator(
+            organization_id=organization_id,
+            job_id=job.id,
+            user_id=manager_id,
+            access_role="job_manager",
+        )
+        for manager_id in command["hiring_manager_ids"]
+    ])
     db.flush()
     safe_metadata = {"job_id": str(job.id), "jd_version_number": 1, "rule_version_number": 1, "status": job.status}
     db.add(AuditLog(organization_id=organization_id, actor_user_id=actor_user_id, event_type="job.definition_created", outcome="success", trace_id=trace_id, metadata_json=safe_metadata))
@@ -463,8 +470,15 @@ def replace_job_definition_record(db, organization_id, job_id, actor_user_id, co
         JobCollaborator.job_id == job_id,
         JobCollaborator.access_role == "job_manager",
     ))
-    if command["hiring_owner_id"] is not None:
-        db.add(JobCollaborator(organization_id=organization_id, job_id=job_id, user_id=command["hiring_owner_id"], access_role="job_manager"))
+    db.add_all([
+        JobCollaborator(
+            organization_id=organization_id,
+            job_id=job_id,
+            user_id=manager_id,
+            access_role="job_manager",
+        )
+        for manager_id in command["hiring_manager_ids"]
+    ])
     if command["publish"]:
         job.status = "open"
     job.version += 1

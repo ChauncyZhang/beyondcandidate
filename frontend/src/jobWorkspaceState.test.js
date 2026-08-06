@@ -96,13 +96,26 @@ test("mutation refresh replaces records from the current filters instead of unco
   assert.equal(stale, refreshing);
 });
 
-test("draft and publish validation require name, description, and process template", () => {
+test("draft and publish validation require content, selected managers, and a default reviewer", () => {
   assert.deepEqual(getJobDefinitionErrors({ name: "", jd: "", process: "" }), {
     name: "请输入职位名称",
     jd: "请输入公开职位描述",
     process: "请输入招聘流程模板",
+    hiringManagerIds: "请至少选择一位用人经理",
+    hiringOwnerId: "请选择默认评审人",
   });
-  assert.deepEqual(getJobDefinitionErrors({ name: "平台工程师", jd: "建设平台", process: "标准流程" }), {});
+  assert.deepEqual(getJobDefinitionErrors({ name: "平台工程师", jd: "建设平台", process: "标准流程", hiringManagerIds: ["manager-1"], hiringOwnerId: "manager-1" }), {});
+  assert.equal(getJobDefinitionErrors({ name: "平台工程师", jd: "建设平台", process: "标准流程", hiringManagerIds: ["manager-1"], hiringOwnerId: "manager-2" }).hiringOwnerId, "默认评审人必须来自已选用人经理");
+});
+
+test("job form presents accessible multi-reviewer selection and blocks save without a default", async () => {
+  const source = await readFile(new URL("./JobViews.jsx", import.meta.url), "utf8");
+
+  assert.match(source, /<fieldset className="job-reviewer-field" aria-describedby="job-reviewer-help">/);
+  assert.match(source, /type="checkbox" checked=\{values\.hiringManagerIds\.includes\(item\.id\)\}/);
+  assert.match(source, /hiringManagers\.filter\(\(item\) => values\.hiringManagerIds\.includes\(item\.id\)\)/);
+  assert.match(source, /disabled=\{saving \|\| workflowUnavailable \|\| reviewerSelectionInvalid\}/);
+  assert.match(source, /AI 自动流转只通知默认评审人；其他负责人可查看，但不会自动收到每份简历通知/);
 });
 
 test("exit dialog closes before draft save so a failed save error remains visible", async () => {

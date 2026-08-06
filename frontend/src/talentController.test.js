@@ -18,7 +18,7 @@ import {
 
 test("review referral errors explain the exact job configuration action", () => {
   assert.equal(reviewReferralErrorMessage({ code: "review_referral_hiring_manager_missing" }), "原岗位尚未配置用人经理，请先编辑职位并选择用人经理。");
-  assert.equal(reviewReferralErrorMessage({ code: "review_referral_hiring_manager_invalid" }), "原岗位的用人经理账号不可用，请先编辑职位并重新选择。");
+  assert.equal(reviewReferralErrorMessage({ code: "review_referral_hiring_manager_invalid" }), "所选负责人已不可用，请重新打开转交对话框并选择。");
   assert.equal(reviewReferralErrorMessage({ code: "review_referral_job_closed" }), "原岗位已关闭，无法再转交评审。");
   assert.equal(reviewReferralErrorMessage({ code: "unexpected" }), "转交失败，请刷新后重试");
 });
@@ -278,13 +278,13 @@ test("review referral retries ambiguously with one key and body, then returns th
     },
   });
 
-  await assert.rejects(controller.referToReview("member-1", 3));
-  const result = await controller.referToReview("member-1", 3);
+  await assert.rejects(controller.referToReview("member-1", 3, "manager-1"));
+  const result = await controller.referToReview("member-1", 3, "manager-1");
 
   assert.equal(calls[0].path, "/api/v1/talent-pool-memberships/member-1/review-referrals");
   assert.equal(calls[0].options.method, "POST");
   assert.equal(calls[0].options.ifMatch, '"3"');
-  assert.deepEqual(calls[0].options.body, {});
+  assert.deepEqual(calls[0].options.body, { assignee_id: "manager-1" });
   assert.equal(calls[0].options.idempotencyKey, calls[1].options.idempotencyKey);
   assert.equal(calls[0].options.body, calls[1].options.body);
   assert.equal(result.membership.sourceApplicationId, result.application.id);
@@ -304,9 +304,21 @@ test("review referral clears its idempotency key after an explicit failure", asy
     } },
   });
 
-  await assert.rejects(controller.referToReview("member-1", 3));
-  await controller.referToReview("member-1", 3);
+  await assert.rejects(controller.referToReview("member-1", 3, "manager-1"));
+  await controller.referToReview("member-1", 3, "manager-1");
   assert.notEqual(keys[0], keys[1]);
+});
+
+test("reviewer options load from the source job and keep only usable identities", async () => {
+  const calls = [];
+  const signal = new AbortController().signal;
+  const controller = createTalentController({ client: { async request(path, options) {
+    calls.push({ path, options });
+    return { data: [{ id: "manager-1", name: " 李经理 " }, { id: "", name: "无效" }, { id: "manager-2", name: "" }] };
+  } } });
+
+  assert.deepEqual(await controller.listReviewerOptions("job-1", { signal }), [{ id: "manager-1", name: "李经理" }]);
+  assert.deepEqual(calls, [{ path: "/api/v1/jobs/job-1/reviewer-options", options: { signal } }]);
 });
 
 

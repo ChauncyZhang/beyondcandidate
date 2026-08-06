@@ -119,6 +119,12 @@ def test_workflow_template_defaults_crud_permissions_and_versions(tmp_path) -> N
 def test_job_definition_validates_and_projects_workflow_template_binding(tmp_path) -> None:
     app = make_app(tmp_path)
     seed_user(app, "recruiting_admin", "job-template-admin@example.test")
+    reviewer_id = seed_user(app, "hiring_manager", "job-template-manager@example.test")
+    definition = lambda **changes: job_definition_payload(
+        hiring_owner_id=str(reviewer_id),
+        hiring_manager_ids=[str(reviewer_id)],
+        **changes,
+    )
     with app.state.identity_store.sync_session() as db:
         organization_id = db.scalar(select(Organization.id).where(Organization.slug == "acme"))
         active = WorkflowTemplate(
@@ -148,7 +154,7 @@ def test_job_definition_validates_and_projects_workflow_template_binding(tmp_pat
         for template_id, key in ((inactive.id, "inactive"), (cross_tenant.id, "cross-tenant")):
             rejected = client.post(
                 "/api/v1/job-definitions",
-                json=job_definition_payload(workflow_template_id=str(template_id)),
+                json=definition(workflow_template_id=str(template_id)),
                 headers={**headers, "Idempotency-Key": key},
             )
             assert rejected.status_code == 422
@@ -156,7 +162,7 @@ def test_job_definition_validates_and_projects_workflow_template_binding(tmp_pat
 
         created = client.post(
             "/api/v1/job-definitions",
-            json=job_definition_payload(workflow_template_id=str(active.id)),
+            json=definition(workflow_template_id=str(active.id)),
             headers={**headers, "Idempotency-Key": "active-template"},
         )
         assert created.status_code == 201
@@ -170,7 +176,7 @@ def test_job_definition_validates_and_projects_workflow_template_binding(tmp_pat
             db.commit()
         rejected_update = client.put(
             f"/api/v1/job-definitions/{job_id}",
-            json=job_definition_payload(workflow_template_id=str(active.id)),
+            json=definition(workflow_template_id=str(active.id)),
             headers={
                 **headers,
                 "Idempotency-Key": "inactive-template-update",

@@ -520,6 +520,7 @@ def test_new_job_definition_rejects_invalid_department_with_stable_422(
 ) -> None:
     app, _, _ = management_app
     seed_user(app, role="recruiting_admin", email="admin@example.test")
+    reviewer = seed_user(app, role="hiring_manager", email="manager@example.test")
     with TestClient(app, raise_server_exceptions=False) as client:
         headers = login(client, "admin@example.test")
         response = client.post(
@@ -529,7 +530,8 @@ def test_new_job_definition_rejects_invalid_department_with_stable_422(
                 "department_id": "00000000-0000-4000-8000-000000000001",
                 "headcount": 1,
                 "priority": "normal",
-                "hiring_owner_id": None,
+                "hiring_owner_id": str(reviewer.user_id),
+                "hiring_manager_ids": [str(reviewer.user_id)],
                 "description": "Build systems.",
                 "location": "Shanghai",
                 "process_template": "standard",

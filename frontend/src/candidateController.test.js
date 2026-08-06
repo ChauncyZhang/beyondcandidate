@@ -197,7 +197,7 @@ test("candidate review loads the exact selected application when the same candid
       if (path === `/api/v1/candidates/${candidateId}/applications`) return response([
         { id: "application-other", candidate_id: candidateId, job_id: "job-2", job_title: "平台工程师", job_status: "archived", resume_id: "resume-2", owner_id: "user-2", stage: "rejected", source: "manual", human_conclusion: null, version: 4, updated_at: "2026-07-12T09:00:00+00:00" },
         { id: "application-older", candidate_id: candidateId, job_id: jobId, job_title: "AI 工程师", job_status: "open", resume_id: "resume-old", owner_id: "user-2", stage: "rejected", source: "manual", human_conclusion: "暂不合适：历史申请", version: 5, updated_at: "2026-07-12T10:00:00+00:00" },
-        { id: "application-1", candidate_id: candidateId, job_id: jobId, job_title: "AI 工程师", job_status: "open", resume_id: "resume-1", owner_id: "user-1", stage: "review", source: "本地上传", human_conclusion: "需要补充：确认到岗时间", version: 2, updated_at: "2026-07-13T09:00:00+00:00", rule_score: 81, recommendation: "可沟通", ai_score: 86, ai_recommendation: "建议评审", llm_status: "succeeded", llm_evaluation: {
+        { id: "application-1", candidate_id: candidateId, job_id: jobId, job_title: "AI 工程师", job_status: "open", resume_id: "resume-1", owner_id: "user-1", stage: "review", source: "本地上传", human_conclusion: "需要补充：确认到岗时间", version: 2, updated_at: "2026-07-13T09:00:00+00:00", task_id: "task-1", assignee_id: "manager-1", assignee_name: "王经理", rule_score: 81, recommendation: "可沟通", ai_score: 86, ai_recommendation: "建议评审", llm_status: "succeeded", llm_evaluation: {
           score: 86,
           recommendation: "建议评审",
           summary: "核心能力与岗位高度匹配。",
@@ -258,6 +258,7 @@ test("candidate review loads the exact selected application when the same candid
   assert.equal(review.applicationId, "application-1");
   assert.equal(review.jobId, jobId);
   assert.equal(review.jobStatus, "open");
+  assert.deepEqual(review.reviewTask, { id: "task-1", assigneeId: "manager-1", assigneeName: "王经理" });
   assert.equal(review.score, 86);
   assert.equal(review.recommendation, "建议评审");
   assert.equal(review.llmSummary, "核心能力与岗位高度匹配。");
@@ -398,6 +399,36 @@ test("workflow actions use semantic commands, require business reasons, and send
   assert.deepEqual(calls, [{ path: "/api/v1/applications/application-1/workflow-actions", options: {
     method: "POST", ifMatch: '"2"', idempotencyKey: "transition-key", body: { action: "review_approved", reason_text: "经验匹配" },
   } }]);
+});
+
+test("open review task reassignment follows the assignee concurrency contract", async () => {
+  const calls = [];
+  const signal = new AbortController().signal;
+  const client = { async request(path, options) { calls.push({ path, options }); return response({ id: "task-1", assignee_id: "manager-2", status: "open" }); } };
+  const controller = createCandidateController({ client });
+
+  await assert.rejects(controller.reassignOpenReviewTask("task-1", "", "manager-2"), (error) => error?.code === "CURRENT_REVIEW_ASSIGNEE_REQUIRED");
+  const task = await controller.reassignOpenReviewTask("task-1", "manager-1", "manager-2", { signal });
+
+  assert.equal(task.assignee_id, "manager-2");
+  assert.deepEqual(calls, [{ path: "/api/v1/review-tasks/task-1/assignee", options: {
+    method: "PUT", body: { assignee_id: "manager-2" }, ifMatch: '"manager-1"', signal,
+  } }]);
+});
+
+test("reviewer options are loaded from the selected job", async () => {
+  const calls = [];
+  const signal = new AbortController().signal;
+  const client = { async request(path, options) { calls.push({ path, options }); return response([
+    { id: "manager-1", name: "默认经理" },
+    { id: "", name: "无效" },
+    { id: "manager-2", name: "第二经理" },
+  ]); } };
+
+  const options = await createCandidateController({ client }).listReviewerOptions(jobId, { signal });
+
+  assert.deepEqual(options, [{ id: "manager-1", name: "默认经理" }, { id: "manager-2", name: "第二经理" }]);
+  assert.deepEqual(calls, [{ path: `/api/v1/jobs/${jobId}/reviewer-options`, options: { signal } }]);
 });
 
 test("notes, preview, and ticket download use the authorized server APIs", async () => {

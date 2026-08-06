@@ -1162,11 +1162,13 @@ def refer_deferred_membership_to_review(
             if not manager_ids:
                 if job.hiring_owner_id is None: raise ReviewReferralHiringManagerMissing
                 raise ReviewReferralHiringManagerInvalid
+            if payload.assignee_id not in manager_ids:
+                raise ReviewReferralHiringManagerInvalid
             source.stage="review"; source.version+=1; source.updated_at=datetime.now(timezone.utc)
             event_payload={"membership_id":str(membership.id),"pool_id":str(membership.pool_id),"from_stage":"deferred","to_stage":"review"}
             db.add(ApplicationStageEvent(organization_id=principal.organization_id,application_id=source.id,actor_user_id=principal.user_id,event_type="application.stage_changed",payload=event_payload))
-            db.add(AuditLog(organization_id=principal.organization_id,actor_user_id=principal.user_id,event_type="talent_pool.review_referred",outcome="success",trace_id=request.state.trace_id,metadata_json={"membership_id":str(membership.id),"application_id":str(source.id)}))
-            ensure_review_task(db,application=source,job=job,ai_status="succeeded",recipient_user_ids=manager_ids)
+            db.add(AuditLog(organization_id=principal.organization_id,actor_user_id=principal.user_id,event_type="talent_pool.review_referred",outcome="success",trace_id=request.state.trace_id,metadata_json={"membership_id":str(membership.id),"application_id":str(source.id),"assignee_id":str(payload.assignee_id)}))
+            ensure_review_task(db,application=source,job=job,ai_status="succeeded",recipient_user_ids=[payload.assignee_id])
             db.flush(); recalculate_candidate_retention(db,principal.organization_id,candidate.id)
             return 200,{"data":{"application":_application_data(source),"membership":_membership_data(db,principal,membership)}}
         try:

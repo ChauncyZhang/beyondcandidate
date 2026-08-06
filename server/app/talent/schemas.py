@@ -137,7 +137,7 @@ class ReactivationInput(StrictModel):
 
 
 class ReviewReferralInput(StrictModel):
-    pass
+    assignee_id: UUID
 
 
 class DataResource(BaseModel):

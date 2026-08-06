@@ -261,6 +261,11 @@ export function normalizeCandidateReview({ candidate, applications, resumes, not
     })),
     interviews: [],
     application,
+    reviewTask: application?.task_id && application?.assignee_id ? {
+      id: safeString(application.task_id),
+      assigneeId: safeString(application.assignee_id),
+      assigneeName: safeString(application.assignee_name, "未命名用人经理"),
+    } : null,
     resume,
     humanConclusion: parsedConclusion.conclusion,
     humanConclusionReason: parsedConclusion.reason,
@@ -307,6 +312,15 @@ export function createCandidateController({ client = apiClient, idempotencyKey =
     return jobs;
   }
 
+  async function listReviewerOptions(jobId, { signal } = {}) {
+    const id = safeString(jobId).trim();
+    if (!id) throw codedError("JOB_ID_REQUIRED", "job id required");
+    const result = await client.request(`/api/v1/jobs/${encodeURIComponent(id)}/reviewer-options`, signalOption(signal));
+    return safeArray(result?.data)
+      .map((item) => ({ id: safeString(item?.id).trim(), name: safeString(item?.name).trim() }))
+      .filter((item) => item.id && item.name);
+  }
+
   async function loadReview(context, { signal } = {}) {
     if (!safeString(context?.candidateId)) throw codedError("CANDIDATE_ID_REQUIRED", "candidate id required");
     const root = `/api/v1/candidates/${context.candidateId}`;
@@ -348,6 +362,22 @@ export function createCandidateController({ client = apiClient, idempotencyKey =
     return result?.data;
   }
 
+  async function reassignOpenReviewTask(taskId, currentAssigneeId, assigneeId, { signal } = {}) {
+    const id = safeString(taskId).trim();
+    const currentAssignee = safeString(currentAssigneeId).trim();
+    const assignee = safeString(assigneeId).trim();
+    if (!id) throw codedError("REVIEW_TASK_REQUIRED", "review task id required");
+    if (!currentAssignee) throw codedError("CURRENT_REVIEW_ASSIGNEE_REQUIRED", "current review assignee required");
+    if (!assignee) throw codedError("REVIEW_ASSIGNEE_REQUIRED", "review assignee required");
+    const result = await client.request(`/api/v1/review-tasks/${encodeURIComponent(id)}/assignee`, {
+      method: "PUT",
+      body: { assignee_id: assignee },
+      ifMatch: `"${currentAssignee}"`,
+      ...signalOption(signal),
+    });
+    return result?.data ?? null;
+  }
+
   async function addNote(candidateId, applicationId, body, { signal } = {}) {
     const value = safeString(body).trim();
     if (!safeString(applicationId)) throw codedError("APPLICATION_REQUIRED", "application required");
@@ -370,7 +400,7 @@ export function createCandidateController({ client = apiClient, idempotencyKey =
     return client.download("/api/v1/download-tickets/consume", { method: "POST", body: { token: ticket?.data?.token }, ...signalOption(signal) });
   }
 
-  return { listCandidates, listJobs, loadReview, workflowAction, addNote, previewResume, getResumeFile, downloadResume };
+  return { listCandidates, listJobs, listReviewerOptions, loadReview, workflowAction, reassignOpenReviewTask, addNote, previewResume, getResumeFile, downloadResume };
 }
 
 export const candidateController = createCandidateController();

@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, literal, or_, select
+from sqlalchemy import and_, literal, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -65,12 +65,6 @@ def _base_projection():
 
 
 def _current_notification(db, principal: Principal, application_id: UUID) -> tuple[Any, str] | None:
-    review_visibility = ApplicationReviewTask.assignee_id == principal.user_id
-    if "hiring_manager" in principal.roles:
-        review_visibility = or_(
-            review_visibility,
-            AUTH.job_predicate(principal, RecruitingAction.RECOMMEND, Job),
-        )
     review = db.execute(
         select(
             *_base_projection(),
@@ -99,7 +93,7 @@ def _current_notification(db, principal: Principal, application_id: UUID) -> tup
         .where(
             ApplicationReviewTask.organization_id == principal.organization_id,
             ApplicationReviewTask.application_id == application_id,
-            review_visibility,
+            ApplicationReviewTask.assignee_id == principal.user_id,
             ApplicationReviewTask.status == "open",
             Candidate.deleted_at.is_(None),
             AUTH.job_predicate(principal, RecruitingAction.READ, Job),

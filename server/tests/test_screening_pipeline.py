@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from sqlalchemy import func,select
 
+from server.app.identity.models import User
 from server.app.recruiting.models import Application,ApplicationReviewTask,Candidate,FileObject,Resume,ResumeProfile
 from server.app.screening.models import ScreeningItem,ScreeningResult,ScreeningRun
 from server.app.llm.models import LlmProviderConfig,PromptVersion
@@ -45,9 +46,11 @@ def seeded_pipeline(tmp_path,text=b"required: Python\nPython 5 years",filename="
 
 def test_job_definition_api_rule_boundaries_parse_and_score_without_truncation(tmp_path):
     app,upload_storage,_=app_and_seed(tmp_path)
+    with app.state.identity_store.sync_session() as db:
+        reviewer_id=db.scalar(select(User.id).where(User.normalized_email=="manager@example.test"))
     term=lambda prefix,index: f"{prefix}-{index:02d}-"+"x"*(100-len(f"{prefix}-{index:02d}-"))
     must_have=[term("required",index) for index in range(50)]; nice_to_have=[term("bonus",index) for index in range(50)]
-    definition={"title":"Platform Engineer","department_id":None,"headcount":2,"priority":"high","hiring_owner_id":None,"description":"D"*50_000,"location":"Shanghai","process_template":"standard","llm_enabled":False,"must_have":must_have,"nice_to_have":nice_to_have,"publish":False}
+    definition={"title":"Platform Engineer","department_id":None,"headcount":2,"priority":"high","hiring_owner_id":str(reviewer_id),"hiring_manager_ids":[str(reviewer_id)],"description":"D"*50_000,"location":"Shanghai","process_template":"standard","llm_enabled":False,"must_have":must_have,"nice_to_have":nice_to_have,"publish":False}
     resume_text=" ".join([*must_have,*nice_to_have]).encode()
     with TestClient(app) as client:
         headers=login(client,"admin@example.test")
