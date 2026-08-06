@@ -151,3 +151,64 @@ def test_0021_enforces_one_system_pool_key_per_organization() -> None:
                 {**identifiers, "pool": uuid.uuid4()},
             )
     engine.dispose()
+
+
+def test_0029_moves_legacy_recruiter_hiring_owner_to_recruiting_owner() -> None:
+    url = os.environ["POSTGRES_SMOKE_URL"]
+    env = {**os.environ, "DATABASE_URL": url}
+    engine = create_engine(url.replace("+asyncpg", "+psycopg"))
+    subprocess.run(
+        ["python", "-m", "alembic", "-c", "server/alembic.ini", "downgrade", "base"],
+        check=True,
+        env=env,
+    )
+    subprocess.run(
+        ["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "0028_image_resume_support"],
+        check=True,
+        env=env,
+    )
+    with engine.begin() as connection:
+        identifiers = _seed_application(connection)
+        connection.execute(
+            text("INSERT INTO user_roles(id, user_id, role, created_at, updated_at) VALUES (:id, :user, 'recruiter', now(), now())"),
+            {"id": uuid.uuid4(), "user": identifiers["interviewer"]},
+        )
+        connection.execute(
+            text("UPDATE jobs SET hiring_owner_id = :user WHERE id = :job"),
+            {"user": identifiers["interviewer"], "job": identifiers["job"]},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO job_collaborators(
+                  id, organization_id, job_id, user_id, access_role, created_at, updated_at
+                ) VALUES
+                  (:owner_grant, :organization, :job, :owner, 'job_owner', now(), now()),
+                  (:manager_grant, :organization, :job, :interviewer, 'job_manager', now(), now())
+                """
+            ),
+            {
+                **identifiers,
+                "owner_grant": uuid.uuid4(),
+                "manager_grant": uuid.uuid4(),
+            },
+        )
+
+    subprocess.run(
+        ["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "head"],
+        check=True,
+        env=env,
+    )
+    with engine.connect() as connection:
+        job = connection.execute(
+            text("SELECT owner_id, hiring_owner_id, version FROM jobs WHERE id = :job"),
+            {"job": identifiers["job"]},
+        ).one()
+        grants = connection.execute(
+            text("SELECT user_id, access_role FROM job_collaborators WHERE job_id = :job ORDER BY access_role"),
+            {"job": identifiers["job"]},
+        ).all()
+
+    assert job == (identifiers["interviewer"], None, 2)
+    assert grants == [(identifiers["interviewer"], "job_owner")]
+    engine.dispose()

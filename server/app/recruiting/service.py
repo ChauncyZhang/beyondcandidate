@@ -391,9 +391,10 @@ def create_job_definition_record(db, organization_id, actor_user_id, command, *,
     from server.app.recruiting.models import JobJdVersion, ScreeningRuleVersion
 
     jd_content,rule_content=_job_definition_contents(command)
+    recruiting_owner_id = command.get("recruiting_owner_id") or actor_user_id
     job = Job(
         organization_id=organization_id,
-        owner_id=actor_user_id,
+        owner_id=recruiting_owner_id,
         status="open" if command["publish"] else "draft",
         **{key: command[key] for key in ("title", "department_id", "headcount", "priority", "hiring_owner_id")},
         workflow_template_id=command["workflow_template_id"],
@@ -415,7 +416,7 @@ def create_job_definition_record(db, organization_id, actor_user_id, command, *,
         created_by=actor_user_id,
     )
     db.add_all([
-        JobCollaborator(organization_id=organization_id, job_id=job.id, user_id=actor_user_id, access_role="job_owner"),
+        JobCollaborator(organization_id=organization_id, job_id=job.id, user_id=recruiting_owner_id, access_role="job_owner"),
         jd,
         rules,
     ])
@@ -439,9 +440,22 @@ def replace_job_definition_record(db, organization_id, job_id, actor_user_id, co
     if command["publish"] and job.status != "draft":
         raise InvalidStateTransition
     source_status = job.status
+    recruiting_owner_id = command.get("recruiting_owner_id") or job.owner_id
     for key in ("title", "department_id", "headcount", "priority", "hiring_owner_id"):
         setattr(job, key, command[key])
     job.workflow_template_id = command["workflow_template_id"]
+    job.owner_id = recruiting_owner_id
+    db.execute(delete(JobCollaborator).where(
+        JobCollaborator.organization_id == organization_id,
+        JobCollaborator.job_id == job_id,
+        JobCollaborator.access_role == "job_owner",
+    ))
+    db.add(JobCollaborator(
+        organization_id=organization_id,
+        job_id=job_id,
+        user_id=recruiting_owner_id,
+        access_role="job_owner",
+    ))
     db.execute(delete(JobCollaborator).where(
         JobCollaborator.organization_id == organization_id,
         JobCollaborator.job_id == job_id,

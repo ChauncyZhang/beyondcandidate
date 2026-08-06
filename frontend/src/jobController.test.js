@@ -116,6 +116,23 @@ test("job form owners come from the dedicated hiring-manager directory", async (
   assert.deepEqual(owners, [{ id: HIRING_OWNER_ID, name: "招聘经理" }]);
 });
 
+test("job form recruiters come from the dedicated recruiter directory", async () => {
+  const { client, calls } = queuedClient([{
+    data: [
+      { id: OWNER_ID, name: "招聘负责人" },
+      { id: "invalid", name: "无效用户" },
+    ],
+    meta: { count: 1 },
+  }]);
+  const signal = new AbortController().signal;
+  const controller = createJobController({ client });
+
+  const owners = await controller.listRecruiters({ signal });
+
+  assert.deepEqual(calls, [{ path: "/api/v1/job-recruiter-options", options: { signal } }]);
+  assert.deepEqual(owners, [{ id: OWNER_ID, name: "招聘负责人" }]);
+});
+
 test("job form actions execute the correct publish payload for create and every editable status", async () => {
   const cases = [
     { job: null, expected: { secondary: { label: "保存草稿", publish: false }, primary: { label: "发布职位", publish: true } } },
@@ -161,7 +178,7 @@ test("listJobs encodes supplied filters and fully normalizes records and facets"
     meta: {
       next_cursor: "next/page",
       departments: [{ id: DEPARTMENT_ID, name: "技术部" }],
-      owners: [{ id: HIRING_OWNER_ID, name: "招聘经理" }],
+      owners: [{ id: OWNER_ID, name: "招聘负责人" }],
       status_counts: { draft: 2, open: 5, paused: 1, closed: 3, archived: 4 },
     },
   };
@@ -192,8 +209,9 @@ test("listJobs encodes supplied filters and fully normalizes records and facets"
       department: "技术部",
       recruitingOwnerId: OWNER_ID,
       hiringOwnerId: HIRING_OWNER_ID,
-      ownerId: HIRING_OWNER_ID,
-      owner: "招聘经理",
+      hiringOwner: "招聘经理",
+      ownerId: OWNER_ID,
+      owner: "招聘负责人",
       headcount: 3,
       status: "招聘中",
       priority: "高",
@@ -207,7 +225,7 @@ test("listJobs encodes supplied filters and fully normalizes records and facets"
     }],
     nextCursor: "next/page",
     departments: [{ id: DEPARTMENT_ID, name: "技术部" }],
-    owners: [{ id: HIRING_OWNER_ID, name: "招聘经理" }],
+    owners: [{ id: OWNER_ID, name: "招聘负责人" }],
     statusCounts: { 草稿: 2, 招聘中: 5, 已暂停: 1, 已关闭: 3, 已归档: 4 },
   });
 });
@@ -255,6 +273,7 @@ test("listJobs omits invalid filters and safely defaults malformed optional valu
     department: "",
     recruitingOwnerId: OWNER_ID,
     hiringOwnerId: "",
+    hiringOwner: "",
     ownerId: OWNER_ID,
     owner: "招聘负责人",
     headcount: 0,
@@ -328,7 +347,7 @@ test("existing definition writes and transitions reject invalid UUIDs before net
   assert.equal(calls.length, 0);
 });
 
-test("effective owner selects hiring owner only when its UUID and name are both valid", async () => {
+test("job list always displays the recruiting owner independently of the hiring manager", async () => {
   const { client } = queuedClient([{
     data: [
       apiJob({ hiring_owner_name: "   " }),
@@ -343,7 +362,7 @@ test("effective owner selects hiring owner only when its UUID and name are both 
   assert.deepEqual(result.records.map(({ ownerId, owner }) => ({ ownerId, owner })), [
     { ownerId: OWNER_ID, owner: "招聘负责人" },
     { ownerId: OWNER_ID, owner: "招聘负责人" },
-    { ownerId: HIRING_OWNER_ID, owner: "招聘经理" },
+    { ownerId: OWNER_ID, owner: "招聘负责人" },
   ]);
 });
 
@@ -428,8 +447,8 @@ test("saveDefinition maps the complete UI form for draft, publish, and versioned
     departmentId: DEPARTMENT_ID,
     location: "  上海  ",
     headcount: 3,
-    owner: "招聘经理",
-    ownerId: HIRING_OWNER_ID,
+    recruitingOwnerId: OWNER_ID,
+    hiringOwnerId: HIRING_OWNER_ID,
     priority: "高",
     jd: "  建设可靠的招聘平台。  ",
     mustHave: " JavaScript、React， ",
@@ -448,6 +467,7 @@ test("saveDefinition maps the complete UI form for draft, publish, and versioned
     department_id: DEPARTMENT_ID,
     headcount: 3,
     priority: "high",
+    recruiting_owner_id: OWNER_ID,
     hiring_owner_id: HIRING_OWNER_ID,
     description: "建设可靠的招聘平台。",
     location: "上海",
@@ -526,14 +546,15 @@ test("failed conflict refresh preserves the form and stale baseline with a stabl
   assert.equal(retried.error, "");
 });
 
-test("definition update submits explicit unassigned department and owner as null", async () => {
+test("definition update submits the recruiting owner separately from an unassigned hiring manager", async () => {
   const { client, calls } = queuedClient([definitionResource()]);
   const controller = createJobController({ client, idempotencyKey: () => "clear-assignment-key" });
 
   await controller.saveDefinition({
     name: "平台工程师",
     departmentId: "",
-    ownerId: "",
+    recruitingOwnerId: OWNER_ID,
+    hiringOwnerId: "",
     headcount: 2,
     priority: "中",
     jd: "建设平台",
@@ -542,9 +563,10 @@ test("definition update submits explicit unassigned department and owner as null
     llmEnabled: false,
     mustHave: [],
     niceToHave: [],
-  }, { job: { id: JOB_ID, version: 7, departmentId: DEPARTMENT_ID, ownerId: HIRING_OWNER_ID } });
+  }, { job: { id: JOB_ID, version: 7, departmentId: DEPARTMENT_ID, recruitingOwnerId: OWNER_ID, hiringOwnerId: HIRING_OWNER_ID } });
 
   assert.equal(calls[0].options.body.department_id, null);
+  assert.equal(calls[0].options.body.recruiting_owner_id, OWNER_ID);
   assert.equal(calls[0].options.body.hiring_owner_id, null);
 });
 
@@ -620,7 +642,7 @@ test("mergeDefinition fills names from refreshed facets when a closed job is exc
   assert.equal(merged.candidates, 4);
 });
 
-test("definition keeps raw owner identities and filtered refresh restores the hiring owner for display and edit", async () => {
+test("definition keeps recruiting and hiring owner identities separate during filtered refresh and edit", async () => {
   const rawDefinition = definitionResource({
     job: {
       hiring_owner_id: HIRING_OWNER_ID,
@@ -650,7 +672,7 @@ test("definition keeps raw owner identities and filtered refresh restores the hi
       { id: HIRING_OWNER_ID, name: "招聘经理" },
     ],
   });
-  assert.deepEqual({ ownerId: merged.ownerId, owner: merged.owner }, { ownerId: HIRING_OWNER_ID, owner: "招聘经理" });
+  assert.deepEqual({ ownerId: merged.ownerId, owner: merged.owner }, { ownerId: OWNER_ID, owner: "招聘负责人" });
 
   await controller.saveDefinition({
     name: definition.name,
@@ -666,6 +688,7 @@ test("definition keeps raw owner identities and filtered refresh restores the hi
   }, { job: definition });
 
   assert.equal(calls.at(-1).options.body.hiring_owner_id, HIRING_OWNER_ID);
+  assert.equal(calls.at(-1).options.body.recruiting_owner_id, OWNER_ID);
 });
 
 test("transition maps pause, resume, close, and archive targets with mutation headers", async () => {

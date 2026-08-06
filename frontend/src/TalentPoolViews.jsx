@@ -25,7 +25,7 @@ import {
   X,
 } from "lucide-react";
 import { buildResumeDocument } from "./resumeDocument.js";
-import { buildReactivatedCandidateSummary, createLatestMembershipRequest, isTalentPoolRoleMismatch, parseSuitableRoles } from "./talentController.js";
+import { buildReactivatedCandidateSummary, createLatestMembershipRequest, isTalentPoolRoleMismatch, parseSuitableRoles, reviewReferralErrorMessage } from "./talentController.js";
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { applicationStageLabel } from "./recruitingTerminology.js";
 
@@ -428,8 +428,8 @@ function DeferredPoolDetail({ pool, pools, memberships, candidates, positions, o
     try {
       await onReferMember(member);
       setReferralMessage(`${member.candidate.name} 已转交用人经理`);
-    } catch {
-      setReferralMessage(`${member.candidate.name} 转交失败，请刷新后重试`);
+    } catch (error) {
+      setReferralMessage(error?.userMessage || `${member.candidate.name} 转交失败，请刷新后重试`);
     } finally {
       setReferringMemberId(null);
     }
@@ -518,7 +518,7 @@ export function TalentPoolWorkspace({ mode, setMode, selectedPoolId, setSelected
   async function updateMember(updated) { if (!serverBacked) { setMemberships((current) => current.map((item) => item.id === updated.id ? updated : item)); return; } try { const saved = await controller.updateMembership(updated); setServerState((current) => ({ ...current, memberships: current.memberships.map((item) => item.id === saved.id ? saved : item) })); onNotify("人才信息已保存"); } catch { onNotify("人才信息保存失败，请刷新后重试"); } }
   async function moveMember(member, targetPoolId) { const sourcePool = activePools.find((item) => item.id === member.poolId); const targetPool = activePools.find((item) => item.id === targetPoolId); if (!sourcePool || !targetPool || sourcePool.systemKey || targetPool.systemKey) throw new Error("system talent pools cannot be moved manually"); if (!serverBacked) { setMemberships((current) => current.map((item) => item.id === member.id ? { ...item, poolId: targetPoolId } : item)); setPools((current) => current.map((pool) => ({ ...pool, memberIds: pool.id === member.poolId ? pool.memberIds.filter((id) => id !== member.candidateId) : pool.id === targetPoolId ? [...new Set([...pool.memberIds, member.candidateId])] : pool.memberIds }))); } else { const saved = await controller.moveMembership(member, targetPoolId); setServerState((current) => ({ ...current, memberships: current.memberships.map((item) => item.id === saved.id ? saved : item), pools: current.pools.map((pool) => pool.id === member.poolId ? { ...pool, memberCount: Math.max(0, pool.memberCount - 1) } : pool.id === targetPoolId ? { ...pool, memberCount: pool.memberCount + 1 } : pool) })); } onNotify(`已移动到“${targetPool.name}”`); }
   async function removeMember(member) { if (!serverBacked) { setMemberships((current) => current.filter((item) => item.id !== member.id)); return; } try { await controller.removeMembership(member, "由招聘人员从人才库移出"); setServerState((current) => ({ ...current, memberships: current.memberships.filter((item) => item.id !== member.id), pools: current.pools.map((pool) => pool.id === member.poolId ? { ...pool, memberCount: Math.max(0, pool.memberCount - 1) } : pool) })); onNotify("已从人才库移出"); } catch { onNotify("移出失败，请刷新后重试"); } }
-  async function referToReview(member) { try { const result = await controller.referToReview(member.id, member.version); if (!result.membership) throw new Error("referral membership missing"); setServerState((current) => ({ ...current, memberships: current.memberships.map((item) => item.id === result.membership.id ? result.membership : item) })); onReferralComplete(result.application); onNotify("已转交用人经理"); return result; } catch (error) { onNotify("转交失败，请刷新后重试"); throw error; } }
+  async function referToReview(member) { try { const result = await controller.referToReview(member.id, member.version); if (!result.membership) throw new Error("referral membership missing"); setServerState((current) => ({ ...current, memberships: current.memberships.map((item) => item.id === result.membership.id ? result.membership : item) })); onReferralComplete(result.application); onNotify("已转交用人经理"); return result; } catch (error) { const message = reviewReferralErrorMessage(error); if (error && typeof error === "object") error.userMessage = message; onNotify(message); throw error; } }
   async function reactivate(memberId, position) { if (!serverBacked) return onReactivateCandidate(memberId, position); return controller.reactivate(memberId, position.id); }
   if (mode === "detail" && selectedPool) return <PoolDetail pool={selectedPool} pools={activePools} memberships={activeMemberships} candidates={candidates} positions={positions} onBack={() => { setSelectedPoolId(null); setMode("list"); }} onUpdatePool={(form) => updatePool(selectedPool, form)} onDeletePool={deletePool} onUpdateMember={updateMember} onMove={moveMember} onRemove={removeMember} onReferMember={referToReview} onReactivateCandidate={reactivate} onOpenCandidate={onOpenCandidate} onNotify={onNotify} status={serverState.memberStatus} error={serverState.error} onRetry={() => void loadMembers(selectedPool.id)} nextCursor={serverState.memberCursor} loadingMore={serverState.loadingMembers} onLoadMore={() => void loadMembers(selectedPool.id, { cursor: serverState.memberCursor, append: true })} />;
   return <PoolList pools={activePools} memberships={activeMemberships} onOpen={openPool} onCreate={createPool} onUpdate={updatePool} status={serverState.poolStatus} error={serverState.error} onRetry={() => void loadPools()} nextCursor={serverState.poolCursor} loadingMore={serverState.loadingPools} onLoadMore={() => void loadPools({ cursor: serverState.poolCursor, append: true })} pageActionHost={pageActionHost} />;

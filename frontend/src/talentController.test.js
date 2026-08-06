@@ -10,10 +10,18 @@ import {
   normalizeTalentMembership,
   normalizeTalentPool,
   parseSuitableRoles,
+  reviewReferralErrorMessage,
   selectExactTalentPool,
   selectServerTalentCandidates,
   isTalentPoolRoleMismatch,
 } from "./talentController.js";
+
+test("review referral errors explain the exact job configuration action", () => {
+  assert.equal(reviewReferralErrorMessage({ code: "review_referral_hiring_manager_missing" }), "原岗位尚未配置用人经理，请先编辑职位并选择用人经理。");
+  assert.equal(reviewReferralErrorMessage({ code: "review_referral_hiring_manager_invalid" }), "原岗位的用人经理账号不可用，请先编辑职位并重新选择。");
+  assert.equal(reviewReferralErrorMessage({ code: "review_referral_job_closed" }), "原岗位已关闭，无法再转交评审。");
+  assert.equal(reviewReferralErrorMessage({ code: "unexpected" }), "转交失败，请刷新后重试");
+});
 
 test("talent pool role mismatch tolerates equivalent role names but detects wrong pools", () => {
   assert.equal(isTalentPoolRoleMismatch({ suitableRoles: ["出纳"] }, ["出纳（兼财务体系搭建）"]), false);

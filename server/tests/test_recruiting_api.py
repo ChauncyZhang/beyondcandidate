@@ -469,7 +469,6 @@ def test_job_list_read_model_enriches_rows_filters_and_uses_full_scope_facets(tm
         ],
         "owners": [
             {"id": str(admin_id), "name": "Admin Owner"},
-            {"id": ids["hiring_owner"], "name": "Hiring Owner"},
             {"id": ids["owner"], "name": "Recruiting Owner"},
         ],
         "status_counts": {"draft": 1, "open": 1, "paused": 1, "closed": 1, "archived": 1},
@@ -477,8 +476,8 @@ def test_job_list_read_model_enriches_rows_filters_and_uses_full_scope_facets(tm
     assert [item["title"] for item in by_q.json()["data"]] == ["  Platform Engineer  "]
     assert [item["title"] for item in by_status.json()["data"]] == ["Backend Engineer"]
     assert [item["title"] for item in by_department.json()["data"]] == ["Product Manager"]
-    assert [item["title"] for item in by_hiring_owner.json()["data"]] == ["  Platform Engineer  "]
-    assert [item["title"] for item in by_fallback_owner.json()["data"]] == ["Backend Engineer"]
+    assert by_hiring_owner.json()["data"] == []
+    assert [item["title"] for item in by_fallback_owner.json()["data"]] == ["  Platform Engineer  ", "Backend Engineer"]
     assert invalid_status.status_code == overlong_q.status_code == 422
     serialized = repr(page.json()).casefold()
     for secret in ("candidate", "secret", "description", "must_have", "human_conclusion", "parsed_text", "screening"):
@@ -1326,6 +1325,7 @@ def test_job_owner_options_and_definition_writes_enforce_active_tenant_hiring_ma
     with TestClient(app) as client:
         headers = login(client, "admin@example.test")
         options = client.get("/api/v1/job-owner-options", headers=headers)
+        recruiter_options = client.get("/api/v1/job-recruiter-options", headers=headers)
         assert options.status_code == 200
         assert options.json() == {
             "data": [
@@ -1334,6 +1334,14 @@ def test_job_owner_options_and_definition_writes_enforce_active_tenant_hiring_ma
                 {"id": str(replacement_id), "name": "第二负责人"},
             ],
             "meta": {"count": 3},
+        }
+        assert recruiter_options.status_code == 200
+        assert recruiter_options.json() == {
+            "data": [
+                {"id": str(admin_id), "name": "recruiting_admin"},
+                {"id": str(wrong_role_id), "name": "招聘专员"},
+            ],
+            "meta": {"count": 2},
         }
 
         invalid_ids = {
@@ -1352,7 +1360,10 @@ def test_job_owner_options_and_definition_writes_enforce_active_tenant_hiring_ma
 
         created = client.post(
             "/api/v1/job-definitions",
-            json=job_definition_payload(hiring_owner_id=str(admin_id)),
+            json=job_definition_payload(
+                recruiting_owner_id=str(wrong_role_id),
+                hiring_owner_id=str(admin_id),
+            ),
             headers={**headers, "Idempotency-Key": "valid-owner"},
         )
         assert created.status_code == 201
@@ -1373,6 +1384,13 @@ def test_job_owner_options_and_definition_writes_enforce_active_tenant_hiring_ma
         assert [(item.organization_id, item.user_id) for item in managers] == [
             (db.get(User, replacement_id).organization_id, replacement_id),
         ]
+        job = db.get(Job, job_id)
+        owners = db.scalars(select(JobCollaborator).where(
+            JobCollaborator.job_id == job_id,
+            JobCollaborator.access_role == "job_owner",
+        )).all()
+        assert job.owner_id == wrong_role_id
+        assert [item.user_id for item in owners] == [wrong_role_id]
 
 
 def test_get_job_definition_returns_latest_versions_and_legacy_nulls(tmp_path) -> None:

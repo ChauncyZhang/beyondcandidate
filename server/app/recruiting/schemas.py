@@ -87,6 +87,7 @@ class JobDefinitionCommand(ApiModel):
     department_id: UUID | None = None
     headcount: int = Field(ge=1, le=1000)
     priority: Literal["high", "normal", "low"]
+    recruiting_owner_id: UUID | None = None
     hiring_owner_id: UUID | None = None
     description: str = Field(min_length=1, max_length=MAX_JD_TEXT_CHARS)
     location: str = Field(max_length=200)

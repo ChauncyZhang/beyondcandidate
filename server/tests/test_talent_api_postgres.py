@@ -22,7 +22,7 @@ def test_postgres_concurrent_same_key_deferred_referral_returns_one_result() -> 
     app=postgres_app(); seed=seed_application(app)
     with app.state.identity_store.sync_session() as database:
         source=database.get(Application,seed["application_id"]); source.stage="deferred"; source.version=1
-        job=database.get(Job,source.job_id); job.status="open"; job.hiring_owner_id=None
+        job=database.get(Job,source.job_id); job.status="open"; job.hiring_owner_id=seed["admin_id"]
         database.commit()
     with TestClient(app) as client:
         _,_,membership=create_pool_and_membership(client,seed); membership_id=membership.json()["data"]["id"]

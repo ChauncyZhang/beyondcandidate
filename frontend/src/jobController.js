@@ -116,7 +116,6 @@ function normalizeJob(item, funnelOverride) {
   const recruitingOwnerName = safeString(item?.owner_name).trim();
   const hiringOwnerId = safeUuid(item?.hiring_owner_id);
   const hiringOwnerName = safeString(item?.hiring_owner_name).trim();
-  const useHiringOwner = Boolean(hiringOwnerId && hiringOwnerName);
   const useRecruitingOwner = Boolean(recruitingOwnerId && recruitingOwnerName);
   const title = safeString(item?.title);
 
@@ -130,8 +129,9 @@ function normalizeJob(item, funnelOverride) {
     department: safeString(item?.department_name),
     recruitingOwnerId,
     hiringOwnerId,
-    ownerId: useHiringOwner ? hiringOwnerId : useRecruitingOwner ? recruitingOwnerId : "",
-    owner: useHiringOwner ? hiringOwnerName : useRecruitingOwner ? recruitingOwnerName : "",
+    hiringOwner: hiringOwnerId && hiringOwnerName ? hiringOwnerName : "",
+    ownerId: useRecruitingOwner ? recruitingOwnerId : "",
+    owner: useRecruitingOwner ? recruitingOwnerName : "",
     headcount: safeCount(item?.headcount),
     status: API_TO_UI_STATUS.get(item?.status) || "",
     priority: API_TO_UI_PRIORITY.get(item?.priority) || "",
@@ -188,15 +188,10 @@ function mergeDefinition(listRecord, definition, metadata = {}) {
   let ownerId = merged.ownerId;
   let owner = merged.owner;
   if (!listRecord) {
-    const hiringOwnerId = definition?.hiringOwnerId || "";
-    const recruitingOwnerId = definition?.recruitingOwnerId || (!hiringOwnerId ? definition?.ownerId : "");
-    const hiringOwnerName = facetName(metadata.owners, hiringOwnerId);
+    const recruitingOwnerId = definition?.recruitingOwnerId || definition?.ownerId || "";
     const recruitingOwnerName = facetName(metadata.owners, recruitingOwnerId)
       || (definition?.ownerId === recruitingOwnerId ? definition?.owner : "");
-    if (hiringOwnerId && hiringOwnerName) {
-      ownerId = hiringOwnerId;
-      owner = hiringOwnerName;
-    } else if (recruitingOwnerId && recruitingOwnerName) {
+    if (recruitingOwnerId && recruitingOwnerName) {
       ownerId = recruitingOwnerId;
       owner = recruitingOwnerName;
     } else {
@@ -214,9 +209,12 @@ function mergeDefinition(listRecord, definition, metadata = {}) {
 
 function definitionCommand(values, job, publish) {
   const departmentId = formUuid(values, "departmentId", job);
-  const ownerId = Object.prototype.hasOwnProperty.call(values || {}, "ownerId")
-    ? safeUuid(values.ownerId) || null
-    : safeUuid(job?.hiringOwnerId) || safeUuid(job?.ownerId) || null;
+  const recruitingOwnerId = Object.prototype.hasOwnProperty.call(values || {}, "recruitingOwnerId")
+    ? safeUuid(values.recruitingOwnerId) || null
+    : safeUuid(values?.ownerId) || safeUuid(job?.recruitingOwnerId) || safeUuid(job?.ownerId) || null;
+  const hiringOwnerId = Object.prototype.hasOwnProperty.call(values || {}, "hiringOwnerId")
+    ? safeUuid(values.hiringOwnerId) || null
+    : safeUuid(job?.hiringOwnerId) || null;
   const priorityValue = safeString(values?.priority).trim();
   const priority = UI_TO_API_PRIORITY.get(priorityValue) || (API_TO_UI_PRIORITY.has(priorityValue) ? priorityValue : "");
   if (!priority) throw codedError("JOB_PRIORITY_UNSUPPORTED", "job priority unsupported");
@@ -225,7 +223,8 @@ function definitionCommand(values, job, publish) {
     department_id: departmentId,
     headcount: Number.isInteger(values?.headcount) ? values.headcount : 1,
     priority,
-    hiring_owner_id: ownerId,
+    recruiting_owner_id: recruitingOwnerId,
+    hiring_owner_id: hiringOwnerId,
     description: safeString(values?.jd).trim(),
     location: safeString(values?.location).trim(),
     process_template: safeString(values?.process).trim(),
@@ -250,6 +249,11 @@ export function createJobController({ client = apiClient, idempotencyKey = () =>
 
   async function listHiringManagers({ signal } = {}) {
     const result = await client.request("/api/v1/job-owner-options", requestOptions(signal));
+    return normalizeFacets(result?.data).filter((item) => safeUuid(item.id));
+  }
+
+  async function listRecruiters({ signal } = {}) {
+    const result = await client.request("/api/v1/job-recruiter-options", requestOptions(signal));
     return normalizeFacets(result?.data).filter((item) => safeUuid(item.id));
   }
 
@@ -340,7 +344,7 @@ export function createJobController({ client = apiClient, idempotencyKey = () =>
     return normalizeJob(result?.data);
   }
 
-  return { listDepartments, listHiringManagers, listJobs, loadDefinition, saveDefinition, refreshEditBaseline, transition, mergeDefinition };
+  return { listDepartments, listRecruiters, listHiringManagers, listJobs, loadDefinition, saveDefinition, refreshEditBaseline, transition, mergeDefinition };
 }
 
 export const jobController = createJobController();

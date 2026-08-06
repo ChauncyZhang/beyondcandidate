@@ -535,6 +535,18 @@ def _eligible_recruiter(db, organization_id: UUID, user_id: UUID) -> bool:
     )))
 
 
+def _eligible_recruiting_owner(db, organization_id: UUID, user_id: UUID | None) -> bool:
+    return user_id is None or bool(db.scalar(select(exists().where(
+        User.organization_id == organization_id,
+        User.id == user_id,
+        User.status == UserStatus.ACTIVE,
+        exists().where(
+            UserRole.user_id == User.id,
+            UserRole.role.in_(("recruiter", "recruiting_admin")),
+        ),
+    ))))
+
+
 def _eligible_hiring_manager(db, organization_id: UUID, user_id: UUID | None) -> bool:
     return user_id is None or bool(db.scalar(select(exists().where(
         User.organization_id == organization_id,
@@ -605,6 +617,8 @@ def create_job_definition(payload: JobDefinitionCommand, request: Request, idemp
             db, principal.organization_id, command["workflow_template_id"]
         ):
             return problem(request, 422, "workflow_template_invalid", "The workflow template is invalid.")
+        if not _eligible_recruiting_owner(db, principal.organization_id, command["recruiting_owner_id"]):
+            return problem(request, 422, "recruiting_owner_invalid", "The recruiting owner is invalid.")
         if not _eligible_hiring_manager(db, principal.organization_id, command["hiring_owner_id"]):
             return problem(request, 422, "hiring_owner_invalid", "The hiring owner is invalid.")
         try:
@@ -669,6 +683,8 @@ def replace_job_definition(job_id: UUID, payload: JobDefinitionCommand, request:
             db, principal.organization_id, command["workflow_template_id"]
         ):
             return problem(request, 422, "workflow_template_invalid", "The workflow template is invalid.")
+        if not _eligible_recruiting_owner(db, principal.organization_id, command["recruiting_owner_id"]):
+            return problem(request, 422, "recruiting_owner_invalid", "The recruiting owner is invalid.")
         if not _eligible_hiring_manager(db, principal.organization_id, command["hiring_owner_id"]):
             return problem(request, 422, "hiring_owner_invalid", "The hiring owner is invalid.")
         try:
@@ -884,6 +900,28 @@ def list_job_owner_options(request: Request):
         }
 
 
+@router.get("/job-recruiter-options", response_model=JobOwnerOptionCollection)
+def list_job_recruiter_options(request: Request):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
+    if not AUTH.role_allows(principal, RecruitingAction.MANAGE_JOB):
+        return _denied(request)
+    with request.app.state.identity_store.sync_session() as db:
+        rows = db.execute(select(User.id, User.display_name).where(
+            User.organization_id == principal.organization_id,
+            User.status == UserStatus.ACTIVE,
+            exists().where(
+                UserRole.user_id == User.id,
+                UserRole.role.in_(("recruiter", "recruiting_admin")),
+            ),
+        ).order_by(User.display_name.asc(), User.id.asc())).all()
+        return {
+            "data": [{"id": str(user_id), "name": display_name} for user_id, display_name in rows],
+            "meta": {"count": len(rows)},
+        }
+
+
 @router.get("/jobs", response_model=JobCollection)
 def list_jobs(
     request: Request,
@@ -911,7 +949,6 @@ def list_jobs(
         department = aliased(Department)
         owner = aliased(User)
         hiring_owner = aliased(User)
-        effective_owner_id = func.coalesce(Job.hiring_owner_id, Job.owner_id)
         base_conditions = [Job.organization_id == principal.organization_id, _job_scope(principal)]
         page_conditions = list(base_conditions)
         if normalized_q:
@@ -921,7 +958,7 @@ def list_jobs(
         if department_id:
             page_conditions.append(Job.department_id == department_id)
         if owner_id:
-            page_conditions.append(effective_owner_id == owner_id)
+            page_conditions.append(Job.owner_id == owner_id)
         query = select(
             Job,
             department.name.label("department_name"),
@@ -967,8 +1004,8 @@ def list_jobs(
             Job.status,
             department.id.label("department_id"),
             department.name.label("department_name"),
-            func.coalesce(hiring_owner.id, owner.id).label("owner_id"),
-            func.coalesce(hiring_owner.display_name, owner.display_name).label("owner_name"),
+            owner.id.label("owner_id"),
+            owner.display_name.label("owner_name"),
         ).outerjoin(
             department,
             and_(department.organization_id == Job.organization_id, department.id == Job.department_id),

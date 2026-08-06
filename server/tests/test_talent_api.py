@@ -960,7 +960,7 @@ def test_deferred_membership_referral_reuses_application_and_is_idempotent(tmp_p
     app=make_app(tmp_path); seed=seed_application(app)
     with app.state.identity_store.sync_session() as db:
         source=db.get(Application,seed["application_id"]); source.stage="deferred"; source.version=1
-        job=db.get(Job,source.job_id); job.status="open"; job.hiring_owner_id=None
+        job=db.get(Job,source.job_id); job.status="open"; job.hiring_owner_id=seed["admin_id"]
         db.commit()
     with TestClient(app) as client:
         headers,_,membership=create_pool_and_membership(client,seed); membership_id=membership.json()["data"]["id"]
@@ -997,6 +997,7 @@ def test_deferred_membership_referral_allows_visible_hr_with_source_job_transiti
         source = database.get(Application, seed["application_id"])
         source.stage = "deferred"
         source.version = 1
+        database.get(Job, source.job_id).hiring_owner_id = seed["admin_id"]
         resume = database.get(Resume, source.resume_id)
         item, results = seed_screening_results(
             database,
@@ -1085,6 +1086,7 @@ def test_deferred_membership_referral_requires_version_deferred_stage_and_open_j
         headers,_,membership=create_pool_and_membership(client,seed); membership_id=membership.json()["data"]["id"]
         missing=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers={**headers,"Idempotency-Key":"missing-version"})
         stale=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers={**headers,"Idempotency-Key":"stale-version","If-Match":'"2"'})
+        missing_manager=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers={**headers,"Idempotency-Key":"missing-manager","If-Match":'"1"'})
         with app.state.identity_store.sync_session() as db:
             db.get(Job,seed["job_id"]).status="closed"; db.commit()
         closed=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers={**headers,"Idempotency-Key":"closed-job","If-Match":'"1"'})
@@ -1094,10 +1096,35 @@ def test_deferred_membership_referral_requires_version_deferred_stage_and_open_j
         cross_tenant=client.post(f"/api/v1/talent-pool-memberships/{membership_id}/review-referrals",json={},headers=other_headers)
     assert missing.status_code==428 and missing.json()["code"]=="precondition_required"
     assert stale.status_code==409 and stale.json()["code"]=="version_conflict"
-    assert closed.status_code==404 and closed.json()["code"]=="resource_not_found"
+    assert missing_manager.status_code==409 and missing_manager.json()["code"]=="review_referral_hiring_manager_missing"
+    assert closed.status_code==409 and closed.json()["code"]=="review_referral_job_closed"
     assert cross_tenant.status_code==404 and cross_tenant.json()["code"]=="resource_not_found"
     assert str(seed["application_id"]) not in cross_tenant.text
     assert "deferred_screening" not in cross_tenant.text
+
+
+def test_deferred_membership_referral_rejects_a_recruiter_as_the_hiring_manager(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    recruiter_id = seed_user(app, "recruiter", "legacy-job-owner@example.test")
+    with app.state.identity_store.sync_session() as db:
+        source = db.get(Application, seed["application_id"])
+        source.stage = "deferred"
+        job = db.get(Job, source.job_id)
+        job.status = "open"
+        job.hiring_owner_id = recruiter_id
+        db.commit()
+
+    with TestClient(app) as client:
+        headers, _, membership = create_pool_and_membership(client, seed)
+        response = client.post(
+            f"/api/v1/talent-pool-memberships/{membership.json()['data']['id']}/review-referrals",
+            json={},
+            headers={**headers, "Idempotency-Key": "invalid-hiring-manager", "If-Match": '"1"'},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "review_referral_hiring_manager_invalid"
 
 
 def test_only_named_active_application_constraint_is_translated() -> None:

@@ -66,6 +66,16 @@ export function parseSuitableRoles(value) {
   return cleanSuitableRoles(safeString(value).split(/[、,，;；\n]+/));
 }
 
+export function reviewReferralErrorMessage(error) {
+  const messages = {
+    review_referral_job_closed: "原岗位已关闭，无法再转交评审。",
+    review_referral_hiring_manager_missing: "原岗位尚未配置用人经理，请先编辑职位并选择用人经理。",
+    review_referral_hiring_manager_invalid: "原岗位的用人经理账号不可用，请先编辑职位并重新选择。",
+    version_conflict: "该人才信息已更新，请刷新后重试。",
+  };
+  return messages[error?.code] || "转交失败，请刷新后重试";
+}
+
 function requireId(value, code) {
   const id = safeString(value).trim();
   if (!id) {

@@ -57,6 +57,18 @@ class ReviewReferralVersionConflict(Exception):
     pass
 
 
+class ReviewReferralJobClosed(Exception):
+    pass
+
+
+class ReviewReferralHiringManagerMissing(Exception):
+    pass
+
+
+class ReviewReferralHiringManagerInvalid(Exception):
+    pass
+
+
 def _principal(request: Request) -> Principal | JSONResponse:
     token = session_token(request)
     if not token:
@@ -1142,11 +1154,13 @@ def refer_deferred_membership_to_review(
             if membership.version!=expected: raise ReviewReferralVersionConflict
             source=db.scalar(select(Application).where(Application.organization_id==principal.organization_id,Application.id==membership.source_application_id,Application.candidate_id==candidate.id).with_for_update())
             if source is None or source.stage!="deferred": raise ReviewReferralUnavailable
-            job=db.scalar(select(Job).where(Job.organization_id==principal.organization_id,Job.id==source.job_id,Job.status=="open",AUTH.job_predicate(principal,RecruitingAction.TRANSITION,Job)).with_for_update())
+            job=db.scalar(select(Job).where(Job.organization_id==principal.organization_id,Job.id==source.job_id,AUTH.job_predicate(principal,RecruitingAction.TRANSITION,Job)).with_for_update())
             if job is None: raise ReviewReferralUnavailable
-            assignee_id=job.hiring_owner_id or job.owner_id
-            if _active_user(db,principal.organization_id,assignee_id) is None: raise ReviewReferralUnavailable
-            if job.hiring_owner_id is not None and not db.scalar(select(exists().where(UserRole.user_id==assignee_id,UserRole.role=="hiring_manager"))): raise ReviewReferralUnavailable
+            if job.status != "open": raise ReviewReferralJobClosed
+            if job.hiring_owner_id is None: raise ReviewReferralHiringManagerMissing
+            assignee_id=job.hiring_owner_id
+            if _active_user(db,principal.organization_id,assignee_id) is None: raise ReviewReferralHiringManagerInvalid
+            if not db.scalar(select(exists().where(UserRole.user_id==assignee_id,UserRole.role.in_(("hiring_manager", "recruiting_admin"))))): raise ReviewReferralHiringManagerInvalid
             source.stage="review"; source.version+=1; source.updated_at=datetime.now(timezone.utc)
             event_payload={"membership_id":str(membership.id),"pool_id":str(membership.pool_id),"from_stage":"deferred","to_stage":"review"}
             db.add(ApplicationStageEvent(organization_id=principal.organization_id,application_id=source.id,actor_user_id=principal.user_id,event_type="application.stage_changed",payload=event_payload))
@@ -1159,6 +1173,12 @@ def refer_deferred_membership_to_review(
             db.commit()
         except ReviewReferralVersionConflict:
             db.rollback(); return problem(request,409,"version_conflict","The resource version changed.")
+        except ReviewReferralJobClosed:
+            db.rollback(); return problem(request,409,"review_referral_job_closed","The source job is not open.")
+        except ReviewReferralHiringManagerMissing:
+            db.rollback(); return problem(request,409,"review_referral_hiring_manager_missing","The source job has no hiring manager.")
+        except ReviewReferralHiringManagerInvalid:
+            db.rollback(); return problem(request,409,"review_referral_hiring_manager_invalid","The source job hiring manager is unavailable.")
         except ReviewReferralUnavailable:
             db.rollback(); return _denied(request)
         except IdempotencyConflict:
