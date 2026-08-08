@@ -1,6 +1,7 @@
 import os
 import subprocess
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -12,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from server.tests.test_interview_persistence_postgres import _seed_application
 
 
-TABLES = {"organizations", "departments", "workflow_templates", "users", "user_roles", "user_sessions", "user_recruiting_department_scopes", "jobs", "job_collaborators", "audit_logs", "candidates", "candidate_contacts", "file_objects", "resumes", "resume_profiles", "job_jd_versions", "screening_rule_versions", "applications", "application_stage_events", "application_review_tasks", "notification_reads", "user_notifications", "candidate_notes", "candidate_events", "download_tickets", "idempotency_records", "background_jobs", "job_attempts", "outbox_events", "queue_claim_cursors", "screening_runs", "screening_items", "screening_results", "candidate_duplicate_hints", "llm_provider_configs", "ocr_provider_configs", "email_provider_configs", "email_templates", "email_deliveries", "prompt_versions", "llm_invocations", "llm_screening_evaluations", "interviews", "interview_participants", "interview_events", "interview_feedbacks", "interview_feedback_revisions", "talent_pools", "talent_pool_grants", "talent_pool_memberships"}
+TABLES = {"organizations", "departments", "workflow_templates", "users", "user_roles", "user_sessions", "user_recruiting_department_scopes", "jobs", "job_collaborators", "audit_logs", "candidates", "candidate_contacts", "file_objects", "resumes", "resume_profiles", "job_jd_versions", "screening_rule_versions", "applications", "application_stage_events", "application_review_tasks", "notification_reads", "user_notifications", "candidate_notes", "candidate_events", "download_tickets", "idempotency_records", "background_jobs", "job_attempts", "outbox_events", "queue_claim_cursors", "screening_runs", "screening_items", "screening_results", "candidate_duplicate_hints", "llm_provider_configs", "ocr_provider_configs", "email_provider_configs", "email_templates", "email_deliveries", "prompt_versions", "llm_invocations", "llm_screening_evaluations", "interviews", "interview_participants", "interview_events", "interview_feedbacks", "interview_feedback_revisions", "talent_pools", "talent_pool_grants", "talent_pool_memberships", "offer_templates", "organization_special_offer_approvers", "offers", "offer_versions", "offer_approvals", "offer_responses", "offer_events"}
 
 
 def test_latest_migration_revision_is_current() -> None:
@@ -244,4 +245,184 @@ def test_0013_backfills_stable_calendar_contacts_for_existing_interviews() -> No
             {"id": interview_id},
         ).one()
         assert snapshot == ("owner@test", "interviewer@test")
+    engine.dispose()
+
+
+OFFER_TABLES = {
+    "offer_templates", "organization_special_offer_approvers", "offers", "offer_versions",
+    "offer_approvals", "offer_responses", "offer_events",
+}
+
+
+def _seed_offer_rows(connection):
+    identifiers = _seed_application(connection)
+    identifiers.update({name: uuid.uuid4() for name in ("template", "offer", "version", "approval")})
+    connection.execute(text("UPDATE applications SET stage='passed' WHERE id=:application"), identifiers)
+    connection.execute(text("INSERT INTO user_roles(id,user_id,role,created_at,updated_at) VALUES(:approval,:owner,'hiring_manager',now(),now())"), identifiers)
+    connection.execute(text("INSERT INTO offer_templates(id,organization_id,name,content,status,version,created_at,updated_at) VALUES(:template,:organization,'Standard','{}','active',1,now(),now())"), identifiers)
+    connection.execute(text("UPDATE jobs SET offer_approver_id=:owner,offer_template_id=:template WHERE id=:job"), identifiers)
+    connection.execute(text("SET CONSTRAINTS ALL DEFERRED"))
+    connection.execute(text("""
+        INSERT INTO offers(id,organization_id,application_id,job_id,template_id,current_version_id,status,is_special,special_reason,candidate_response_deadline,version,created_at,updated_at)
+        VALUES(:offer,:organization,:application,:job,:template,:version,'draft',false,null,now() + interval '7 days',1,now(),now())
+    """), identifiers)
+    connection.execute(text("""
+        INSERT INTO offer_versions(id,organization_id,offer_id,version_number,content,template_id,candidate_response_deadline,is_special,special_reason,created_by,submitted_at,created_at,updated_at)
+        VALUES(:version,:organization,:offer,1,'{\"body\":\"offer\"}',:template,now() + interval '7 days',false,null,:owner,null,now(),now())
+    """), identifiers)
+    return identifiers
+
+
+@pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")
+def test_0033_offer_round_trip_and_schema_contract() -> None:
+    url = os.environ["POSTGRES_SMOKE_URL"]
+    env = {**os.environ, "DATABASE_URL": url}
+    engine = create_engine(url.replace("+asyncpg", "+psycopg"))
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "downgrade", "base"], check=True, env=env)
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "0032_interview_email_attachment"], check=True, env=env)
+    assert not (OFFER_TABLES & set(inspect(engine).get_table_names()))
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "0033_offer_workflow"], check=True, env=env)
+    assert OFFER_TABLES <= set(inspect(engine).get_table_names())
+    assert "submitted_at" in {column["name"] for column in inspect(engine).get_columns("offer_versions")}
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "downgrade", "0032_interview_email_attachment"], check=True, env=env)
+    assert not (OFFER_TABLES & set(inspect(engine).get_table_names()))
+    engine.dispose()
+
+
+@pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")
+def test_offer_postgres_constraints_and_history_triggers() -> None:
+    url = os.environ["POSTGRES_SMOKE_URL"]
+    env = {**os.environ, "DATABASE_URL": url}
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "head"], check=True, env=env)
+    engine = create_engine(url.replace("+asyncpg", "+psycopg"))
+    with engine.begin() as connection:
+        connection.execute(text("TRUNCATE organizations CASCADE"))
+        identifiers = _seed_offer_rows(connection)
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(Exception):
+            connection.execute(text("INSERT INTO organization_special_offer_approvers(id,organization_id,approver_id,position,created_at,updated_at) VALUES(:response,:organization,:interviewer,1,now(),now())"), {**identifiers, "response": uuid.uuid4()})
+        transaction.rollback()
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(IntegrityError):
+            duplicate = {**identifiers, "offer2": uuid.uuid4(), "version2": uuid.uuid4()}
+            connection.execute(text("SET CONSTRAINTS ALL DEFERRED"))
+            connection.execute(text("INSERT INTO offers(id,organization_id,application_id,job_id,current_version_id,status,is_special,candidate_response_deadline,version,created_at,updated_at) VALUES(:offer2,:organization,:application,:job,:version2,'draft',false,now(),1,now(),now())"), duplicate)
+        transaction.rollback()
+
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE offer_versions SET submitted_at=now() WHERE id=:version"), identifiers)
+        connection.execute(text("INSERT INTO offer_approvals(id,organization_id,offer_id,offer_version_id,round_number,version_number,sequence,assignee_id,status,created_at,updated_at) VALUES(:approval,:organization,:offer,:version,1,1,1,:owner,'pending',now(),now())"), identifiers)
+
+    illegal_statements = [
+        "UPDATE offer_versions SET content='{\"changed\":true}' WHERE id=:version",
+        "DELETE FROM offer_versions WHERE id=:version",
+        "DELETE FROM offer_approvals WHERE id=:approval",
+        "UPDATE offer_approvals SET assignee_id=:interviewer WHERE id=:approval",
+        "UPDATE offer_approvals SET status='waiting' WHERE id=:approval",
+    ]
+    for statement in illegal_statements:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            with pytest.raises(Exception):
+                connection.execute(text(statement), identifiers)
+            transaction.rollback()
+
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE offer_approvals SET status='approved',decided_at=now() WHERE id=:approval"), identifiers)
+        response = {**identifiers, "response": uuid.uuid4()}
+        connection.execute(text("INSERT INTO offer_responses(id,organization_id,offer_id,status,responded_at,created_at,updated_at) VALUES(:response,:organization,:offer,'accepted',now(),now(),now())"), response)
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(Exception):
+            connection.execute(text("UPDATE offer_responses SET status='declined' WHERE id=:response"), response)
+        transaction.rollback()
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(IntegrityError):
+            connection.execute(text("INSERT INTO offer_responses(id,organization_id,offer_id,status,responded_at,created_at,updated_at) VALUES(:approval,:organization,:offer,'declined',now(),now(),now())"), identifiers)
+        transaction.rollback()
+    engine.dispose()
+
+
+@pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")
+def test_offer_postgres_composite_and_exact_version_foreign_keys() -> None:
+    url = os.environ["POSTGRES_SMOKE_URL"]
+    env = {**os.environ, "DATABASE_URL": url}
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "head"], check=True, env=env)
+    engine = create_engine(url.replace("+asyncpg", "+psycopg"))
+    with engine.begin() as connection:
+        connection.execute(text("TRUNCATE organizations CASCADE"))
+        identifiers = _seed_offer_rows(connection)
+        identifiers.update({name: uuid.uuid4() for name in ("other_job", "other_offer", "other_version", "bad_approval")})
+        connection.execute(text("INSERT INTO jobs(id,organization_id,title,owner_id,status,headcount,priority,version,created_at,updated_at) VALUES(:other_job,:organization,'Other',:owner,'open',1,'normal',1,now(),now())"), identifiers)
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(IntegrityError):
+            connection.execute(text("INSERT INTO offers(id,organization_id,application_id,job_id,current_version_id,status,is_special,candidate_response_deadline,version,created_at,updated_at) VALUES(:other_offer,:organization,:application,:other_job,:other_version,'withdrawn',false,now(),1,now(),now())"), identifiers)
+        transaction.rollback()
+    with engine.begin() as connection:
+        connection.execute(text("SET CONSTRAINTS ALL DEFERRED"))
+        connection.execute(text("INSERT INTO offers(id,organization_id,application_id,job_id,current_version_id,status,is_special,candidate_response_deadline,version,created_at,updated_at) VALUES(:other_offer,:organization,:application,:job,:other_version,'withdrawn',false,now(),1,now(),now())"), identifiers)
+        connection.execute(text("INSERT INTO offer_versions(id,organization_id,offer_id,version_number,content,candidate_response_deadline,is_special,created_by,created_at,updated_at) VALUES(:other_version,:organization,:other_offer,1,'{}',now(),false,:owner,now(),now())"), identifiers)
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(IntegrityError):
+            connection.execute(text("UPDATE offers SET current_version_id=:other_version WHERE id=:offer"), identifiers)
+            connection.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+        transaction.rollback()
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(IntegrityError):
+            connection.execute(text("INSERT INTO offer_approvals(id,organization_id,offer_id,offer_version_id,round_number,version_number,sequence,assignee_id,status,created_at,updated_at) VALUES(:bad_approval,:organization,:offer,:other_version,1,1,1,:owner,'pending',now(),now())"), identifiers)
+        transaction.rollback()
+    engine.dispose()
+
+
+@pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")
+def test_offer_postgres_concurrent_exact_assignee_decision_and_expiry_locking() -> None:
+    url = os.environ["POSTGRES_SMOKE_URL"]
+    env = {**os.environ, "DATABASE_URL": url}
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "head"], check=True, env=env)
+    engine = create_engine(url.replace("+asyncpg", "+psycopg"))
+    with engine.begin() as connection:
+        connection.execute(text("TRUNCATE organizations CASCADE"))
+        identifiers = _seed_offer_rows(connection)
+        connection.execute(text("UPDATE offer_versions SET submitted_at=now() WHERE id=:version"), identifiers)
+        connection.execute(text("INSERT INTO offer_approvals(id,organization_id,offer_id,offer_version_id,round_number,version_number,sequence,assignee_id,status,created_at,updated_at) VALUES(:approval,:organization,:offer,:version,1,1,1,:owner,'pending',now(),now())"), identifiers)
+
+    def decide_once():
+        with engine.begin() as connection:
+            return connection.execute(text("""
+                UPDATE offer_approvals SET status='approved',decided_at=now(),updated_at=now()
+                WHERE id=:approval AND assignee_id=:owner AND status='pending'
+                RETURNING id
+            """), identifiers).first() is not None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        decisions = list(executor.map(lambda _: decide_once(), range(2)))
+    assert sorted(decisions) == [False, True]
+
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE offers SET status='sent',candidate_response_deadline=now() - interval '1 day' WHERE id=:offer"), identifiers)
+
+    def expire_once():
+        with engine.begin() as connection:
+            row = connection.execute(text("""
+                SELECT id FROM offers
+                WHERE id=:offer AND status='sent' AND candidate_response_deadline <= now()
+                  AND NOT EXISTS (SELECT 1 FROM offer_responses WHERE offer_responses.organization_id=offers.organization_id AND offer_responses.offer_id=offers.id)
+                FOR UPDATE SKIP LOCKED
+            """), identifiers).first()
+            if row is None:
+                return False
+            connection.execute(text("UPDATE offers SET status='expired',updated_at=now() WHERE id=:offer"), identifiers)
+            return True
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        expiries = list(executor.map(lambda _: expire_once(), range(2)))
+    assert sorted(expiries) == [False, True]
     engine.dispose()

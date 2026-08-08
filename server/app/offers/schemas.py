@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class OfferSchema(BaseModel):
@@ -29,4 +29,13 @@ class OfferCommand(OfferSchema):
 
 
 class OfferVersionCommand(OfferSchema):
-    content: dict[str, Any] = Field(min_length=1)
+    content: dict[str, Any] | None = Field(default=None, min_length=1)
+    candidate_response_deadline: datetime | None = None
+    template_id: UUID | None = None
+    is_special: bool | None = None
+    special_reason: str | None = None
+
+    @field_validator("special_reason")
+    @classmethod
+    def normalize_special_reason(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None

@@ -31,6 +31,7 @@ from server.app.llm.models import LlmScreeningEvaluation
 from server.app.interviews.models import Interview
 from server.app.integrations.feishu.notifications import schedule_feishu_notification
 from server.app.notifications.service import read_versions, workbench_notification_version
+from server.app.offers.models import OfferTemplate
 from server.app.recruiting.tasks import LLM_TERMINAL_SAFE_ERROR_CODES, normalize_llm_terminal_safe_error_code
 from server.app.screening.rules import RuleSnapshotError,normalize_rule_content
 from server.app.recruiting.security import ContactCipher
@@ -53,6 +54,7 @@ from server.app.recruiting.service import (
     lock_active_candidate, lock_job_for_version_write,
     transition_job_record, patch_job_record, patch_candidate_record, patch_application_record,
     replace_job_definition_record, apply_application_workflow_action_record,
+    is_eligible_offer_approver,
 )
 
 
@@ -94,6 +96,8 @@ class JobCreate(StrictModel):
     headcount: int = Field(default=1, gt=0)
     priority: str = Field(default="normal", max_length=16)
     hiring_owner_id: UUID | None = None
+    offer_approver_id: UUID | None = None
+    offer_template_id: UUID | None = None
 
 
 class JobPatch(StrictModel):
@@ -101,6 +105,8 @@ class JobPatch(StrictModel):
     headcount: int | None = Field(default=None, gt=0)
     priority: str | None = Field(default=None, max_length=16)
     hiring_owner_id: UUID | None = None
+    offer_approver_id: UUID | None = None
+    offer_template_id: UUID | None = None
 
 
 class Transition(StrictModel):
@@ -282,7 +288,7 @@ def _load_candidate_application(db, principal: Principal, candidate_id: UUID, ap
 
 
 def _job_data(job: Job) -> dict[str, Any]:
-    return {"id": str(job.id), "title": job.title, "department_id": str(job.department_id) if job.department_id else None, "headcount": job.headcount, "priority": job.priority, "hiring_owner_id": str(job.hiring_owner_id) if job.hiring_owner_id else None, "workflow_template_id": str(job.workflow_template_id) if job.workflow_template_id else None, "owner_id": str(job.owner_id), "status": job.status, "version": job.version, "updated_at": job.updated_at.isoformat()}
+    return {"id": str(job.id), "title": job.title, "department_id": str(job.department_id) if job.department_id else None, "headcount": job.headcount, "priority": job.priority, "hiring_owner_id": str(job.hiring_owner_id) if job.hiring_owner_id else None, "workflow_template_id": str(job.workflow_template_id) if job.workflow_template_id else None, "offer_approver_id": str(job.offer_approver_id) if job.offer_approver_id else None, "offer_template_id": str(job.offer_template_id) if job.offer_template_id else None, "owner_id": str(job.owner_id), "status": job.status, "version": job.version, "updated_at": job.updated_at.isoformat()}
 
 
 def _job_jd_definition(jd: JobJdVersion) -> dict[str, Any]:
@@ -707,6 +713,24 @@ def _workflow_template_is_valid(db, organization_id: UUID, template_id: UUID | N
     ))))
 
 
+def _offer_template_is_valid(db, organization_id: UUID, template_id: UUID | None) -> bool:
+    return template_id is None or bool(db.scalar(select(exists().where(
+        OfferTemplate.organization_id == organization_id,
+        OfferTemplate.id == template_id,
+        OfferTemplate.status == "active",
+    ))))
+
+
+def _validate_offer_defaults_response(request, db, organization_id, command):
+    if "offer_approver_id" in command and command["offer_approver_id"] is not None and not is_eligible_offer_approver(
+        db, organization_id, command["offer_approver_id"]
+    ):
+        return problem(request, 422, "offer_approver_invalid", "The Offer approver is invalid.")
+    if "offer_template_id" in command and not _offer_template_is_valid(db, organization_id, command["offer_template_id"]):
+        return problem(request, 422, "offer_template_invalid", "The Offer template is invalid.")
+    return None
+
+
 def _application_data(item: Application) -> dict[str, Any]:
     return {"id": str(item.id), "candidate_id": str(item.candidate_id), "job_id": str(item.job_id), "resume_id": str(item.resume_id), "owner_id": str(item.owner_id), "stage": item.stage, "source": item.source, "source_application_id": str(item.source_application_id) if item.source_application_id else None, "human_conclusion": item.human_conclusion, "version": item.version, "updated_at": item.updated_at.isoformat()}
 
@@ -728,7 +752,13 @@ def create_job_definition(payload: JobDefinitionCommand, request: Request, idemp
     if not AUTH.role_allows(principal, RecruitingAction.MANAGE_JOB):
         return _denied(request)
     command = payload.model_dump()
+    for field in ("offer_approver_id", "offer_template_id"):
+        if field not in payload.model_fields_set:
+            command.pop(field)
     with request.app.state.identity_store.sync_session() as db:
+        invalid_offer_default = _validate_offer_defaults_response(request, db, principal.organization_id, command)
+        if invalid_offer_default is not None:
+            return invalid_offer_default
         if not _department_is_valid(
             db, principal.organization_id, command["department_id"]
         ):
@@ -795,10 +825,16 @@ def replace_job_definition(job_id: UUID, payload: JobDefinitionCommand, request:
         if isinstance(value, JSONResponse):
             return value
     command = payload.model_dump()
+    for field in ("offer_approver_id", "offer_template_id"):
+        if field not in payload.model_fields_set:
+            command.pop(field)
     with request.app.state.identity_store.sync_session() as db:
         job = _load_job(db, principal, job_id, RecruitingAction.MANAGE_JOB)
         if job is None:
             return _denied(request)
+        invalid_offer_default = _validate_offer_defaults_response(request, db, principal.organization_id, command)
+        if invalid_offer_default is not None:
+            return invalid_offer_default
         if not _department_is_valid(
             db,
             principal.organization_id,
@@ -1327,7 +1363,11 @@ def create_job(payload: JobCreate, request: Request):
             return problem(
                 request, 422, "department_invalid", "The department is invalid."
             )
-        job = Job(organization_id=principal.organization_id, owner_id=principal.user_id, **payload.model_dump())
+        command = payload.model_dump(exclude_unset=True)
+        invalid_offer_default = _validate_offer_defaults_response(request, db, principal.organization_id, command)
+        if invalid_offer_default is not None:
+            return invalid_offer_default
+        job = Job(organization_id=principal.organization_id, owner_id=principal.user_id, **command)
         db.add(job); db.flush()
         db.add(JobCollaborator(organization_id=principal.organization_id, job_id=job.id, user_id=principal.user_id, access_role="job_owner"))
         db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, event_type="job.created", outcome="success", trace_id=request.state.trace_id, metadata_json={"job_id": str(job.id)}))
@@ -1356,8 +1396,12 @@ def patch_job(job_id: UUID, payload: JobPatch, request: Request, if_match: str |
     with request.app.state.identity_store.sync_session() as db:
         job = _load_job(db, principal, job_id, RecruitingAction.MANAGE_JOB)
         if job is None: return _denied(request)
+        changes = payload.model_dump(exclude_unset=True)
+        invalid_offer_default = _validate_offer_defaults_response(request, db, principal.organization_id, changes)
+        if invalid_offer_default is not None:
+            return invalid_offer_default
         try:
-            job = patch_job_record(db, principal.organization_id, job_id, payload.model_dump(exclude_unset=True), expected_version=expected, actor_user_id=principal.user_id, trace_id=request.state.trace_id)
+            job = patch_job_record(db, principal.organization_id, job_id, changes, expected_version=expected, actor_user_id=principal.user_id, trace_id=request.state.trace_id)
             db.commit(); return _resource(_job_data(job))
         except ResourceVersionConflict as error:
             db.rollback(); return _problem_for(request, error)

@@ -44,6 +44,8 @@ class JobOut(ApiModel):
     priority: str
     hiring_owner_id: str | None
     workflow_template_id: str | None
+    offer_approver_id: str | None
+    offer_template_id: str | None
     owner_id: str
     status: str
     version: int

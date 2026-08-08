@@ -61,11 +61,19 @@ class Offer(OfferRecord, Base):
         CheckConstraint("status in ('draft','pending_approval','changes_requested','ready_to_send','sent','withdrawn','expired')", name="ck_offers_status"),
         CheckConstraint("version >= 1", name="ck_offers_version"),
         CheckConstraint("(is_special and special_reason is not null and length(trim(special_reason)) > 0) or (not is_special and special_reason is null)", name="ck_offers_special_reason"),
-        ForeignKeyConstraint(["organization_id", "application_id"], ["applications.organization_id", "applications.id"]),
+        ForeignKeyConstraint(["organization_id", "application_id", "job_id"], ["applications.organization_id", "applications.id", "applications.job_id"]),
         ForeignKeyConstraint(["organization_id", "job_id"], ["jobs.organization_id", "jobs.id"]),
         ForeignKeyConstraint(["organization_id", "template_id"], ["offer_templates.organization_id", "offer_templates.id"]),
         ForeignKeyConstraint(["organization_id", "current_version_id", "id"], ["offer_versions.organization_id", "offer_versions.id", "offer_versions.offer_id"], deferrable=True, initially="DEFERRED"),
         Index("ix_offers_expiry", "organization_id", "status", "candidate_response_deadline"),
+        Index(
+            "uq_offers_active_application",
+            "organization_id",
+            "application_id",
+            unique=True,
+            postgresql_where=text("status in ('draft','pending_approval','changes_requested','ready_to_send','sent')"),
+            sqlite_where=text("status in ('draft','pending_approval','changes_requested','ready_to_send','sent')"),
+        ),
     )
 
 
@@ -79,6 +87,7 @@ class OfferVersion(OfferRecord, Base):
     is_special: Mapped[bool] = mapped_column(nullable=False)
     special_reason: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         UniqueConstraint("organization_id", "id"),
         UniqueConstraint("organization_id", "offer_id", "version_number"),
@@ -116,12 +125,12 @@ class OfferApproval(OfferRecord, Base):
 class OfferResponse(OfferRecord, Base):
     __tablename__ = "offer_responses"
     offer_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
-    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    responded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     __table_args__ = (
         UniqueConstraint("organization_id", "id"),
         UniqueConstraint("organization_id", "offer_id"),
-        CheckConstraint("status in ('pending','accepted','declined')", name="ck_offer_responses_status"),
+        CheckConstraint("status in ('accepted','declined')", name="ck_offer_responses_status"),
         ForeignKeyConstraint(["organization_id", "offer_id"], ["offers.organization_id", "offers.id"], ondelete="CASCADE"),
     )
 

@@ -16,6 +16,7 @@ from server.app.identity.policy import Principal
 from server.app.identity.security import PasswordService
 from server.app.main import create_app
 from server.app.llm.models import LlmInvocation, LlmProviderConfig, LlmScreeningEvaluation, PromptVersion
+from server.app.offers.models import OfferTemplate
 from server.app.recruiting import api as recruiting_api
 from server.app.recruiting.models import Application, ApplicationReviewTask, ApplicationStageEvent, Candidate, CandidateContact, CandidateEvent, CandidateNote, DownloadTicket, FileObject, IdempotencyRecord, JobJdVersion, Resume, ScreeningRuleVersion
 from server.app.screening.models import ScreeningItem, ScreeningResult, ScreeningRun
@@ -2019,3 +2020,91 @@ def test_published_creation_audit_records_created_open_fact_without_fake_transit
         created = db.query(AuditLog).filter_by(event_type="job.definition_created").one()
         assert created.metadata_json["status"] == "open"
         assert db.query(AuditLog).filter_by(event_type="job.published").count() == 0
+
+
+def test_simple_job_offer_defaults_round_trip_preserve_omitted_clear_null_and_validate_eligibility(tmp_path) -> None:
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
+    invalid_id = seed_user(app, "interviewer", "interviewer@example.test")
+    with app.state.identity_store.sync_session() as db:
+        admin = db.get(User, admin_id)
+        template = OfferTemplate(organization_id=admin.organization_id, name="Standard", content={})
+        inactive_template = OfferTemplate(organization_id=admin.organization_id, name="Inactive", content={}, status="inactive")
+        db.add_all([template, inactive_template])
+        db.commit()
+        template_id, inactive_template_id = str(template.id), str(inactive_template.id)
+
+    with TestClient(app) as client:
+        headers = login(client, "admin@example.test")
+        invalid_approver = client.post("/api/v1/jobs", json={"title": "Invalid", "offer_approver_id": str(invalid_id)}, headers=headers)
+        invalid_template = client.post("/api/v1/jobs", json={"title": "Invalid", "offer_template_id": inactive_template_id}, headers=headers)
+        created = client.post(
+            "/api/v1/jobs",
+            json={"title": "Offer role", "offer_approver_id": str(admin_id), "offer_template_id": template_id},
+            headers=headers,
+        )
+        job_id = created.json()["data"]["id"]
+        preserved = client.patch(
+            f"/api/v1/jobs/{job_id}", json={"title": "Offer role updated"}, headers={**headers, "If-Match": '"1"'}
+        )
+        cleared = client.patch(
+            f"/api/v1/jobs/{job_id}",
+            json={"offer_approver_id": None, "offer_template_id": None},
+            headers={**headers, "If-Match": '"2"'},
+        )
+
+    assert invalid_approver.status_code == 422 and invalid_approver.json()["code"] == "offer_approver_invalid"
+    assert invalid_template.status_code == 422 and invalid_template.json()["code"] == "offer_template_invalid"
+    assert created.status_code == 201
+    assert (created.json()["data"]["offer_approver_id"], created.json()["data"]["offer_template_id"]) == (str(admin_id), template_id)
+    assert (preserved.json()["data"]["offer_approver_id"], preserved.json()["data"]["offer_template_id"]) == (str(admin_id), template_id)
+    assert (cleared.json()["data"]["offer_approver_id"], cleared.json()["data"]["offer_template_id"]) == (None, None)
+
+
+def test_job_definition_offer_defaults_round_trip_and_replace_field_presence(tmp_path) -> None:
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
+    invalid_id = seed_user(app, "recruiter", "recruiter@example.test")
+    with app.state.identity_store.sync_session() as db:
+        admin = db.get(User, admin_id)
+        template = OfferTemplate(organization_id=admin.organization_id, name="Standard", content={})
+        db.add(template)
+        db.commit()
+        template_id = str(template.id)
+
+    base = job_definition_payload(
+        hiring_owner_id=str(admin_id), offer_approver_id=str(admin_id), offer_template_id=template_id
+    )
+    with TestClient(app) as client:
+        headers = login(client, "admin@example.test")
+        invalid = client.post(
+            "/api/v1/job-definitions",
+            json={**base, "offer_approver_id": str(invalid_id)},
+            headers={**headers, "Idempotency-Key": "invalid-offer-default"},
+        )
+        created = client.post(
+            "/api/v1/job-definitions", json=base, headers={**headers, "Idempotency-Key": "offer-default-create"}
+        )
+        job_id = created.json()["data"]["job"]["id"]
+        omitted = dict(base)
+        omitted.pop("offer_approver_id")
+        omitted.pop("offer_template_id")
+        preserved = client.put(
+            f"/api/v1/job-definitions/{job_id}",
+            json={**omitted, "title": "Preserved defaults"},
+            headers={**headers, "If-Match": '"1"', "Idempotency-Key": "offer-default-preserve"},
+        )
+        readback = client.get(f"/api/v1/job-definitions/{job_id}", headers=headers)
+        cleared = client.put(
+            f"/api/v1/job-definitions/{job_id}",
+            json={**omitted, "title": "Cleared defaults", "offer_approver_id": None, "offer_template_id": None},
+            headers={**headers, "If-Match": '"2"', "Idempotency-Key": "offer-default-clear"},
+        )
+
+    assert invalid.status_code == 422 and invalid.json()["code"] == "offer_approver_invalid"
+    assert created.status_code == 201
+    for response in (created, preserved, readback):
+        assert response.json()["data"]["job"]["offer_approver_id"] == str(admin_id)
+        assert response.json()["data"]["job"]["offer_template_id"] == template_id
+    assert cleared.json()["data"]["job"]["offer_approver_id"] is None
+    assert cleared.json()["data"]["job"]["offer_template_id"] is None

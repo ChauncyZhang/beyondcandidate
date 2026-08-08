@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from server.app.identity.models import Base, Job, Organization, User
+from server.app.identity.models import Base, Job, Organization, User, UserRole, UserStatus
 from server.app.recruiting.schemas import JobDefinitionCommand
 from server.app.recruiting.service import InvalidAggregateRelationship, create_job_definition_record, replace_job_definition_record
 from server.app.recruiting.models import Application, Candidate, Resume
@@ -49,12 +49,24 @@ def seed_application(db, *, organization_id=ORG, approver_id=DEFAULT_APPROVER, t
         User(id=SPECIAL_APPROVER, organization_id=organization_id, email="special@example.test", normalized_email="special@example.test", display_name="Special", password_hash="x"),
         User(id=SECOND_SPECIAL_APPROVER, organization_id=organization_id, email="second@example.test", normalized_email="second@example.test", display_name="Second", password_hash="x"),
     ]
+    users[0].roles.append(UserRole(role="recruiting_admin"))
+    for user in users[1:]:
+        user.roles.append(UserRole(role="hiring_manager"))
     job = Job(id=JOB, organization_id=organization_id, title="Role", owner_id=OWNER, status="open", offer_approver_id=approver_id, offer_template_id=template_id)
     candidate = Candidate(id=UUID(int=10), organization_id=organization_id, display_name="Candidate")
     resume = Resume(id=UUID(int=11), organization_id=organization_id, candidate_id=candidate.id, file_object_id=UUID(int=12), version_number=1)
     application = Application(id=APPLICATION, organization_id=organization_id, candidate_id=candidate.id, job_id=job.id, resume_id=resume.id, owner_id=OWNER, stage="passed", source="manual")
     db.add_all([organization, *users, job, candidate, resume, application])
     db.commit()
+    return application
+
+
+def seed_additional_application(db, application_int):
+    candidate = Candidate(id=UUID(int=application_int + 1), organization_id=ORG, display_name=f"Candidate {application_int}")
+    resume = Resume(id=UUID(int=application_int + 2), organization_id=ORG, candidate_id=candidate.id, file_object_id=UUID(int=application_int + 3), version_number=1)
+    application = Application(id=UUID(int=application_int), organization_id=ORG, candidate_id=candidate.id, job_id=JOB, resume_id=resume.id, owner_id=OWNER, stage="passed", source="manual")
+    db.add_all([candidate, resume, application])
+    db.flush()
     return application
 
 
@@ -88,6 +100,22 @@ def test_draft_edits_create_one_current_version_and_submission_snapshots_it_immu
             update_offer_version(db, ORG, offer.id, OWNER, OfferVersionCommand(content={"salary": "130"}), expected_version=3, trace_id="trace")
 
 
+def test_offer_creation_requires_passed_application_and_one_active_workflow():
+    with make_session() as db:
+        application = seed_application(db)
+        application.stage = "review"
+        db.flush()
+        with pytest.raises(OfferApprovalError, match="passed"):
+            create_offer(db, ORG, OWNER, command(), trace_id="trace")
+
+        application.stage = "passed"
+        first = create_offer(db, ORG, OWNER, command(), trace_id="trace")
+        with pytest.raises(OfferApprovalError, match="active workflow"):
+            create_offer(db, ORG, OWNER, command(), trace_id="trace")
+        withdraw_offer(db, ORG, first.id, OWNER, expected_version=1, trace_id="trace")
+        assert create_offer(db, ORG, OWNER, command(), trace_id="trace").status == "draft"
+
+
 def test_special_approval_chain_appends_ordered_org_approvers_and_deduplicates_first_occurrence():
     with make_session() as db:
         seed_application(db)
@@ -107,6 +135,45 @@ def test_special_approval_chain_appends_ordered_org_approvers_and_deduplicates_f
         ]
 
 
+def test_special_submission_requires_an_eligible_special_approver_after_default_dedup():
+    with make_session() as db:
+        seed_application(db)
+        offer = create_offer(db, ORG, OWNER, command(is_special=True, special_reason="Exception"), trace_id="trace")
+        with pytest.raises(OfferApprovalError, match="special approver"):
+            submit_offer(db, ORG, offer.id, OWNER, expected_version=1, trace_id="trace")
+
+        db.add(OrganizationSpecialOfferApprover(organization_id=ORG, approver_id=DEFAULT_APPROVER, position=1))
+        db.flush()
+        with pytest.raises(OfferApprovalError, match="special approver"):
+            submit_offer(db, ORG, offer.id, OWNER, expected_version=1, trace_id="trace")
+
+
+def test_submission_revalidates_active_eligible_default_special_approvers_and_template():
+    with make_session() as db:
+        seed_application(db)
+        template = OfferTemplate(organization_id=ORG, name="Standard", content={})
+        db.add(template)
+        db.flush()
+        offer = create_offer(db, ORG, OWNER, command(template_id=template.id), trace_id="trace")
+        db.get(User, DEFAULT_APPROVER).status = UserStatus.DISABLED
+        with pytest.raises(OfferApprovalError, match="default approver"):
+            submit_offer(db, ORG, offer.id, OWNER, expected_version=1, trace_id="trace")
+
+        db.get(User, DEFAULT_APPROVER).status = UserStatus.ACTIVE
+        template.status = "inactive"
+        with pytest.raises(OfferApprovalError, match="template"):
+            submit_offer(db, ORG, offer.id, OWNER, expected_version=1, trace_id="trace")
+
+        template.status = "active"
+        withdraw_offer(db, ORG, offer.id, OWNER, expected_version=1, trace_id="trace")
+        special = create_offer(db, ORG, OWNER, command(is_special=True, special_reason="Exception"), trace_id="trace")
+        db.add(OrganizationSpecialOfferApprover(organization_id=ORG, approver_id=SPECIAL_APPROVER, position=1))
+        db.get(User, SPECIAL_APPROVER).status = UserStatus.DISABLED
+        db.flush()
+        with pytest.raises(OfferApprovalError, match="special approver"):
+            submit_offer(db, ORG, special.id, OWNER, expected_version=1, trace_id="trace")
+
+
 def test_sequential_approval_rejection_requires_reason_and_changes_requested_without_application_stage_change():
     with make_session() as db:
         application = seed_application(db)
@@ -122,6 +189,16 @@ def test_sequential_approval_rejection_requires_reason_and_changes_requested_wit
         assert db.get(Application, application.id).stage == "passed"
         assert db.scalar(select(OfferEvent).where(OfferEvent.offer_id == offer.id, OfferEvent.event_type == "offer.approval_rejected")).payload["reason"] == "Need revised compensation"
         assert [(item.round_number, item.version_number) for item in db.scalars(select(OfferApproval).where(OfferApproval.offer_id == offer.id).order_by(OfferApproval.round_number))] == [(1, 1), (2, 2)]
+
+
+def test_changes_requested_cannot_resubmit_the_rejected_version():
+    with make_session() as db:
+        seed_application(db)
+        offer = create_offer(db, ORG, OWNER, command(), trace_id="trace")
+        submit_offer(db, ORG, offer.id, OWNER, expected_version=1, trace_id="trace")
+        decide_approval(db, ORG, offer.id, DEFAULT_APPROVER, "rejected", expected_version=2, reason="Revise", trace_id="trace")
+        with pytest.raises(OfferApprovalError, match="new version"):
+            submit_offer(db, ORG, offer.id, OWNER, expected_version=3, trace_id="trace")
 
 
 def test_approval_completion_requires_each_assignee_in_order_and_only_moves_to_ready_to_send():
@@ -152,7 +229,8 @@ def test_withdrawal_leaves_application_stage_unchanged_and_expiry_only_transitio
         withdrawn = create_offer(db, ORG, OWNER, command(), trace_id="trace")
         withdraw_offer(db, ORG, withdrawn.id, OWNER, expected_version=1, trace_id="trace")
         due = create_offer(db, ORG, OWNER, command(candidate_response_deadline=datetime(2026, 8, 1, tzinfo=timezone.utc)), trace_id="trace")
-        future = create_offer(db, ORG, OWNER, command(candidate_response_deadline=datetime(2026, 9, 1, tzinfo=timezone.utc)), trace_id="trace")
+        future_application = seed_additional_application(db, 50)
+        future = create_offer(db, ORG, OWNER, command(application_id=future_application.id, candidate_response_deadline=datetime(2026, 9, 1, tzinfo=timezone.utc)), trace_id="trace")
         due.status = future.status = "sent"
         db.commit()
         assert expire_due_offers(db, now=datetime(2026, 8, 8, tzinfo=timezone.utc), trace_id="sweep") == 1
@@ -169,6 +247,7 @@ def test_cross_tenant_operations_are_rejected():
         offer = create_offer(db, ORG, OWNER, command(), trace_id="trace")
         with pytest.raises(OfferNotFound):
             submit_offer(db, OTHER_ORG, offer.id, OWNER, expected_version=1, trace_id="trace")
+        withdraw_offer(db, ORG, offer.id, OWNER, expected_version=1, trace_id="trace")
         db.add(OfferTemplate(id=UUID(int=30), organization_id=OTHER_ORG, name="Other", content={}))
         with pytest.raises(OfferNotFound):
             create_offer(db, ORG, OWNER, command(template_id=UUID(int=30)), trace_id="trace")
@@ -189,6 +268,7 @@ def test_submission_copies_template_deadline_and_special_metadata_into_immutable
         db.add(template)
         db.flush()
         seed_application(db, template_id=template.id)
+        db.add(OrganizationSpecialOfferApprover(organization_id=ORG, approver_id=SPECIAL_APPROVER, position=1))
         deadline = datetime(2026, 8, 20, tzinfo=timezone.utc)
         offer = create_offer(db, ORG, OWNER, command(candidate_response_deadline=deadline, is_special=True, special_reason="Exception"), trace_id="trace")
         submit_offer(db, ORG, offer.id, OWNER, expected_version=1, trace_id="trace")
@@ -198,13 +278,75 @@ def test_submission_copies_template_deadline_and_special_metadata_into_immutable
             update_offer_version(db, ORG, offer.id, OWNER, OfferVersionCommand(content={"salary": "101"}), expected_version=2, trace_id="trace")
 
 
+@pytest.mark.parametrize("source_status", ["draft", "changes_requested", "ready_to_send", "sent"])
+def test_revision_versions_every_offer_snapshot_field_and_resets_approval(source_status):
+    with make_session() as db:
+        seed_application(db)
+        old_template = OfferTemplate(organization_id=ORG, name="Old", content={})
+        new_template = OfferTemplate(organization_id=ORG, name="New", content={})
+        db.add_all([old_template, new_template])
+        db.flush()
+        offer = create_offer(db, ORG, OWNER, command(template_id=old_template.id), trace_id="trace")
+        old_version = db.get(OfferVersion, offer.current_version_id)
+        if source_status != "draft":
+            submit_offer(db, ORG, offer.id, OWNER, expected_version=1, trace_id="trace")
+            if source_status == "changes_requested":
+                decide_approval(db, ORG, offer.id, DEFAULT_APPROVER, "rejected", expected_version=2, reason="Revise", trace_id="trace")
+            elif source_status in {"ready_to_send", "sent"}:
+                decide_approval(db, ORG, offer.id, DEFAULT_APPROVER, "approved", expected_version=2, trace_id="trace")
+                if source_status == "sent":
+                    offer.status = "sent"
+        expected_version = offer.version
+        deadline = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        revised = update_offer_version(
+            db, ORG, offer.id, OWNER,
+            OfferVersionCommand(
+                content={"body": "revised", "compensation": {"salary": "130"}},
+                candidate_response_deadline=deadline,
+                template_id=new_template.id,
+                is_special=True,
+                special_reason="Executive exception",
+            ),
+            expected_version=expected_version,
+            trace_id="trace",
+        )
+        current = db.get(OfferVersion, revised.current_version_id)
+        assert current.id != old_version.id
+        assert (current.content, current.template_id, current.is_special, current.special_reason) == (
+            {"body": "revised", "compensation": {"salary": "130"}}, new_template.id, True, "Executive exception"
+        )
+        assert current.candidate_response_deadline.replace(tzinfo=timezone.utc) == deadline
+        assert (revised.template_id, revised.is_special, revised.special_reason, revised.status) == (new_template.id, True, "Executive exception", "draft")
+        assert revised.candidate_response_deadline.replace(tzinfo=timezone.utc) == deadline
+        assert old_version.content == {"salary": "100"}
+        if source_status != "draft":
+            assert old_version.submitted_at is not None
+
+
+def test_revision_preserves_omitted_fields_allows_explicit_template_clear_and_rejects_noop():
+    with make_session() as db:
+        seed_application(db)
+        template = OfferTemplate(organization_id=ORG, name="Standard", content={})
+        db.add(template)
+        db.flush()
+        offer = create_offer(db, ORG, OWNER, command(template_id=template.id), trace_id="trace")
+        with pytest.raises(OfferVersionConflict, match="no changes"):
+            update_offer_version(db, ORG, offer.id, OWNER, OfferVersionCommand(), expected_version=1, trace_id="trace")
+        update_offer_version(db, ORG, offer.id, OWNER, OfferVersionCommand(template_id=None), expected_version=1, trace_id="trace")
+        current = db.get(OfferVersion, offer.current_version_id)
+        assert current.template_id is None
+        assert current.content == {"salary": "100"}
+
+
 def test_user_transitions_require_current_version_and_expiry_never_repeats_or_expires_answered_offer():
     with make_session() as db:
         seed_application(db)
         offer = create_offer(db, ORG, OWNER, command(candidate_response_deadline=datetime(2026, 8, 1, tzinfo=timezone.utc)), trace_id="trace")
         offer.status = "sent"
         db.flush()
-        db.get(OfferResponse, db.scalar(select(OfferResponse.id).where(OfferResponse.offer_id == offer.id))).status = "accepted"
+        assert db.scalar(select(OfferResponse.id).where(OfferResponse.offer_id == offer.id)) is None
+        db.add(OfferResponse(organization_id=ORG, offer_id=offer.id, status="accepted", responded_at=datetime.now(timezone.utc)))
+        db.flush()
         assert expire_due_offers(db, now=datetime(2026, 8, 8, tzinfo=timezone.utc), trace_id="sweep") == 0
         with pytest.raises(TypeError):
             withdraw_offer(db, ORG, offer.id, OWNER, trace_id="trace")
@@ -245,6 +387,20 @@ def test_offer_migration_uses_deferred_exact_current_pointer_and_returns_new_fro
     assert "uq_offer_versions_current" not in migration
 
 
+def test_offer_models_bind_application_job_and_final_response_contract():
+    application_uniques = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in Application.__table__.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    offer_foreign_keys = {tuple(constraint.column_keys) for constraint in Offer.__table__.foreign_key_constraints}
+    response_checks = {constraint.name for constraint in OfferResponse.__table__.constraints if hasattr(constraint, "sqltext")}
+    assert ("organization_id", "id", "job_id") in application_uniques
+    assert ("organization_id", "application_id", "job_id") in offer_foreign_keys
+    assert "ck_offer_responses_status" in response_checks
+    assert "pending" not in str(next(constraint.sqltext for constraint in OfferResponse.__table__.constraints if getattr(constraint, "name", None) == "ck_offer_responses_status"))
+
+
 def test_job_definition_persists_tenant_scoped_offer_defaults_and_rejects_cross_tenant_references():
     with make_session() as db:
         seed_application(db)
@@ -273,5 +429,33 @@ def test_job_definition_persists_tenant_scoped_offer_defaults_and_rejects_cross_
             create_job_definition_record(db, ORG, OWNER, JobDefinitionCommand(**payload).model_dump(), trace_id="trace")
         payload["offer_template_id"] = None
         payload["offer_approver_id"] = other_user.id
+        with pytest.raises(InvalidAggregateRelationship):
+            create_job_definition_record(db, ORG, OWNER, JobDefinitionCommand(**payload).model_dump(), trace_id="trace")
+
+
+def test_job_definition_rejects_inactive_roleless_approvers_and_inactive_templates():
+    with make_session() as db:
+        seed_application(db)
+        roleless = User(
+            id=UUID(int=40), organization_id=ORG, email="roleless@example.test",
+            normalized_email="roleless@example.test", display_name="Roleless", password_hash="x",
+        )
+        inactive = OfferTemplate(organization_id=ORG, name="Inactive", content={}, status="inactive")
+        db.add_all([roleless, inactive])
+        db.flush()
+        payload = {
+            "title": "New role", "department_id": None, "headcount": 1, "priority": "normal", "recruiting_owner_id": None,
+            "hiring_owner_id": OWNER, "hiring_manager_ids": [OWNER], "description": "Description", "location": "", "process_template": "standard",
+            "workflow_template_id": None, "llm_enabled": False, "must_have": [], "nice_to_have": [], "publish": False,
+            "offer_approver_id": roleless.id, "offer_template_id": None,
+        }
+        with pytest.raises(InvalidAggregateRelationship):
+            create_job_definition_record(db, ORG, OWNER, JobDefinitionCommand(**payload).model_dump(), trace_id="trace")
+        roleless.roles.append(UserRole(role="hiring_manager"))
+        roleless.status = UserStatus.INVITED
+        with pytest.raises(InvalidAggregateRelationship):
+            create_job_definition_record(db, ORG, OWNER, JobDefinitionCommand(**payload).model_dump(), trace_id="trace")
+        payload["offer_approver_id"] = DEFAULT_APPROVER
+        payload["offer_template_id"] = inactive.id
         with pytest.raises(InvalidAggregateRelationship):
             create_job_definition_record(db, ORG, OWNER, JobDefinitionCommand(**payload).model_dump(), trace_id="trace")

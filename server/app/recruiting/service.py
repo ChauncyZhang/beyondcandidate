@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, exists, func, select, text, update
 
 from server.app.governance.retention import (
     lock_candidate_retention_facts,
@@ -38,13 +38,33 @@ def _job_definition_contents(command):
     return jd_content,rule_content
 
 
+ELIGIBLE_OFFER_APPROVER_ROLES = ("recruiting_admin", "hiring_manager")
+
+
+def is_eligible_offer_approver(db, organization_id, user_id):
+    from server.app.identity.models import User, UserRole, UserStatus
+
+    return bool(db.scalar(select(User.id).where(
+        User.organization_id == organization_id,
+        User.id == user_id,
+        User.status == UserStatus.ACTIVE,
+        exists().where(
+            UserRole.user_id == User.id,
+            UserRole.role.in_(ELIGIBLE_OFFER_APPROVER_ROLES),
+        ),
+    )))
+
+
 def _validate_offer_defaults(db, organization_id, offer_approver_id, offer_template_id):
-    from server.app.identity.models import User
     from server.app.offers.models import OfferTemplate
 
-    if offer_approver_id is not None and db.scalar(select(User.id).where(User.organization_id == organization_id, User.id == offer_approver_id)) is None:
+    if offer_approver_id is not None and not is_eligible_offer_approver(db, organization_id, offer_approver_id):
         raise InvalidAggregateRelationship
-    if offer_template_id is not None and db.scalar(select(OfferTemplate.id).where(OfferTemplate.organization_id == organization_id, OfferTemplate.id == offer_template_id)) is None:
+    if offer_template_id is not None and db.scalar(select(OfferTemplate.id).where(
+        OfferTemplate.organization_id == organization_id,
+        OfferTemplate.id == offer_template_id,
+        OfferTemplate.status == "active",
+    )) is None:
         raise InvalidAggregateRelationship
 
 
@@ -382,6 +402,16 @@ def transition_job_record(db, job_id, target, *, expected_version, actor_user_id
 def patch_job_record(db, organization_id, job_id, changes, *, expected_version, actor_user_id, trace_id):
     from server.app.identity.models import AuditLog, Job
 
+    if "offer_approver_id" in changes or "offer_template_id" in changes:
+        current = db.scalar(select(Job).where(Job.organization_id == organization_id, Job.id == job_id))
+        if current is None:
+            raise ResourceVersionConflict
+        _validate_offer_defaults(
+            db,
+            organization_id,
+            changes.get("offer_approver_id", current.offer_approver_id),
+            changes.get("offer_template_id", current.offer_template_id),
+        )
     row = db.scalar(update(Job).where(
         Job.organization_id == organization_id, Job.id == job_id, Job.version == expected_version,
     ).values(**changes, version=Job.version + 1, updated_at=datetime.now(timezone.utc)).returning(Job))
@@ -409,7 +439,7 @@ def create_job_definition_record(db, organization_id, actor_user_id, command, *,
         organization_id=organization_id,
         owner_id=recruiting_owner_id,
         status="open" if command["publish"] else "draft",
-        **{key: command[key] for key in ("title", "department_id", "headcount", "priority", "hiring_owner_id", "offer_approver_id", "offer_template_id")},
+        **{key: command.get(key) for key in ("title", "department_id", "headcount", "priority", "hiring_owner_id", "offer_approver_id", "offer_template_id")},
         workflow_template_id=command["workflow_template_id"],
     )
     db.add(job)
@@ -459,11 +489,19 @@ def replace_job_definition_record(db, organization_id, job_id, actor_user_id, co
         raise ResourceVersionConflict
     if command["publish"] and job.status != "draft":
         raise InvalidStateTransition
-    _validate_offer_defaults(db, organization_id, command.get("offer_approver_id"), command.get("offer_template_id"))
+    _validate_offer_defaults(
+        db,
+        organization_id,
+        command.get("offer_approver_id", job.offer_approver_id),
+        command.get("offer_template_id", job.offer_template_id),
+    )
     source_status = job.status
     recruiting_owner_id = command.get("recruiting_owner_id") or job.owner_id
-    for key in ("title", "department_id", "headcount", "priority", "hiring_owner_id", "offer_approver_id", "offer_template_id"):
+    for key in ("title", "department_id", "headcount", "priority", "hiring_owner_id"):
         setattr(job, key, command[key])
+    for key in ("offer_approver_id", "offer_template_id"):
+        if key in command:
+            setattr(job, key, command[key])
     job.workflow_template_id = command["workflow_template_id"]
     job.owner_id = recruiting_owner_id
     db.execute(delete(JobCollaborator).where(
