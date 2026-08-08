@@ -76,6 +76,8 @@ import {
 } from "./jobWorkspaceState.js";
 import { getRecentScreeningTaskStorageKey, LEGACY_RECENT_SCREENING_TASK_STORAGE_KEY, parseRecentScreeningTask, serializeRecentScreeningTask } from "./screeningIntegration.js";
 import { buildWorkbenchNotificationGroups, countWorkbenchNotifications, removeWorkbenchNotification } from "./workbenchNotifications.js";
+import { OfferApprovalTasks } from "./OfferViews.jsx";
+import { offerController as defaultOfferController } from "./offerController.js";
 
 const navItems = [
   ["工作台", Home],
@@ -178,7 +180,7 @@ function inviteTokenFromHash() {
   return new URLSearchParams(hash).get("invite")?.trim() || "";
 }
 
-export function App({ controller = sessionController, screeningController = defaultScreeningController, candidateController = defaultCandidateController, jobController = defaultJobController, workbenchController = defaultWorkbenchController, interviewController = defaultInterviewController, talentController = defaultTalentController, reportController = defaultReportController, accountClient = apiClient }) {
+export function App({ controller = sessionController, screeningController = defaultScreeningController, candidateController = defaultCandidateController, jobController = defaultJobController, workbenchController = defaultWorkbenchController, offerController = defaultOfferController, interviewController = defaultInterviewController, talentController = defaultTalentController, reportController = defaultReportController, accountClient = apiClient }) {
   const navigate = useNavigate();
   const session = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const [inviteToken, setInviteToken] = useState(inviteTokenFromHash);
@@ -208,10 +210,10 @@ export function App({ controller = sessionController, screeningController = defa
     const identity = getSessionIdentity(session.user, null);
     return <AccessDeniedView displayName={identity.name} error={session.error} loggingOut={session.loggingOut} onLogout={() => controller.logout()} />;
   }
-  return <AuthenticatedApp session={session} onLogout={() => controller.logout()} accountClient={accountClient} screeningController={screeningController} candidateController={candidateController} jobController={jobController} workbenchController={workbenchController} interviewController={interviewController} talentController={talentController} reportController={reportController} />;
+  return <AuthenticatedApp session={session} onLogout={() => controller.logout()} accountClient={accountClient} screeningController={screeningController} candidateController={candidateController} jobController={jobController} workbenchController={workbenchController} offerController={offerController} interviewController={interviewController} talentController={talentController} reportController={reportController} />;
 }
 
-function AuthenticatedApp({ session, onLogout, accountClient, screeningController, candidateController, jobController, workbenchController, interviewController, talentController, reportController }) {
+function AuthenticatedApp({ session, onLogout, accountClient, screeningController, candidateController, jobController, workbenchController, offerController, interviewController, talentController, reportController }) {
   const currentRole = session.role || "未知角色";
   const recentTaskStorageKey = getRecentScreeningTaskStorageKey(session.user);
   const location = useLocation();
@@ -844,6 +846,20 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
     candidate.taskId ? openWorkbenchReviewCandidate(candidate) : openCandidate(candidate);
   }
 
+  function openWorkbenchOfferTask(task) {
+    const context = {
+      candidateId: task.candidateId || task.candidate_id,
+      applicationId: task.applicationId || task.application_id,
+      jobId: task.jobId || task.job_id,
+      position: task.jobTitle || task.job_title,
+      approvalId: task.id,
+    };
+    setCandidateOrigin({ activeNav: "工作台", screeningTask: null, screeningViewState: null });
+    setScreeningTask(null);
+    navigate(candidateDetailPath(context, "Offer", "/workbench"));
+    void loadServerCandidate(context);
+  }
+
   function openWorkbenchNotificationCandidate(candidate) {
     setWorkbenchState((current) => current.data ? {
       ...current,
@@ -1052,6 +1068,8 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
           {interviewState.tasks.length > 0 && <section className="rail-section">{interviewState.tasks.map((task) => <button className="rail-item" type="button" key={task.id} onClick={() => task.type === "interview_feedback" ? openFeedbackInterview(task.interviewId) : openInterviewList()}><strong>{task.candidate} · {task.round}</strong><small>{task.position} · {task.startsAt ? new Date(task.startsAt).toLocaleString("zh-CN", { hour12: false }) : "时间未记录"}</small></button>)}</section>}
         </div>}
 
+        {!screeningTask && activeNav === "工作台" && <div className="offer-approval-workbench"><OfferApprovalTasks role={currentRole} controller={offerController} onOpenOffer={openWorkbenchOfferTask} /></div>}
+
         {!screeningTask && activeNav === "工作台" && currentRole !== "面试官" && workbenchState.status === "loading" && !workbenchState.data && <WorkbenchSkeleton />}
         {!screeningTask && activeNav === "工作台" && currentRole !== "面试官" && workbenchState.status === "error" && !workbenchState.data && <div className="workbench-status error" role="alert"><CircleAlert size={22} /><div><strong>工作台暂时无法加载</strong><p>{workbenchState.error}</p></div><button className="button secondary" type="button" onClick={() => void loadWorkbench()}>重试</button></div>}
         {!screeningTask && activeNav === "工作台" && currentRole !== "面试官" && workbenchState.status === "ready" && workbenchJobs.length === 0 && <div className="workbench-status empty"><BriefcaseBusiness size={24} /><div><strong>暂无在招职位</strong><p>{canPerformAction(currentRole, "新建职位") ? "发布职位并导入简历后，这里会显示真实招聘进展。" : "暂无被授权的在招职位，请联系招聘负责人确认职位协作范围。"}</p></div></div>}
@@ -1171,6 +1189,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
             onLoadJobs={loadJobs}
             jobController={jobController}
             candidateController={candidateController}
+            offerController={offerController}
             onRefreshJobMutation={refreshJobAfterMutation}
             onNotify={notify}
             onImport={() => { setActiveJob(selectedJob?.name || activeJob); setImportOpen(true); }}
@@ -1180,6 +1199,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
             onDraftClear={() => clearJobCreateDraft(window.sessionStorage, jobDraftUserId)}
             onManageDepartments={() => navigate(settingsPath("组织与权限", "部门", location.pathname + location.search))}
             onManageTemplates={() => navigate(settingsPath("流程与评价模板", "招聘流程", location.pathname + location.search))}
+            onManageOfferSettings={() => navigate(settingsPath("Offer 设置", undefined, location.pathname + location.search))}
             pageActionHost={pageActionHost}
             onCreateJob={canPerformAction(currentRole, "新建职位") ? openJobForm : null}
           />
@@ -1190,7 +1210,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
         {!screeningTask && activeNav === "筛选任务" && route.mode === "detail" && screeningLoadState.status === "error" && <div className="workbench-status error" role="alert"><CircleAlert size={22} /><div><strong>筛选任务无法加载</strong><p>{screeningLoadState.error}</p></div><button className="button secondary" type="button" onClick={() => navigate("/screening/tasks", { replace: true })}>返回任务列表</button></div>}
 
         {!screeningTask && activeNav === "候选人" && (
-          <CandidatesWorkspace mode={candidateMode} setMode={setCandidateMode} selectedCandidate={selectedCandidateWithInterviews} setSelectedCandidate={setSelectedCandidate} records={candidateRecords} setRecords={updateCandidateRecords} onNotify={notify} onBackDetail={requestBackFromCandidateDetail} detailBackLabel={route.returnTo?.startsWith("/screening/tasks/") ? "返回筛选任务" : candidateOrigin?.activeNav === "工作台" ? "返回工作台" : candidateOrigin?.activeNav === "人才库" ? "返回人才库" : candidateOrigin ? "返回筛选任务" : "返回候选人列表"} onOpenCandidate={openCandidate} onScheduleInterview={(candidate) => openScheduleInterview(candidate)} onOpenInterviewFeedback={openFeedbackInterview} onAddToTalentPool={addCandidatesToTalentPool} filters={candidatePreset || {}} onFiltersChange={(filters) => navigate(candidateListPath(filters), { replace: true })} detailTab={route.tab} onDetailTabChange={(tab) => selectedCandidateWithInterviews && navigate(candidateDetailPath(selectedCandidateWithInterviews, tab, route.returnTo), { replace: true })} actorName={roleIdentity.name} currentRole={currentRole} controller={candidateController} detailState={candidateDetailState} onRetryDetail={() => candidateDetailState?.context ? loadServerCandidate(candidateDetailState.context) : Promise.resolve()} pageActionHost={pageActionHost} onImport={() => setImportOpen(true)} />
+          <CandidatesWorkspace mode={candidateMode} setMode={setCandidateMode} selectedCandidate={selectedCandidateWithInterviews} setSelectedCandidate={setSelectedCandidate} records={candidateRecords} setRecords={updateCandidateRecords} onNotify={notify} onBackDetail={requestBackFromCandidateDetail} detailBackLabel={route.returnTo?.startsWith("/screening/tasks/") ? "返回筛选任务" : candidateOrigin?.activeNav === "工作台" ? "返回工作台" : candidateOrigin?.activeNav === "人才库" ? "返回人才库" : candidateOrigin ? "返回筛选任务" : "返回候选人列表"} onOpenCandidate={openCandidate} onScheduleInterview={(candidate) => openScheduleInterview(candidate)} onOpenInterviewFeedback={openFeedbackInterview} onAddToTalentPool={addCandidatesToTalentPool} filters={candidatePreset || {}} onFiltersChange={(filters) => navigate(candidateListPath(filters), { replace: true })} detailTab={route.tab} onDetailTabChange={(tab) => selectedCandidateWithInterviews && navigate(candidateDetailPath({ ...selectedCandidateWithInterviews, approvalId: route.approvalId }, tab, route.returnTo), { replace: true })} actorName={roleIdentity.name} currentRole={currentRole} controller={candidateController} offerController={offerController} offerApprovalId={route.approvalId} detailState={candidateDetailState} onRetryDetail={() => candidateDetailState?.context ? loadServerCandidate(candidateDetailState.context) : Promise.resolve()} pageActionHost={pageActionHost} onImport={() => setImportOpen(true)} />
         )}
 
         {!screeningTask && activeNav === "面试" && (
@@ -1206,7 +1226,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
         )}
 
         {!screeningTask && activeNav === "设置" && (
-          <SettingsWorkspace currentRole={currentRole} onNotify={notify} onUnsavedChangesChange={setHasUnsavedSettings} section={route.section} organizationTab={settingsOrganizationTab} templateTab={route.section === "流程与评价模板" ? route.tab : undefined} onRouteChange={(section, tab) => navigate(settingsPath(section, tab, route.returnTo))} pageActionHost={pageActionHost} />
+          <SettingsWorkspace currentRole={currentRole} onNotify={notify} onUnsavedChangesChange={setHasUnsavedSettings} offerController={offerController} section={route.section} organizationTab={settingsOrganizationTab} templateTab={route.section === "流程与评价模板" ? route.tab : undefined} onRouteChange={(section, tab) => navigate(settingsPath(section, tab, route.returnTo))} pageActionHost={pageActionHost} />
         )}
 
         {!screeningTask && activeNav !== "工作台" && activeNav !== "职位" && activeNav !== "筛选任务" && activeNav !== "候选人" && activeNav !== "面试" && activeNav !== "人才库" && activeNav !== "报表" && activeNav !== "设置" && (

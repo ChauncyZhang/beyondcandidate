@@ -351,6 +351,78 @@ input::placeholder, textarea::placeholder { color: #9b9ba1; }
 .status-draft, .unknown { color: var(--ink-secondary); background: #eeeeF1; }
 .calendar-interview-round, .source-tag, .feedback-priorities span, .talent-row-tags small, .member-tags span { color: #245f9f; background: var(--blue-soft); }
 
+/* Internal Offer surfaces */
+.offer-tab { min-width: 0; }
+.offer-workspace { display: grid; gap: 18px; min-width: 0; }
+.offer-heading, .offer-template-settings > header, .offer-approver-settings > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.offer-heading h3, .offer-template-settings h3, .offer-approver-settings h3 { margin: 0; color: var(--ink); }
+.offer-heading p, .offer-template-settings p, .offer-approver-settings p { margin: 5px 0 0; color: var(--muted); }
+.offer-status { flex: 0 0 auto; padding: 5px 10px; border-radius: 999px; color: #58585f; background: #eeeef1; font-size: 13px; font-weight: 650; }
+.offer-status.pending_approval { color: #8a4d00; background: var(--orange-soft); }
+.offer-status.ready_to_send, .offer-status.sent { color: var(--green); background: var(--green-soft); }
+.offer-status.changes_requested, .offer-status.withdrawn, .offer-status.expired { color: var(--red); background: #fff0ef; }
+.offer-state, .offer-redacted { display: grid; justify-items: center; gap: 8px; padding: 34px 20px; border: 1px dashed var(--line); border-radius: var(--radius); color: var(--muted); text-align: center; }
+.offer-state strong, .offer-redacted strong { color: var(--ink); }
+.offer-state.error, .offer-error { color: var(--red); }
+.offer-error { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 8px; background: #fff3f2; overflow-wrap: anywhere; }
+.offer-error button { margin-left: auto; border: 0; color: inherit; background: transparent; text-decoration: underline; }
+.offer-form { display: grid; gap: 16px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
+.offer-form-grid, .offer-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
+.offer-form label, .offer-settings label { display: grid; min-width: 0; gap: 7px; color: var(--ink-secondary); font-size: 13px; font-weight: 600; }
+.offer-form input, .offer-form select, .offer-form textarea, .offer-settings input, .offer-settings select, .offer-settings textarea { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 7px; padding: 10px 11px; color: var(--ink); background: #fff; font: inherit; resize: vertical; }
+.offer-full-field { grid-column: 1 / -1; }
+.offer-special-row, .offer-ready-notice, .offer-changes-notice { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px; border-radius: 9px; background: #f7f7f9; }
+.offer-special-row > span, .offer-ready-notice > span, .offer-changes-notice > span { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.offer-special-row span span, .offer-ready-notice span span, .offer-changes-notice span span { display: grid; gap: 3px; }
+.offer-special-row small, .offer-ready-notice small, .offer-changes-notice small { color: var(--muted); font-weight: 400; overflow-wrap: anywhere; }
+.offer-ready-notice { color: var(--green); background: var(--green-soft); }
+.offer-changes-notice { color: #8a4d00; background: var(--orange-soft); }
+.offer-special-reason { min-width: 0; }
+.offer-form > footer, .offer-template-settings > footer, .offer-approver-settings > footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+.offer-form > footer > div, .offer-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 9px; }
+.offer-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.offer-summary > span { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 9px; }
+.offer-summary span span { display: grid; min-width: 0; gap: 3px; }
+.offer-summary small { color: var(--muted); }
+.offer-summary strong { overflow-wrap: anywhere; }
+.offer-preview { min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); }
+.offer-preview > header { display: flex; justify-content: space-between; gap: 12px; }
+.offer-preview h4, .offer-preview h5 { margin: 0 0 12px; }
+.offer-preview header span { color: #704f00; font-size: 13px; }
+.offer-body-copy { white-space: pre-wrap; overflow-wrap: anywhere; }
+.offer-preview dl { display: grid; gap: 10px; margin: 18px 0 0; }
+.offer-preview dl > div { display: grid; grid-template-columns: minmax(100px, 150px) minmax(0, 1fr); gap: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.offer-preview dt { color: var(--muted); }
+.offer-preview dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.offer-decision, .offer-history { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); }
+.offer-decision h4, .offer-history h4 { margin: 0; }
+.offer-decision label { display: grid; gap: 7px; }
+.offer-decision textarea { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 7px; padding: 10px; }
+.offer-decision > div { display: flex; justify-content: flex-end; gap: 9px; }
+.offer-history > header { display: flex; align-items: center; gap: 8px; }
+.offer-version-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 9px; }
+.offer-version-list article { display: grid; gap: 4px; padding: 11px; border-radius: 8px; background: #f7f7f9; }
+.offer-version-list small, .offer-version-list span { color: var(--muted); }
+.offer-approval-history { display: grid; gap: 8px; margin: 0; padding-left: 24px; }
+.offer-approval-history li { padding-left: 5px; }
+.offer-approval-history li span { margin-right: 8px; color: var(--muted); }
+.offer-approval-history p { margin: 4px 0; overflow-wrap: anywhere; }
+.offer-approval-workbench { padding: 0 28px 14px; }
+.offer-approval-workbench:empty { display: none; }
+.offer-task-section { max-width: 520px; }
+.offer-task-section > header { display: flex; justify-content: space-between; }
+.offer-task-section > header button { border: 0; color: var(--blue); background: transparent; }
+.offer-settings { display: grid; gap: 22px; }
+.offer-template-settings, .offer-approver-settings { display: grid; gap: 15px; padding-top: 20px; border-top: 1px solid var(--line); }
+.offer-approver-settings ol { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.offer-approver-settings li { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.offer-approver-settings li > span { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; color: var(--blue); background: var(--blue-soft); }
+.offer-approver-settings li strong { min-width: 0; overflow-wrap: anywhere; }
+.offer-approver-settings li div { display: flex; gap: 5px; }
+.offer-approver-settings li button { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.job-offer-defaults { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: #fafafa; }
+.job-offer-defaults > small { overflow-wrap: anywhere; }
+
 @media (max-width: 1280px) {
   .global-search { width: 220px; }
   .organization-context { display: none; }
@@ -376,6 +448,7 @@ input::placeholder, textarea::placeholder { color: #9b9ba1; }
   .dashboard-body .right-rail { grid-template-columns: 1fr 1fr; }
   .dashboard-body .right-rail .rail-section:first-child { min-height: 278px; }
   .job-page, .candidate-page, .interview-page, .talent-page, .report-page, .settings-page, .screening-page { padding: 14px 16px 24px; }
+  .offer-approval-workbench { padding: 0 16px 12px; }
 }
 
 @media (max-width: 640px) {
@@ -390,4 +463,11 @@ input::placeholder, textarea::placeholder { color: #9b9ba1; }
   .calendar-interview-meta { justify-content: flex-start; }
   .top-actions > .button.secondary { display: none; }
   .kanban { grid-template-columns: repeat(5, clamp(260px, 78vw, 300px)); }
+  .offer-heading, .offer-template-settings > header, .offer-approver-settings > header, .offer-form > footer, .offer-template-settings > footer, .offer-approver-settings > footer { align-items: stretch; flex-direction: column; }
+  .offer-form-grid, .offer-settings-grid, .offer-summary { grid-template-columns: 1fr; }
+  .offer-full-field { grid-column: auto; }
+  .offer-form > footer > div, .offer-actions, .offer-decision > div { display: grid; grid-template-columns: 1fr; }
+  .offer-form > footer .button, .offer-actions .button, .offer-decision .button { width: 100%; }
+  .offer-preview dl > div { grid-template-columns: 1fr; gap: 4px; }
+  .offer-special-row { align-items: flex-start; }
 }

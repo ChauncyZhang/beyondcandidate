@@ -157,6 +157,8 @@ function normalizeDefinition(resource, funnel) {
   const hiringManagerIds = safeUuidArray(data.hiring_manager_ids);
   return {
     ...base,
+    offerApproverId: safeUuid(data.job?.offer_approver_id),
+    offerTemplateId: safeUuid(data.job?.offer_template_id),
     hiringManagerIds: base.hiringOwnerId && !hiringManagerIds.includes(base.hiringOwnerId)
       ? [base.hiringOwnerId, ...hiringManagerIds]
       : hiringManagerIds,
@@ -240,6 +242,8 @@ function definitionCommand(values, job, publish) {
     recruiting_owner_id: recruitingOwnerId,
     hiring_owner_id: hiringOwnerId,
     hiring_manager_ids: hiringManagerIds,
+    offer_approver_id: formUuid(values, "offerApproverId", job),
+    offer_template_id: formUuid(values, "offerTemplateId", job),
     description: safeString(values?.jd).trim(),
     location: safeString(values?.location).trim(),
     process_template: safeString(values?.process).trim(),

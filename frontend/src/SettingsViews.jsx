@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { AlertTriangle, ArrowDown, ArrowUp, Bot, CalendarDays, CheckCircle2, ChevronDown, Copy, Database, FileClock, KeyRound, LockKeyhole, Mail, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal, Trash2, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Bot, CalendarDays, CheckCircle2, ChevronDown, Copy, Database, FileCheck2, FileClock, KeyRound, LockKeyhole, Mail, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal, Trash2, Users, X } from "lucide-react";
 import { canEditAiSettings, canEditOrganizationSettings, canEditRetentionSettings, canViewAuditSettings, canViewDeletionApprovalQueue, canViewRetentionSettings, getAllowedSettingsSections } from "./roleCapabilities.js";
 import { createLlmSettingsController, getTestDisabledReason, releaseLlmSettingsSubscription } from "./llmSettings.js";
 import { createOcrSettingsController, getOcrTestDisabledReason, releaseOcrSettingsSubscription } from "./ocrSettings.js";
@@ -9,6 +9,7 @@ import { FeishuIntegrationSettings } from "./FeishuIntegrationSettings.jsx";
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { workflowTemplateController } from "./workflowTemplateController.js";
 import { emailSettingsController } from "./emailSettingsController.js";
+import { OfferSettings } from "./OfferViews.jsx";
 import "./product-theme-admin.css";
 
 const settingsSections = [
@@ -17,6 +18,7 @@ const settingsSections = [
   ["AI 设置", Bot],
   ["飞书集成", CalendarDays],
   ["审计与数据治理", FileClock],
+  ["Offer 设置", FileCheck2],
 ];
 const settingsDefaultTabs = { "组织与权限": "成员", "流程与评价模板": "招聘流程" };
 function RoleSwitch({ value, onChange }) {
@@ -1060,14 +1062,15 @@ function EmailSettings({ onNotify, onDirtyChange, controller = emailSettingsCont
   </section>;
 }
 
-export function SettingsWorkspace({ currentRole, onRoleChange, onNotify, onUnsavedChangesChange = () => {}, pageActionHost, section = "组织与权限", organizationTab = "成员", templateTab = "招聘流程", onRouteChange = () => {} }) {
+export function SettingsWorkspace({ currentRole, onRoleChange, onNotify, onUnsavedChangesChange = () => {}, pageActionHost, offerController, section = "组织与权限", organizationTab = "成员", templateTab = "招聘流程", onRouteChange = () => {} }) {
   const [aiDirty, setAiDirty] = useState(false);
   const [emailDirty, setEmailDirty] = useState(false);
+  const [offerDirty, setOfferDirty] = useState(false);
   const allowedSettingsSections = getAllowedSettingsSections(currentRole);
   const visibleSettingsSections = settingsSections.filter(([label]) => allowedSettingsSections.includes(label));
   const activeSection = allowedSettingsSections.includes(section) ? section : allowedSettingsSections[0];
-  const content = activeSection === "组织与权限" ? <OrganizationSettings role={currentRole} onNotify={onNotify} pageActionHost={pageActionHost} activeTab={organizationTab} onTabChange={(tab) => onRouteChange("组织与权限", tab)} /> : activeSection === "流程与评价模板" ? <TemplateSettings role={currentRole} onNotify={onNotify} activeTab={templateTab} onTabChange={(tab) => onRouteChange("流程与评价模板", tab)} /> : activeSection === "AI 设置" ? <><AiSettings role={currentRole} onNotify={onNotify} onDirtyChange={setAiDirty} />{currentRole === "系统管理员" && <EmailSettings onNotify={onNotify} onDirtyChange={setEmailDirty} />}</> : activeSection === "飞书集成" ? <FeishuIntegrationSettings onNotify={onNotify} /> : activeSection === "审计与数据治理" ? <AuditSettings key={currentRole} role={currentRole} onNotify={onNotify} /> : <section className="settings-denied"><LockKeyhole size={31} /><h3>无设置权限</h3><p>当前账号未获得系统设置访问权限。</p></section>;
-  useEffect(() => { onUnsavedChangesChange(aiDirty || emailDirty); }, [aiDirty, emailDirty, onUnsavedChangesChange]);
+  const content = activeSection === "组织与权限" ? <OrganizationSettings role={currentRole} onNotify={onNotify} pageActionHost={pageActionHost} activeTab={organizationTab} onTabChange={(tab) => onRouteChange("组织与权限", tab)} /> : activeSection === "流程与评价模板" ? <TemplateSettings role={currentRole} onNotify={onNotify} activeTab={templateTab} onTabChange={(tab) => onRouteChange("流程与评价模板", tab)} /> : activeSection === "AI 设置" ? <><AiSettings role={currentRole} onNotify={onNotify} onDirtyChange={setAiDirty} />{currentRole === "系统管理员" && <EmailSettings onNotify={onNotify} onDirtyChange={setEmailDirty} />}</> : activeSection === "飞书集成" ? <FeishuIntegrationSettings onNotify={onNotify} /> : activeSection === "审计与数据治理" ? <AuditSettings key={currentRole} role={currentRole} onNotify={onNotify} /> : activeSection === "Offer 设置" ? <OfferSettings controller={offerController} onNotify={onNotify} onDirtyChange={setOfferDirty} /> : <section className="settings-denied"><LockKeyhole size={31} /><h3>无设置权限</h3><p>当前账号未获得系统设置访问权限。</p></section>;
+  useEffect(() => { onUnsavedChangesChange(aiDirty || emailDirty || offerDirty); }, [aiDirty, emailDirty, offerDirty, onUnsavedChangesChange]);
   useEffect(() => () => onUnsavedChangesChange(false), [onUnsavedChangesChange]);
   function openSection(nextSection) {
     onRouteChange(nextSection, settingsDefaultTabs[nextSection]);

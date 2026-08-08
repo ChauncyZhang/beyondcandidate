@@ -26,6 +26,7 @@ test("parses every required application route from the URL", () => {
     [`/jobs/${UUID_A}/edit`, { kind: "jobs", nav: "职位", mode: "edit", id: UUID_A }],
     ["/candidates", { kind: "candidates", nav: "候选人", mode: "list" }],
     [`/candidates/${UUID_A}?tab=timeline`, { kind: "candidates", nav: "候选人", mode: "detail", id: UUID_A, tab: "时间线" }],
+    [`/candidates/${UUID_A}?tab=offer`, { kind: "candidates", nav: "候选人", mode: "detail", id: UUID_A, tab: "Offer" }],
     ["/interviews", { kind: "interviews", nav: "面试", mode: "list" }],
     ["/interviews/new", { kind: "interviews", nav: "面试", mode: "new" }],
     [`/interviews/${UUID_A}/reschedule`, { kind: "interviews", nav: "面试", mode: "reschedule", id: UUID_A }],
@@ -40,6 +41,7 @@ test("parses every required application route from the URL", () => {
     ["/settings/templates/interview-scorecards", { kind: "settings", nav: "设置", section: "流程与评价模板", tab: "面试评价模板" }],
     ["/settings/ai", { kind: "settings", nav: "设置", section: "AI 设置" }],
     ["/settings/feishu", { kind: "settings", nav: "设置", section: "飞书集成" }],
+    ["/settings/offers", { kind: "settings", nav: "设置", section: "Offer 设置" }],
     ["/settings/governance", { kind: "settings", nav: "设置", section: "审计与数据治理" }],
   ];
 
@@ -66,12 +68,17 @@ test("candidate list URL keeps only meaningful key filters", () => {
 
 test("candidate detail tab and settings return target are encoded in URLs", () => {
   assert.equal(candidateDetailPath({ id: UUID_A }, "面试与反馈"), `/candidates/${UUID_A}?tab=interviews`);
+  assert.equal(candidateDetailPath({ id: UUID_A }, "Offer"), `/candidates/${UUID_A}?tab=offer`);
+  const approvalPath = candidateDetailPath({ id: UUID_A, approvalId: "approval-1" }, "Offer", "/workbench");
+  assert.equal(approvalPath, `/candidates/${UUID_A}?tab=offer&approval=approval-1&return=%2Fworkbench`);
+  assert.equal(parseAppRoute(new URL(approvalPath, "https://ats.example.test")).approvalId, "approval-1");
   assert.equal(
     candidateDetailPath({ id: UUID_A }, "档案与简历", screeningTaskPath("run-1", { query: "林", status: "失败" })),
     `/candidates/${UUID_A}?return=%2Fscreening%2Ftasks%2Frun-1%3Fq%3D%25E6%259E%2597%26status%3Dfailed`,
   );
   assert.equal(settingsPath("组织与权限", "部门", "/jobs/new"), "/settings/organization/departments?return=%2Fjobs%2Fnew");
   assert.equal(settingsPath("飞书集成"), "/settings/feishu");
+  assert.equal(settingsPath("Offer 设置"), "/settings/offers");
   assert.equal(parseAppRoute(new URL("/settings/organization/departments?return=%2Fjobs%2Fnew", "https://ats.example.test")).returnTo, "/jobs/new");
 });
 

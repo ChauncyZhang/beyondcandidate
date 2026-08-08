@@ -15,6 +15,8 @@ const OWNER_ID = "33333333-3333-4333-8333-333333333333";
 const HIRING_OWNER_ID = "44444444-4444-4444-8444-444444444444";
 const HIRING_MANAGER_ID = "66666666-6666-4666-8666-666666666666";
 const WORKFLOW_TEMPLATE_ID = "55555555-5555-4555-8555-555555555555";
+const OFFER_APPROVER_ID = "77777777-7777-4777-8777-777777777777";
+const OFFER_TEMPLATE_ID = "88888888-8888-4888-8888-888888888888";
 
 function apiJob(changes = {}) {
   return {
@@ -485,6 +487,8 @@ test("saveDefinition maps the complete UI form for draft, publish, and versioned
     recruiting_owner_id: OWNER_ID,
     hiring_owner_id: HIRING_OWNER_ID,
     hiring_manager_ids: [HIRING_OWNER_ID],
+    offer_approver_id: null,
+    offer_template_id: null,
     description: "建设可靠的招聘平台。",
     location: "上海",
     process_template: "技术岗位标准流程",
@@ -502,6 +506,41 @@ test("saveDefinition maps the complete UI form for draft, publish, and versioned
   assert.equal(published.status, "招聘中");
   assert.equal(updated.version, 8);
   assert.equal(updated.jd, "建设可靠的招聘平台。");
+});
+
+test("Offer approver and template defaults round-trip through job definition load and save", async () => {
+  const configured = definitionResource({ job: { offer_approver_id: OFFER_APPROVER_ID, offer_template_id: OFFER_TEMPLATE_ID } });
+  const cleared = definitionResource({ job: { offer_approver_id: null, offer_template_id: null, version: 8 } });
+  const { client, calls } = queuedClient([
+    configured,
+    { data: { stages: {}, total: 0 } },
+    configured,
+    cleared,
+  ]);
+  const keys = ["preserve-defaults", "clear-defaults"];
+  const controller = createJobController({ client, idempotencyKey: () => keys.shift() });
+  const definition = await controller.loadDefinition(JOB_ID);
+  const values = {
+    name: definition.name,
+    priority: definition.priority,
+    hiringOwnerId: definition.hiringOwnerId,
+    hiringManagerIds: definition.hiringManagerIds,
+  };
+
+  assert.equal(definition.offerApproverId, OFFER_APPROVER_ID);
+  assert.equal(definition.offerTemplateId, OFFER_TEMPLATE_ID);
+  await controller.saveDefinition(values, { job: definition });
+  const result = await controller.saveDefinition({ ...values, offerApproverId: null, offerTemplateId: null }, { job: definition });
+
+  assert.deepEqual(calls.slice(2).map(({ options }) => ({
+    offer_approver_id: options.body.offer_approver_id,
+    offer_template_id: options.body.offer_template_id,
+  })), [
+    { offer_approver_id: OFFER_APPROVER_ID, offer_template_id: OFFER_TEMPLATE_ID },
+    { offer_approver_id: null, offer_template_id: null },
+  ]);
+  assert.equal(result.offerApproverId, "");
+  assert.equal(result.offerTemplateId, "");
 });
 
 test("409 recovery preserves form values, refreshes the version baseline, and retries with the new If-Match", async () => {

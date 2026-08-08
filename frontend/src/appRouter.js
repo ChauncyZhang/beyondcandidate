@@ -3,6 +3,7 @@ const candidateTabSlugs = Object.freeze({
   "职位申请": "applications",
   "筛选证据": "evidence",
   "面试与反馈": "interviews",
+  "Offer": "offer",
   "时间线": "timeline",
 });
 
@@ -22,6 +23,7 @@ const settingsRoutes = Object.freeze({
   }),
   "AI 设置": "/settings/ai",
   "飞书集成": "/settings/feishu",
+  "Offer 设置": "/settings/offers",
   "审计与数据治理": "/settings/governance",
 });
 
@@ -79,7 +81,7 @@ export function parseAppRoute(location) {
     };
   }
   match = pathname.match(/^\/candidates\/([^/]+)$/);
-  if (match) return { ...base, kind: "candidates", nav: "候选人", mode: "detail", id: decodeURIComponent(match[1]), tab: candidateTabsBySlug[searchParams.get("tab")] || "档案与简历" };
+  if (match) return { ...base, kind: "candidates", nav: "候选人", mode: "detail", id: decodeURIComponent(match[1]), tab: candidateTabsBySlug[searchParams.get("tab")] || "档案与简历", approvalId: searchParams.get("approval") || undefined };
 
   if (pathname === "/interviews") return { ...base, kind: "interviews", nav: "面试", mode: "list" };
   if (pathname === "/interviews/new") return { ...base, kind: "interviews", nav: "面试", mode: "new", candidateId: searchParams.get("candidate") || undefined };
@@ -99,6 +101,7 @@ export function parseAppRoute(location) {
     ["/settings/templates/interview-scorecards", "流程与评价模板", "面试评价模板"],
     ["/settings/ai", "AI 设置"],
     ["/settings/feishu", "飞书集成"],
+    ["/settings/offers", "Offer 设置"],
     ["/settings/governance", "审计与数据治理"],
   ];
   const setting = settings.find(([path]) => path === pathname);
@@ -129,6 +132,7 @@ export function candidateDetailPath(candidate, tab = "档案与简历", returnTo
   if (slug && slug !== "profile") params.set("tab", slug);
   if (candidate?.applicationId) params.set("application", candidate.applicationId);
   if (candidate?.jobId) params.set("job", candidate.jobId);
+  if (candidate?.approvalId) params.set("approval", candidate.approvalId);
   if (returnTo?.startsWith("/") && !returnTo.startsWith("//")) params.set("return", returnTo);
   const search = params.toString();
   return `/candidates/${encodeURIComponent(id)}${search ? `?${search}` : ""}`;

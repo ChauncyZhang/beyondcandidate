@@ -8,6 +8,11 @@ const CANDIDATE_GOVERNANCE_READ_ROLES = new Set(["招聘管理员", "recruiting_
 const CANDIDATE_DELETION_REQUEST_ROLES = new Set(["招聘管理员", "recruiting_admin", "HR 招聘专员", "recruiter", "HR"]);
 const DELETION_APPROVAL_ROLES = new Set(["系统管理员", "system_admin"]);
 const LEGAL_HOLD_ROLES = new Set(["招聘管理员", "recruiting_admin"]);
+const OFFER_MANAGER_ROLES = new Set(["招聘管理员", "recruiting_admin", "HR 招聘专员", "recruiter", "HR"]);
+const OFFER_APPROVER_ROLES = new Set(["招聘管理员", "recruiting_admin", "用人经理", "hiring_manager"]);
+const OFFER_SETTINGS_ROLES = new Set(["招聘管理员", "recruiting_admin"]);
+const OFFER_MANAGER_ACTIONS = ["create", "update", "submit", "withdraw", "send"];
+const OFFER_APPROVER_ACTIONS = ["decide"];
 
 const RECRUITING_ACTIONS = [
   "导入简历",
@@ -21,8 +26,10 @@ const RECRUITING_ACTIONS = [
   "提交面试反馈",
   "管理人才库",
   "查看报表",
+  "管理 Offer",
+  "审批 Offer",
 ];
-const HR_RECRUITING_ACTIONS = RECRUITING_ACTIONS.filter((action) => !["评审候选人", "确认录用决策"].includes(action));
+const HR_RECRUITING_ACTIONS = RECRUITING_ACTIONS.filter((action) => !["评审候选人", "确认录用决策", "审批 Offer"].includes(action));
 
 const ROLE_CAPABILITIES = {
   系统管理员: {
@@ -52,7 +59,7 @@ const ROLE_CAPABILITIES = {
   用人经理: {
     identity: { name: "用人经理", title: "用人经理" },
     navItems: HIRING_MANAGER_NAV_ITEMS,
-    actions: ["候选人搜索", "评审候选人", "确认录用决策", "提交面试反馈", "查看报表"],
+    actions: ["候选人搜索", "评审候选人", "确认录用决策", "提交面试反馈", "查看报表", "审批 Offer"],
     settingsAccess: "无",
   },
   面试官: {
@@ -89,7 +96,8 @@ export function canEditAiSettings(role) {
 
 export function getAllowedSettingsSections(role) {
   if (role === "系统管理员") return ["组织与权限", "AI 设置", "飞书集成", "审计与数据治理"];
-  if (["招聘管理员", "HR 招聘专员", "HR"].includes(role)) return [...ALL_SETTINGS_SECTIONS];
+  if (role === "招聘管理员") return [...ALL_SETTINGS_SECTIONS, "Offer 设置"];
+  if (["HR 招聘专员", "HR"].includes(role)) return [...ALL_SETTINGS_SECTIONS];
   return [];
 }
 
@@ -127,6 +135,33 @@ export function canViewDeletionApprovalQueue(role) {
 
 export function canManageCandidateLegalHold(role) {
   return LEGAL_HOLD_ROLES.has(role);
+}
+
+export function getAllowedOfferActions(role) {
+  const actions = [];
+  if (OFFER_MANAGER_ROLES.has(role)) actions.push(...OFFER_MANAGER_ACTIONS);
+  if (OFFER_APPROVER_ROLES.has(role)) actions.push(...OFFER_APPROVER_ACTIONS);
+  return actions;
+}
+
+export function canPerformOfferAction(role, action) {
+  return getAllowedOfferActions(role).includes(action);
+}
+
+export function canCreateOffer(role) {
+  return canPerformOfferAction(role, "create");
+}
+
+export function canManageOffers(role) {
+  return OFFER_MANAGER_ROLES.has(role);
+}
+
+export function canApproveOffers(role) {
+  return canPerformOfferAction(role, "decide");
+}
+
+export function canManageOfferSettings(role) {
+  return OFFER_SETTINGS_ROLES.has(role);
 }
 
 export function getRoleIdentity(role) {

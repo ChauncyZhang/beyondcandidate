@@ -13,6 +13,12 @@ import {
   canRequestCandidateDeletion,
   canViewDeletionApprovalQueue,
   canManageCandidateLegalHold,
+  canApproveOffers,
+  canCreateOffer,
+  canManageOffers,
+  canManageOfferSettings,
+  canPerformOfferAction,
+  getAllowedOfferActions,
   getAllowedNavItems,
   getAllowedSettingsSections,
   getDefaultNavItem,
@@ -47,7 +53,7 @@ test("招聘管理员拥有完整招聘导航和设置能力", () => {
   assert.equal(getDefaultNavItem("招聘管理员"), "工作台");
   assert.equal(getSettingsAccess("招聘管理员"), "完整");
   assert.equal(canPerformAction("招聘管理员", "导入简历"), true);
-  assert.deepEqual(getAllowedSettingsSections("招聘管理员"), ["组织与权限", "流程与评价模板", "AI 设置", "飞书集成", "审计与数据治理"]);
+  assert.deepEqual(getAllowedSettingsSections("招聘管理员"), ["组织与权限", "流程与评价模板", "AI 设置", "飞书集成", "审计与数据治理", "Offer 设置"]);
   assert.equal(canEditOrganizationSettings("招聘管理员"), true);
   assert.equal(canEditAuditSettings("招聘管理员"), false);
 });
@@ -60,6 +66,7 @@ test("HR 招聘专员拥有招聘导航但设置能力有限", () => {
   assert.equal(canPerformAction("HR 招聘专员", "确认录用结果"), true);
   assert.equal(canPerformAction("HR 招聘专员", "评审候选人"), false);
   assert.equal(canPerformAction("HR 招聘专员", "确认录用决策"), false);
+  assert.equal(getAllowedSettingsSections("HR 招聘专员").includes("Offer 设置"), false);
 });
 
 test("面试官只能访问工作台和面试", () => {
@@ -153,4 +160,43 @@ test("候选人治理权限按四种能力独立且未知角色默认拒绝", ()
     assert.equal(canViewDeletionApprovalQueue(role), approve, `${role} approval queue`);
     assert.equal(canManageCandidateLegalHold(role), hold, `${role} legal hold`);
   }
+});
+
+test("Offer 本地能力矩阵与后端角色边界一致且未知角色默认拒绝", () => {
+  const matrix = [
+    ["系统管理员", [], false],
+    ["system_admin", [], false],
+    ["招聘管理员", ["create", "update", "submit", "withdraw", "send", "decide"], true],
+    ["recruiting_admin", ["create", "update", "submit", "withdraw", "send", "decide"], true],
+    ["HR 招聘专员", ["create", "update", "submit", "withdraw", "send"], false],
+    ["recruiter", ["create", "update", "submit", "withdraw", "send"], false],
+    ["HR", ["create", "update", "submit", "withdraw", "send"], false],
+    ["用人经理", ["decide"], false],
+    ["hiring_manager", ["decide"], false],
+    ["面试官", [], false],
+    ["interviewer", [], false],
+    ["未知角色", [], false],
+  ];
+
+  for (const [role, actions, settings] of matrix) {
+    assert.deepEqual(getAllowedOfferActions(role), actions, `${role} actions`);
+    assert.equal(canCreateOffer(role), actions.includes("create"), `${role} create`);
+    assert.equal(canManageOffers(role), actions.includes("create"), `${role} manage`);
+    assert.equal(canApproveOffers(role), actions.includes("decide"), `${role} decide`);
+    assert.equal(canManageOfferSettings(role), settings, `${role} settings`);
+    if (["招聘管理员", "HR 招聘专员", "HR", "用人经理"].includes(role)) {
+      assert.equal(canPerformAction(role, "管理 Offer"), actions.includes("create"), `${role} localized manage`);
+      assert.equal(canPerformAction(role, "审批 Offer"), actions.includes("decide"), `${role} localized decide`);
+    }
+    for (const action of ["create", "update", "submit", "withdraw", "send", "decide"]) {
+      assert.equal(canPerformOfferAction(role, action), actions.includes(action), `${role} ${action}`);
+    }
+    assert.equal(canPerformOfferAction(role, "unknown"), false, `${role} unknown action`);
+  }
+});
+
+test("Offer action arrays are defensive copies", () => {
+  const actions = getAllowedOfferActions("招聘管理员");
+  actions.length = 0;
+  assert.equal(canPerformOfferAction("招聘管理员", "create"), true);
 });

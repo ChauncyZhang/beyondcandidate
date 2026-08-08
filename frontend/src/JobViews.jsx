@@ -143,7 +143,7 @@ function JobDialog({ onClose, onDiscard, onSave, saving }) {
   return <div className="job-confirm-backdrop" role="presentation" onMouseDown={onClose}><section className="job-confirm" role="dialog" aria-modal="true" aria-label="保存未完成的职位" onMouseDown={(event) => event.stopPropagation()}><header><CircleAlert size={21} /><h3>职位尚未保存</h3></header><p>你填写的内容还没有保存。可以先保存为草稿，或者放弃本次修改。</p><footer><button className="button secondary" type="button" onClick={onClose} disabled={saving}>继续编辑</button><button className="button danger-text" type="button" onClick={onDiscard} disabled={saving}>放弃修改</button><button className="button primary" type="button" onClick={onSave} disabled={saving}>保存草稿</button></footer></section></div>;
 }
 
-function JobForm({ initialJob, initialDraft, departments, recruiters, recruitersStatus, hiringManagers, hiringManagersStatus, workflowTemplates, workflowTemplatesStatus, onBack, onDiscard, onSubmit, onRetryConflictRefresh, onManageDepartments, onManageTemplates, onDraftChange, onDraftClear = () => {}, onRetryRecruiters, onRetryHiringManagers, pageActionHost }) {
+function JobForm({ initialJob, initialDraft, departments, recruiters, recruitersStatus, hiringManagers, hiringManagersStatus, workflowTemplates, workflowTemplatesStatus, offerTemplates, offerTemplatesStatus, onBack, onDiscard, onSubmit, onRetryConflictRefresh, onManageDepartments, onManageTemplates, onManageOfferSettings, onDraftChange, onDraftClear = () => {}, onRetryRecruiters, onRetryHiringManagers, pageActionHost }) {
   const actions = getJobFormActions(initialJob);
   const [values, setValues] = useState({
     name: initialJob?.name || initialDraft?.name || "",
@@ -159,6 +159,8 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
     niceToHave: initialJob?.niceToHave?.join("、") || initialDraft?.niceToHave || "",
     process: initialJob ? formProcessTemplate(initialJob.process) : formProcessTemplate(initialDraft?.process),
     workflowTemplateId: initialJob?.workflowTemplateId || initialDraft?.workflowTemplateId || "",
+    offerApproverId: initialJob?.offerApproverId || initialDraft?.offerApproverId || "",
+    offerTemplateId: initialJob?.offerTemplateId || initialDraft?.offerTemplateId || "",
     llmEnabled: initialJob ? initialJob.llmEnabled === true : initialDraft?.llmEnabled === true,
   });
   const [errors, setErrors] = useState({});
@@ -268,6 +270,7 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
   const completion = [values.name, values.departmentId, values.jd, values.mustHave, values.process].filter(Boolean).length;
   const reviewerSelectionInvalid = !values.hiringOwnerId || !values.hiringManagerIds.includes(values.hiringOwnerId);
   const workflowUnavailable = workflowTemplatesStatus !== "ready" || !values.workflowTemplateId;
+  const offerApproverOptions = [...new Map([...recruiters, ...hiringManagers].map((item) => [item.id, item])).values()];
   return (
     <div className="job-page job-form-page">
       <PagePrimaryAction host={pageActionHost}><>{actions.secondary && <button className="button secondary" type="button" onClick={() => submit(actions.secondary.publish)} disabled={saving || workflowUnavailable || reviewerSelectionInvalid}>{saving ? "正在保存…" : actions.secondary.label}</button>}<button className="button primary" type="button" onClick={() => submit(actions.primary.publish)} disabled={saving || workflowUnavailable || reviewerSelectionInvalid}>{saving ? "正在保存…" : actions.primary.label}</button></></PagePrimaryAction>
@@ -294,6 +297,15 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
             <section className="form-section recruitment-config"><header><span>3</span><div><h3>招聘配置</h3><p>选择招聘流程；LLM 是当前唯一的评分和路由来源。</p></div></header><div className="job-fields">
               <div className="job-template-field"><span className="field-label-row"><label htmlFor="job-workflow-template">流程模板</label><button type="button" onClick={onManageTemplates}>管理模板</button></span><select id="job-workflow-template" aria-label="流程模板" value={values.workflowTemplateId} disabled={workflowTemplatesStatus === "loading" || !workflowTemplates.length} onChange={(event) => changeWorkflowTemplate(event.target.value)}><option value="">{workflowTemplatesStatus === "loading" ? "正在加载流程模板…" : "请选择流程模板"}</option>{workflowTemplates.map((template) => <option key={template.id} value={template.id} disabled={template.status === "inactive" && template.id !== values.workflowTemplateId}>{template.name}{template.status === "inactive" ? "（已停用）" : ""}</option>)}</select>{workflowTemplatesStatus === "error" && <small className="field-error">流程模板加载失败，请稍后重试。</small>}{errors.process && <small className="field-error">{errors.process}</small>}</div>
               <div className="process-summary"><strong>阶段摘要</strong><span>新简历 → 用人经理评审 → 待安排面试 → {(workflowTemplates.find((item) => item.id === values.workflowTemplateId)?.rounds || []).join(" → ") || "请选择模板"} → 用人经理录用决策</span></div>
+              <div className="job-offer-defaults">
+                <div className="field-label-row"><strong>Offer 默认配置</strong><button type="button" onClick={onManageOfferSettings}>管理 Offer 设置</button></div>
+                <div className="job-fields two-columns">
+                  <label>默认 Offer 审批人<select aria-label="默认 Offer 审批人" value={values.offerApproverId} disabled={recruitersStatus === "loading" || hiringManagersStatus === "loading"} onChange={(event) => change("offerApproverId", event.target.value)}><option value="">暂不配置</option>{offerApproverOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+                  <label>默认 Offer 模板<select aria-label="默认 Offer 模板" value={values.offerTemplateId} disabled={offerTemplatesStatus === "loading"} onChange={(event) => change("offerTemplateId", event.target.value)}><option value="">暂不配置</option>{offerTemplates.map((item) => <option key={item.id} value={item.id} disabled={item.status === "inactive" && item.id !== values.offerTemplateId}>{item.name}{item.status === "inactive" ? "（已停用）" : ""}</option>)}</select></label>
+                </div>
+                <small className="field-state">职位可在未配置时保存；但 HR 提交 Offer 审批前必须配置默认审批人，模板也可在创建 Offer 时明确选择。</small>
+                {offerTemplatesStatus === "error" && <small className="field-error" role="alert">Offer 模板加载失败，当前职位仍可保存。</small>}
+              </div>
               <div className="toggle-row ai-evaluation-row"><span><Bot size={18} /><span><strong>AI 简历评估</strong><small>启用后由 LLM 生成评分、结论与依据，并自动转交默认评审人；其他负责人可查看评审。</small></span></span><label className="compact-switch"><input aria-label="AI 简历评估" type="checkbox" checked={values.llmEnabled} onChange={(event) => change("llmEnabled", event.target.checked)} /><span aria-hidden="true" /></label></div>
             </div></section>
           </div>
@@ -352,7 +364,7 @@ function JobDetail({ state, lifecycleState, refreshState, onBack, onEdit, onImpo
   );
 }
 
-export function JobsWorkspace({ mode, setMode, selectedJob, setSelectedJob, listState, onLoadJobs, jobController, candidateController, onRefreshJobMutation, onNotify, onImport, onOpenCandidate, onManageDepartments, onManageTemplates, initialDraft, onDraftChange, onDraftClear, pageActionHost, onCreateJob }) {
+export function JobsWorkspace({ mode, setMode, selectedJob, setSelectedJob, listState, onLoadJobs, jobController, candidateController, offerController, onRefreshJobMutation, onNotify, onImport, onOpenCandidate, onManageDepartments, onManageTemplates, onManageOfferSettings, initialDraft, onDraftChange, onDraftClear, pageActionHost, onCreateJob }) {
   const [detailState, setDetailState] = useState({ status: "idle", job: null, candidates: null });
   const [lifecycleState, setLifecycleState] = useState({ status: "idle", error: "", conflict: false });
   const [refreshState, setRefreshState] = useState({ error: "", retrying: false, kind: "updated" });
@@ -360,6 +372,7 @@ export function JobsWorkspace({ mode, setMode, selectedJob, setSelectedJob, list
   const [formRecruiters, setFormRecruiters] = useState({ status: "idle", records: [] });
   const [formHiringManagers, setFormHiringManagers] = useState({ status: "idle", records: [] });
   const [formWorkflowTemplates, setFormWorkflowTemplates] = useState({ status: "idle", records: [] });
+  const [formOfferTemplates, setFormOfferTemplates] = useState({ status: "idle", records: [] });
   const [recruiterDirectoryVersion, setRecruiterDirectoryVersion] = useState(0);
   const [hiringManagerDirectoryVersion, setHiringManagerDirectoryVersion] = useState(0);
   const detailRequestRef = useRef(null);
@@ -368,6 +381,7 @@ export function JobsWorkspace({ mode, setMode, selectedJob, setSelectedJob, list
   const recruiterRequestRef = useRef(null);
   const hiringManagerRequestRef = useRef(null);
   const workflowTemplateRequestRef = useRef(null);
+  const offerTemplateRequestRef = useRef(null);
   const skipNextDetailLoadRef = useRef(false);
   const detailSequenceRef = useRef(0);
   const candidateSequenceRef = useRef(0);
@@ -472,6 +486,22 @@ export function JobsWorkspace({ mode, setMode, selectedJob, setSelectedJob, list
     return () => controller.abort();
   }, [mode]);
 
+  useEffect(() => {
+    if (mode !== "form") return undefined;
+    offerTemplateRequestRef.current?.abort();
+    const controller = new AbortController();
+    offerTemplateRequestRef.current = controller;
+    setFormOfferTemplates({ status: "loading", records: [] });
+    void offerController.listTemplates({ signal: controller.signal }).then((records) => {
+      if (offerTemplateRequestRef.current === controller) setFormOfferTemplates({ status: "ready", records });
+    }).catch((error) => {
+      if (error?.name !== "AbortError" && offerTemplateRequestRef.current === controller) setFormOfferTemplates({ status: "error", records: [] });
+    }).finally(() => {
+      if (offerTemplateRequestRef.current === controller) offerTemplateRequestRef.current = null;
+    });
+    return () => controller.abort();
+  }, [mode, offerController]);
+
   useEffect(() => () => {
     detailRequestRef.current?.abort();
     candidateRequestRef.current?.abort();
@@ -479,6 +509,7 @@ export function JobsWorkspace({ mode, setMode, selectedJob, setSelectedJob, list
     recruiterRequestRef.current?.abort();
     hiringManagerRequestRef.current?.abort();
     workflowTemplateRequestRef.current?.abort();
+    offerTemplateRequestRef.current?.abort();
   }, []);
 
   const loadCandidates = useCallback(async (filters, { append = false, cursor = null } = {}) => {
@@ -581,7 +612,7 @@ export function JobsWorkspace({ mode, setMode, selectedJob, setSelectedJob, list
   }
 
   if (mode === "form" && selectedJob?.formMode === "edit" && ["idle", "loading"].includes(detailState.status)) return <div className="job-request-state" role="status">正在加载职位详情…</div>;
-  if (mode === "form") return <JobForm initialJob={selectedJob?.formMode === "edit" ? selectedJob : null} initialDraft={initialDraft} departments={formDepartments} recruiters={formRecruiters.records} recruitersStatus={formRecruiters.status} hiringManagers={formHiringManagers.records} hiringManagersStatus={formHiringManagers.status} workflowTemplates={formWorkflowTemplates.records} workflowTemplatesStatus={formWorkflowTemplates.status} onBack={() => { setSelectedJob(null); setMode("list"); }} onDiscard={() => { setSelectedJob(null); setMode("list"); }} onSubmit={saveDefinition} onRetryConflictRefresh={retryEditConflictRefresh} onManageDepartments={onManageDepartments} onManageTemplates={onManageTemplates} onDraftChange={onDraftChange} onDraftClear={onDraftClear} onRetryRecruiters={() => setRecruiterDirectoryVersion((current) => current + 1)} onRetryHiringManagers={() => setHiringManagerDirectoryVersion((current) => current + 1)} pageActionHost={pageActionHost} />;
+  if (mode === "form") return <JobForm initialJob={selectedJob?.formMode === "edit" ? selectedJob : null} initialDraft={initialDraft} departments={formDepartments} recruiters={formRecruiters.records} recruitersStatus={formRecruiters.status} hiringManagers={formHiringManagers.records} hiringManagersStatus={formHiringManagers.status} workflowTemplates={formWorkflowTemplates.records} workflowTemplatesStatus={formWorkflowTemplates.status} offerTemplates={formOfferTemplates.records} offerTemplatesStatus={formOfferTemplates.status} onBack={() => { setSelectedJob(null); setMode("list"); }} onDiscard={() => { setSelectedJob(null); setMode("list"); }} onSubmit={saveDefinition} onRetryConflictRefresh={retryEditConflictRefresh} onManageDepartments={onManageDepartments} onManageTemplates={onManageTemplates} onManageOfferSettings={onManageOfferSettings} onDraftChange={onDraftChange} onDraftClear={onDraftClear} onRetryRecruiters={() => setRecruiterDirectoryVersion((current) => current + 1)} onRetryHiringManagers={() => setHiringManagerDirectoryVersion((current) => current + 1)} pageActionHost={pageActionHost} />;
   if (mode === "detail" && selectedJob) return <JobDetail state={detailState} lifecycleState={lifecycleState} refreshState={refreshState} onBack={() => { detailRequestRef.current?.abort(); candidateRequestRef.current?.abort(); setSelectedJob(null); setMode("list"); }} onEdit={() => { setSelectedJob((current) => ({ ...current, formMode: "edit" })); setMode("form"); }} onImport={onImport} onOpenCandidate={onOpenCandidate} onReload={() => loadDetail(selectedJob)} onRetryRefresh={retryMutationRefresh} onLoadCandidates={loadCandidates} onTransition={transition} />;
   return <JobList state={listState} onLoad={onLoadJobs} onOpen={(job) => { setSelectedJob(job); setMode("detail"); }} onCreate={onCreateJob} pageActionHost={pageActionHost} />;
 }
