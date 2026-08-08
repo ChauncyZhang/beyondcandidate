@@ -52,8 +52,11 @@ export function parseAppRoute(location) {
   const searchParams = new URLSearchParams(location?.search || "");
   const base = { searchParams, returnTo: safeReturnTo(searchParams) };
 
+  let match = pathname.match(/^\/offer\/([^/]+)$/);
+  if (match) return { ...base, kind: "public-offer", token: decodeURIComponent(match[1]) };
+
   if (pathname === "/workbench") return { ...base, kind: "workbench", nav: "工作台" };
-  let match = pathname.match(/^\/offers\/([^/]+)$/);
+  match = pathname.match(/^\/offers\/([^/]+)$/);
   if (match) return { ...base, kind: "offer", nav: "工作台", mode: "detail", offerId: decodeURIComponent(match[1]), approvalId: searchParams.get("approval") || undefined };
   if (pathname === "/jobs") return { ...base, kind: "jobs", nav: "职位", mode: "list" };
   if (pathname === "/jobs/new") return { ...base, kind: "jobs", nav: "职位", mode: "new" };

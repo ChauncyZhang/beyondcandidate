@@ -1,0 +1,24 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createPublicOfferController } from "./publicOfferController.js";
+
+test("public offer requests use the path token and omit credentials", async () => {
+  const calls = [];
+  const controller = createPublicOfferController({ fetchImpl: async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ data: { status: "sent", job_title: "平台工程师" } }), { headers: { "Content-Type": "application/json" } });
+  } });
+  await controller.load("secret-token");
+  await controller.respond("secret-token", { decision: "accepted", expected_start_date: "2026-09-01" });
+  assert.deepEqual(calls.map(({ path, options }) => [path, options.credentials, options.method]), [
+    ["/api/public/v1/offers/secret-token", "omit", "GET"],
+    ["/api/public/v1/offers/secret-token/responses", "omit", "POST"],
+  ]);
+});
+
+test("public projection normalizes safe offer fields and response state", () => {
+  const controller = createPublicOfferController();
+  assert.deepEqual(controller.normalize({ data: { status: "accepted", job_title: "平台工程师", company_name: "示例公司", candidate_response_deadline: "2026-09-01T00:00:00Z", content: { summary: "Offer 摘要" } } }), {
+    status: "accepted", jobTitle: "平台工程师", companyName: "示例公司", deadline: "2026-09-01T00:00:00Z", summary: "Offer 摘要", location: "", contact: "", response: null,
+  });
+});

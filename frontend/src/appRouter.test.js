@@ -19,6 +19,7 @@ const UUID_A = "11111111-1111-4111-8111-111111111111";
 test("parses every required application route from the URL", () => {
   const cases = [
     ["/workbench", { kind: "workbench", nav: "工作台" }],
+    ["/offer/a-public-token", { kind: "public-offer", token: "a-public-token" }],
     [`/offers/${UUID_A}?approval=approval-1&return=%2Fworkbench`, { kind: "offer", nav: "工作台", mode: "detail", offerId: UUID_A, approvalId: "approval-1", returnTo: "/workbench" }],
     ["/jobs", { kind: "jobs", nav: "职位", mode: "list" }],
     ["/jobs/new", { kind: "jobs", nav: "职位", mode: "new" }],

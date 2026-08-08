@@ -79,6 +79,7 @@ import { getRecentScreeningTaskStorageKey, LEGACY_RECENT_SCREENING_TASK_STORAGE_
 import { buildWorkbenchNotificationGroups, countWorkbenchNotifications, removeWorkbenchNotification } from "./workbenchNotifications.js";
 import { CandidateOfferView, OfferApprovalTasks } from "./OfferViews.jsx";
 import { offerController as defaultOfferController } from "./offerController.js";
+import { PublicOfferView } from "./PublicOfferView.jsx";
 
 const navItems = [
   ["工作台", Home],
@@ -183,6 +184,8 @@ function inviteTokenFromHash() {
 
 export function App({ controller = sessionController, screeningController = defaultScreeningController, candidateController = defaultCandidateController, jobController = defaultJobController, workbenchController = defaultWorkbenchController, offerController = defaultOfferController, interviewController = defaultInterviewController, talentController = defaultTalentController, reportController = defaultReportController, accountClient = apiClient }) {
   const navigate = useNavigate();
+  const location = useLocation();
+  const publicRoute = useMemo(() => parseAppRoute(location), [location.pathname, location.search]);
   const session = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const [inviteToken, setInviteToken] = useState(inviteTokenFromHash);
   const [acceptedEmail, setAcceptedEmail] = useState("");
@@ -194,14 +197,17 @@ export function App({ controller = sessionController, screeningController = defa
   }, [controller, navigate]);
 
   useEffect(() => {
+    if (publicRoute.kind === "public-offer") return undefined;
     void controller.bootstrap();
-  }, [controller]);
+    return undefined;
+  }, [controller, publicRoute.kind]);
   useEffect(() => {
     const handleHashChange = () => setInviteToken(inviteTokenFromHash());
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
 
+  if (publicRoute.kind === "public-offer") return <PublicOfferView token={publicRoute.token} />;
   if (session.status === "bootstrapping") return <SessionLoadingView />;
   if (session.status === "anonymous") {
     if (inviteToken) return <InviteAcceptView token={inviteToken} client={accountClient} onAccepted={(email) => { window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`); setAcceptedEmail(email); setInviteToken(""); }} />;
