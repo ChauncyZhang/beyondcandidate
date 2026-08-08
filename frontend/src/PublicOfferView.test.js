@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import fs from "node:fs";
+import { publicOfferState } from "./publicOfferViewState.js";
 
-const source = fs.readFileSync(new URL("./PublicOfferView.jsx", import.meta.url), "utf8");
-test("candidate page has semantic confirmation and accessible response states", () => {
-  assert.match(source, /role="dialog"/);
-  assert.match(source, /expected_start_date/);
-  assert.match(source, /aria-live="polite"/);
-  assert.match(source, /disabled=\{submitting\}/);
-  assert.match(source, /controller\.respond/);
+test("public Offer state handles active and all terminal states", () => {
+  assert.equal(publicOfferState({ status: "sent" }), "active");
+  for (const status of ["accepted", "declined", "expired", "withdrawn", "superseded", "invalid"]) assert.equal(publicOfferState({ status }), status);
+  assert.equal(publicOfferState(null), "invalid");
+});
+test("accept validation requires expected start date", () => {
+  assert.equal(publicOfferState({ status: "sent" }, "accepted", ""), "start-date-required");
 });

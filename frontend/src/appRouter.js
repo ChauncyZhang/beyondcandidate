@@ -53,7 +53,7 @@ export function parseAppRoute(location) {
   const base = { searchParams, returnTo: safeReturnTo(searchParams) };
 
   let match = pathname.match(/^\/offer\/([^/]+)$/);
-  if (match) return { ...base, kind: "public-offer", token: decodeURIComponent(match[1]) };
+  if (match) { try { return { ...base, kind: "public-offer", token: decodeURIComponent(match[1]) }; } catch { return { ...base, kind: "public-offer", token: "", invalid: true }; } }
 
   if (pathname === "/workbench") return { ...base, kind: "workbench", nav: "工作台" };
   match = pathname.match(/^\/offers\/([^/]+)$/);

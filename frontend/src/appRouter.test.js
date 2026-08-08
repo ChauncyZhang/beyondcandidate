@@ -54,6 +54,10 @@ test("parses every required application route from the URL", () => {
   }
 });
 
+test("malformed public token is an invalid route instead of throwing", () => {
+  assert.deepEqual(parseAppRoute(new URL("/offer/%E0%A4%A", "https://ats.example.test")), { searchParams: new URLSearchParams(), returnTo: undefined, kind: "public-offer", token: "", invalid: true });
+});
+
 test("direct Offer route preserves approval and return context across refresh", () => {
   const path = offerDetailPath(UUID_A, "approval-1", "/workbench");
   assert.equal(path, `/offers/${UUID_A}?approval=approval-1&return=%2Fworkbench`);

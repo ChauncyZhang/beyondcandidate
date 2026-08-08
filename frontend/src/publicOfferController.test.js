@@ -22,3 +22,21 @@ test("public projection normalizes safe offer fields and response state", () => 
     status: "accepted", jobTitle: "平台工程师", companyName: "示例公司", deadline: "2026-09-01T00:00:00Z", summary: "Offer 摘要", location: "", contact: "", response: null,
   });
 });
+
+test("responses send accepted and declined JSON exactly once per in-flight token", async () => {
+  const calls = []; let resolve;
+  const controller = createPublicOfferController({ fetchImpl: (path, options) => { calls.push({ path, options }); return new Promise((done) => { resolve = () => done(new Response(JSON.stringify({ data: { status: "accepted" } }), { headers: { "Content-Type": "application/json" } })); }); } });
+  const accepted = controller.respond("token", { decision: "accepted", expected_start_date: "2026-10-01" });
+  const duplicate = controller.respond("token", { decision: "accepted", expected_start_date: "2026-10-01" });
+  assert.equal(accepted, duplicate);
+  assert.deepEqual(JSON.parse(calls[0].options.body), { decision: "accepted", expected_start_date: "2026-10-01" });
+  resolve(); await accepted;
+  const declined = controller.respond("token", { decision: "declined", reason_text: "时间不合适" });
+  assert.deepEqual(JSON.parse(calls[1].options.body), { decision: "declined", reason_text: "时间不合适" });
+});
+
+test("PDF fetch omits credentials", async () => {
+  const calls = []; const controller = createPublicOfferController({ fetchImpl: async (path, options) => { calls.push({ path, options }); return new Response(new Blob(["pdf"]), { headers: { "Content-Type": "application/pdf" } }); } });
+  await controller.fetchPdf("token");
+  assert.deepEqual(calls[0], { path: "/api/public/v1/offers/token/pdf", options: { method: "GET", credentials: "omit" } });
+});
