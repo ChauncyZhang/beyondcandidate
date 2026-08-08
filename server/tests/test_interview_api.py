@@ -1072,6 +1072,19 @@ def test_interview_resend_uses_current_confirmed_email_preserves_ics_and_enforce
             database.commit()
 
         scoped_headers = login(client, "scoped-resend@example.test")
+        authorized_wrong_version = client.post(
+            f"/api/v1/email-deliveries/{original_ids[0]}/resend",
+            headers={
+                **scoped_headers,
+                "If-Match": '"999"',
+                "Idempotency-Key": "scoped-interview-resend-wrong-version",
+            },
+        )
+        assert (
+            authorized_wrong_version.status_code,
+            authorized_wrong_version.json()["code"],
+        ) == (409, "resource_version_conflict")
+
         first_resend = None
         for index, original in enumerate(original_deliveries):
             response = client.post(
@@ -1109,16 +1122,23 @@ def test_interview_resend_uses_current_confirmed_email_preserves_ics_and_enforce
             "resource_version_conflict",
         )
 
-        unrelated_headers = login(client, "unrelated-resend@example.test")
-        unrelated = client.post(
-            f"/api/v1/email-deliveries/{original_ids[0]}/resend",
-            headers={**unrelated_headers, "If-Match": '"2"', "Idempotency-Key": "unrelated-resend"},
-        )
-        interviewer_headers = login(client, "assigned@example.test")
-        interviewer = client.post(
-            f"/api/v1/email-deliveries/{original_ids[0]}/resend",
-            headers={**interviewer_headers, "If-Match": '"2"', "Idempotency-Key": "interviewer-resend"},
-        )
+        unauthorized_responses = []
+        for caller, email in (
+            ("unrelated", "unrelated-resend@example.test"),
+            ("interviewer", "assigned@example.test"),
+        ):
+            caller_headers = login(client, email)
+            for version_name, version in (("current", '"2"'), ("wrong", '"999"')):
+                unauthorized_responses.append(
+                    client.post(
+                        f"/api/v1/email-deliveries/{original_ids[0]}/resend",
+                        headers={
+                            **caller_headers,
+                            "If-Match": version,
+                            "Idempotency-Key": f"{caller}-{version_name}-version-resend",
+                        },
+                    )
+                )
         cross_login = client.post(
             "/api/v1/auth/login",
             json={
@@ -1129,18 +1149,27 @@ def test_interview_resend_uses_current_confirmed_email_preserves_ics_and_enforce
             headers={"Origin": "https://hr.example.test"},
         )
         assert cross_login.status_code == 200
-        cross_tenant = client.post(
-            f"/api/v1/email-deliveries/{original_ids[0]}/resend",
-            headers={
-                "Origin": "https://hr.example.test",
-                "X-CSRF-Token": cross_login.headers["X-CSRF-Token"],
-                "If-Match": '"2"',
-                "Idempotency-Key": "cross-tenant-resend",
-            },
-        )
+        cross_headers = {
+            "Origin": "https://hr.example.test",
+            "X-CSRF-Token": cross_login.headers["X-CSRF-Token"],
+        }
+        for version_name, version in (("current", '"2"'), ("wrong", '"999"')):
+            unauthorized_responses.append(
+                client.post(
+                    f"/api/v1/email-deliveries/{original_ids[0]}/resend",
+                    headers={
+                        **cross_headers,
+                        "If-Match": version,
+                        "Idempotency-Key": f"cross-tenant-{version_name}-version-resend",
+                    },
+                )
+            )
 
-    for response in (unrelated, interviewer, cross_tenant):
-        assert (response.status_code, response.json()["code"]) == (404, "resource_not_found")
+    for response in unauthorized_responses:
+        assert (response.status_code, response.json()["code"]) == (
+            404,
+            "resource_not_found",
+        )
     with app.state.identity_store.sync_session() as database:
         originals = {
             item.id: item

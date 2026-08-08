@@ -202,7 +202,6 @@ def resend_delivery(delivery_id: uuid.UUID,request:Request,if_match:str|None=Hea
             def action():
                 original=db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id==principal.organization_id,EmailDelivery.id==delivery_id).with_for_update())
                 if original is None: raise LookupError
-                if original.version != expected: raise RuntimeError("version")
                 if original.resource_type in INTERVIEW_MESSAGE_KINDS:
                     candidate_id = db.scalar(
                         select(Application.candidate_id)
@@ -224,16 +223,21 @@ def resend_delivery(delivery_id: uuid.UUID,request:Request,if_match:str|None=Hea
                     )
                     if candidate_id is None:
                         raise PermissionError
-                    recipient = resolve_confirmed_candidate_email(
+                else:
+                    if not _recruiting_admin(principal):
+                        raise PermissionError
+                    candidate_id = None
+                if original.version != expected: raise RuntimeError("version")
+                recipient = (
+                    resolve_confirmed_candidate_email(
                         db,
                         organization_id=principal.organization_id,
                         candidate_id=candidate_id,
                         contact_cipher=request.app.state.contact_cipher,
                     )
-                else:
-                    if not _recruiting_admin(principal):
-                        raise PermissionError
-                    recipient=None
+                    if candidate_id is not None
+                    else None
+                )
                 delivery=enqueue_delivery(db,DeliveryCommand(organization_id=principal.organization_id,recipient=recipient,recipient_ciphertext=original.recipient_ciphertext if recipient is None else None,recipient_masked=original.recipient_masked if recipient is None else None,reply_to_email=original.reply_to_email,reply_to_name=original.reply_to_name,subject=original.rendered_subject,body=original.rendered_body,resource_type=original.resource_type,resource_id=original.resource_id,idempotency_key=key,operation=f"email.delivery.resend:{delivery_id}",created_by=principal.user_id,template_id=original.template_id,template_version=original.template_version,parent_delivery_id=original.id,trace_id=request.state.trace_id,attachment_filename=original.attachment_filename,attachment_content_type=original.attachment_content_type,attachment_ciphertext=original.attachment_ciphertext),cipher=request.app.state.email_secret_cipher,sender_policy=SenderPolicy(original.sender_email,original.sender_name))
                 original.version += 1
                 return 202,{"data":_delivery_view(delivery)}

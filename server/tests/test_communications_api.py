@@ -125,18 +125,19 @@ def test_test_send_history_and_resend_use_saved_config_and_opaque_jobs(tmp_path,
             "Origin": "https://hr.example.test",
             "X-CSRF-Token": recruiter_login.headers["X-CSRF-Token"],
         }
-        denied_generic_resend = client.post(
-            f"/api/v1/email-deliveries/{delivery_id}/resend",
-            headers={
-                **recruiter,
-                "If-Match": '"2"',
-                "Idempotency-Key": "generic-recruiter-resend-denied",
-            },
-        )
-        assert (denied_generic_resend.status_code, denied_generic_resend.json()["code"]) == (
-            404,
-            "resource_not_found",
-        )
+        for version_name, version in (("current", '"2"'), ("wrong", '"999"')):
+            denied_generic_resend = client.post(
+                f"/api/v1/email-deliveries/{delivery_id}/resend",
+                headers={
+                    **recruiter,
+                    "If-Match": version,
+                    "Idempotency-Key": f"generic-recruiter-{version_name}-version-denied",
+                },
+            )
+            assert (
+                denied_generic_resend.status_code,
+                denied_generic_resend.json()["code"],
+            ) == (404, "resource_not_found")
     with app.state.identity_store.sync_session() as db:
         original = db.get(EmailDelivery, delivery_id)
         explicit_delivery = db.get(EmailDelivery, uuid.UUID(explicit.json()["data"]["id"]))
