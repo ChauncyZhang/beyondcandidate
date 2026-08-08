@@ -136,20 +136,41 @@ class OfferApproval(OfferRecord, Base):
 class OfferResponse(OfferRecord, Base):
     __tablename__ = "offer_responses"
     offer_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    # Nullable only for pre-0035 history; the public response service always writes it.
+    # Snapshot columns remain nullable only for history created before migration 0035.
     offer_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    version_number: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
+    source: Mapped[str | None] = mapped_column(String(16))
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     expected_start_date: Mapped[date | None] = mapped_column(Date)
     reason_text: Mapped[str | None] = mapped_column(Text)
+    communication_channel: Mapped[str | None] = mapped_column(String(16))
+    communicated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    note: Mapped[str | None] = mapped_column(Text)
     request_hash: Mapped[str | None] = mapped_column(String(64))
     responded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     __table_args__ = (
         UniqueConstraint("organization_id", "id"),
         UniqueConstraint("organization_id", "offer_id"),
         CheckConstraint("status in ('accepted','declined')", name="ck_offer_responses_status"),
-        CheckConstraint("(offer_version_id is null and expected_start_date is null and reason_text is null and request_hash is null) or (status = 'accepted' and offer_version_id is not null and expected_start_date is not null and reason_text is null and request_hash is not null) or (status = 'declined' and offer_version_id is not null and expected_start_date is null and request_hash is not null)", name="ck_offer_responses_payload"),
+        CheckConstraint(
+            "(source is null and offer_version_id is null and version_number is null and actor_user_id is null and "
+            "expected_start_date is null and reason_text is null and communication_channel is null and "
+            "communicated_at is null and note is null and request_hash is null) or "
+            "(source = 'candidate' and offer_version_id is not null and version_number >= 1 and actor_user_id is null and "
+            "communication_channel is null and communicated_at is null and note is null and request_hash is not null) or "
+            "(source = 'hr_proxy' and offer_version_id is not null and version_number >= 1 and actor_user_id is not null and "
+            "communication_channel in ('phone','wechat','email','other') and communicated_at is not null and request_hash is not null)",
+            name="ck_offer_responses_source",
+        ),
+        CheckConstraint(
+            "source is null or (status = 'accepted' and expected_start_date is not null and reason_text is null) or "
+            "(status = 'declined' and expected_start_date is null)",
+            name="ck_offer_responses_payload",
+        ),
         ForeignKeyConstraint(["organization_id", "offer_id"], ["offers.organization_id", "offers.id"], ondelete="CASCADE"),
-        ForeignKeyConstraint(["organization_id", "offer_version_id", "offer_id"], ["offer_versions.organization_id", "offer_versions.id", "offer_versions.offer_id"]),
+        ForeignKeyConstraint(["organization_id", "offer_id", "offer_version_id", "version_number"], ["offer_versions.organization_id", "offer_versions.offer_id", "offer_versions.id", "offer_versions.version_number"]),
+        ForeignKeyConstraint(["organization_id", "actor_user_id"], ["users.organization_id", "users.id"]),
     )
 
 
@@ -169,6 +190,14 @@ class OfferAccessToken(OfferRecord, Base):
         ForeignKeyConstraint(["organization_id", "offer_version_id", "offer_id"], ["offer_versions.organization_id", "offer_versions.id", "offer_versions.offer_id"]),
         Index("ix_offer_access_tokens_lookup", "token_hash"),
         Index("ix_offer_access_tokens_offer_current", "organization_id", "offer_id", "revoked_at"),
+        Index(
+            "uq_offer_access_tokens_active_offer",
+            "organization_id",
+            "offer_id",
+            unique=True,
+            postgresql_where=text("revoked_at is null"),
+            sqlite_where=text("revoked_at is null"),
+        ),
     )
 
 

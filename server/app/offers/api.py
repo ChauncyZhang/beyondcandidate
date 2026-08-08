@@ -9,8 +9,8 @@ from sqlalchemy import exists, or_, select
 
 from server.app.identity.api import problem
 from server.app.identity.models import AuditLog, Job, Organization, User
-from server.app.offers.models import Offer, OfferAccessToken, OfferApproval, OfferEvent, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
-from server.app.offers.schemas import OfferApprovalDecision, OfferCommand, OfferTemplateCommand, OfferVersionCommand, PublicOfferResponse, SpecialOfferApproversCommand
+from server.app.offers.models import Offer, OfferAccessToken, OfferApproval, OfferEvent, OfferResponse, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
+from server.app.offers.schemas import OfferApprovalDecision, OfferCommand, OfferTemplateCommand, OfferVersionCommand, ProxyOfferResponse, PublicOfferResponse, SpecialOfferApproversCommand
 from server.app.offers.service import (
     OfferApprovalError,
     OfferNotFound,
@@ -22,15 +22,17 @@ from server.app.offers.service import (
     withdraw_offer,
     issue_offer_access_token,
     public_offer_access,
+    record_proxy_offer_response,
     record_public_offer_response,
 )
 from server.app.recruiting.api import _idempotency, _principal
 from server.app.recruiting.authorization import RecruitingAction, RecruitingAuthorizationService
-from server.app.recruiting.models import Application, Candidate
+from server.app.recruiting.models import Application, Candidate, JobJdVersion
 from server.app.recruiting.service import IdempotencyConflict, persisted_idempotent
 from server.app.recruiting.service import is_eligible_offer_approver
 from server.app.communications.interview_messages import CandidateEmailUnavailable, resolve_confirmed_candidate_email
-from server.app.communications.service import DeliveryCommand, SenderPolicy, enqueue_delivery
+from server.app.communications.service import DeliveryCommand, EmailConfigurationUnavailable, SenderPolicy, enqueue_delivery
+from server.app.notifications.service import create_user_notification
 
 
 router = APIRouter()
@@ -78,7 +80,7 @@ def _application(db, principal, application_id, action=RecruitingAction.READ):
     ))
 
 
-def _offer(db, principal, offer_id, action=RecruitingAction.READ):
+def _offer(db, principal, offer_id, action=RecruitingAction.READ, *, lock=False):
     job_scope = AUTH.job_predicate(principal, action, Job)
     if action == RecruitingAction.READ:
         approval_scope = exists().where(
@@ -87,10 +89,11 @@ def _offer(db, principal, offer_id, action=RecruitingAction.READ):
             OfferApproval.assignee_id == principal.user_id,
         )
         job_scope = or_(job_scope, approval_scope)
-    return db.scalar(select(Offer).join(Job, (Job.organization_id == Offer.organization_id) & (Job.id == Offer.job_id)).where(
+    query = select(Offer).join(Job, (Job.organization_id == Offer.organization_id) & (Job.id == Offer.job_id)).where(
         Offer.organization_id == principal.organization_id, Offer.id == offer_id,
         job_scope,
-    ))
+    )
+    return db.scalar(query.with_for_update() if lock else query)
 
 
 def _can_manage(db, principal, offer):
@@ -114,6 +117,21 @@ def _is_approval_participant(db, principal, offer):
     ).limit(1)) is not None
 
 
+def _offer_response_view(response):
+    if response is None:
+        return None
+    return {
+        "id": str(response.id), "offer_id": str(response.offer_id),
+        "offer_version_id": str(response.offer_version_id) if response.offer_version_id else None,
+        "version_number": response.version_number, "decision": response.status,
+        "source": response.source, "actor_user_id": str(response.actor_user_id) if response.actor_user_id else None,
+        "expected_start_date": response.expected_start_date.isoformat() if response.expected_start_date else None,
+        "reason_text": response.reason_text, "communication_channel": response.communication_channel,
+        "communicated_at": response.communicated_at.isoformat() if response.communicated_at else None,
+        "note": response.note, "responded_at": response.responded_at.isoformat(),
+    }
+
+
 def _offer_view(db, offer, principal):
     current = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == offer.organization_id, OfferVersion.id == offer.current_version_id))
     application = db.scalar(select(Application).where(Application.organization_id == offer.organization_id, Application.id == offer.application_id))
@@ -122,6 +140,7 @@ def _offer_view(db, offer, principal):
     can_manage = _can_manage(db, principal, offer)
     can_view_sensitive = can_manage or _is_approval_participant(db, principal, offer)
     is_assignee = db.scalar(select(OfferApproval.id).where(OfferApproval.organization_id == offer.organization_id, OfferApproval.offer_id == offer.id, OfferApproval.assignee_id == principal.user_id, OfferApproval.status == "pending")) is not None
+    response = db.scalar(select(OfferResponse).where(OfferResponse.organization_id == offer.organization_id, OfferResponse.offer_id == offer.id))
     content = current.content if current and can_view_sensitive else {"redacted": True}
     return {
         "id": str(offer.id), "application_id": str(offer.application_id), "job_id": str(offer.job_id),
@@ -135,14 +154,59 @@ def _offer_view(db, offer, principal):
         "special_reason": offer.special_reason if can_view_sensitive else None, "content": content,
         "can_view_sensitive_content": can_view_sensitive,
         "pdf_ready": bool(current and current.pdf_object_key),
+        "response": _offer_response_view(response),
         "allowed_actions": {
             "update": can_manage and offer.status in {"draft", "changes_requested", "ready_to_send", "sent"},
             "submit": can_manage and offer.status in {"draft", "changes_requested"},
             "withdraw": can_manage and offer.status not in {"withdrawn", "expired"},
             "send": False,
             "decide": is_assignee and offer.status == "pending_approval",
+            "proxy_response": can_manage and offer.status == "sent" and current is not None and current.id == offer.current_version_id,
         },
     }
+
+
+def _queue_offer_response_confirmation(db, request, offer, response):
+    application = db.scalar(select(Application).where(
+        Application.organization_id == offer.organization_id,
+        Application.id == offer.application_id,
+    ))
+    if application is None:
+        raise OfferNotFound
+    recipient = None
+    try:
+        recipient = resolve_confirmed_candidate_email(
+            db, organization_id=offer.organization_id, candidate_id=application.candidate_id,
+            contact_cipher=request.app.state.contact_cipher,
+        )
+        decision_text = "接受" if response.status == "accepted" else "拒绝"
+        start_text = f"，预计到岗日期为 {response.expected_start_date.isoformat()}" if response.expected_start_date else ""
+        enqueue_delivery(
+            db,
+            DeliveryCommand(
+                organization_id=offer.organization_id, recipient=recipient,
+                subject="Offer 确认结果", body=f"您好，系统已记录您{decision_text} Offer 的决定{start_text}。如有疑问，请联系负责 HR。",
+                resource_type="offer_response", resource_id=response.id,
+                idempotency_key=str(response.id), operation=f"offer.response_confirmation:{response.id}",
+                created_by=application.owner_id, trace_id=request.state.trace_id,
+            ),
+            cipher=request.app.state.email_secret_cipher,
+            sender_policy=SenderPolicy(request.app.state.settings.email_from_address, request.app.state.settings.email_from_name),
+        )
+    except (CandidateEmailUnavailable, EmailConfigurationUnavailable) as error:
+        safe_code = "candidate_email_unconfirmed" if isinstance(error, CandidateEmailUnavailable) else "email_not_configured"
+        masked = request.app.state.email_secret_cipher.mask_email(recipient) if recipient else ""
+        create_user_notification(
+            db, organization_id=offer.organization_id, user_id=application.owner_id,
+            event_type="email_delivery_failed", resource_type="offer_response", resource_id=response.id,
+            recipient_masked=masked, safe_error_code=safe_code,
+        )
+        db.add(AuditLog(
+            organization_id=offer.organization_id, actor_user_id=response.actor_user_id,
+            category="recruiting", event_type="offer.response_confirmation_email_unavailable", outcome="failure",
+            resource_type="offer_response", resource_id=response.id, trace_id=request.state.trace_id,
+            metadata_json={"safe_error_code": safe_code, "recipient": masked},
+        ))
 
 
 def _run_mutation(request, principal, operation, key, semantic, action):
@@ -248,6 +312,41 @@ def withdraw_offer_api(offer_id: UUID, request: Request, if_match: str | None = 
     return _run_mutation(request, principal, f"offer.withdraw:{offer_id}", key, {"expected_version": expected}, lambda db: lambda: (200, {"data": _offer_view(db, withdraw_offer(db, principal.organization_id, offer_id, principal.user_id, expected_version=expected, trace_id=request.state.trace_id), principal)}))
 
 
+@router.post("/api/v1/offers/{offer_id}/proxy-responses")
+def respond_to_offer_by_proxy(offer_id: UUID, payload: ProxyOfferResponse, request: Request, if_match: str | None = Header(None, alias="If-Match"), idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
+    principal, expected, key = _principal(request), _version(request, if_match), _idempotency(request, idempotency_key)
+    if any(isinstance(item, JSONResponse) for item in (principal, expected, key)):
+        return next(item for item in (principal, expected, key) if isinstance(item, JSONResponse))
+    semantic = {"expected_version": expected, **payload.model_dump(mode="json")}
+    with request.app.state.identity_store.sync_session() as db:
+        try:
+            def action():
+                offer = _offer(db, principal, offer_id, lock=True)
+                if offer is None or not _can_manage(db, principal, offer):
+                    raise OfferNotFound
+                if offer.version != expected:
+                    raise OfferVersionConflict
+                response, duplicate = record_proxy_offer_response(
+                    db, offer, payload, actor_user_id=principal.user_id,
+                    now=datetime.now(timezone.utc), trace_id=request.state.trace_id,
+                )
+                if not duplicate:
+                    _queue_offer_response_confirmation(db, request, offer, response)
+                return 200, {"data": _offer_view(db, offer, principal)}
+            status, body = persisted_idempotent(
+                db, principal.organization_id, principal.user_id,
+                f"offer.proxy_response:{offer_id}", key, semantic, action,
+            )
+            db.commit()
+        except OfferNotFound:
+            db.rollback(); return _error(request, 404, "resource_not_found")
+        except OfferVersionConflict:
+            db.rollback(); return _error(request, 409, "resource_version_conflict")
+        except IdempotencyConflict:
+            db.rollback(); return _error(request, 409, "idempotency_conflict")
+    return _response(body["data"], status, etag=body["data"]["version"])
+
+
 @router.get("/api/v1/offers/{offer_id}/history")
 def offer_history(offer_id: UUID, request: Request):
     principal = _principal(request)
@@ -257,6 +356,7 @@ def offer_history(offer_id: UUID, request: Request):
         if offer is None: return _error(request, 404, "resource_not_found")
         versions = db.scalars(select(OfferVersion).where(OfferVersion.organization_id == principal.organization_id, OfferVersion.offer_id == offer_id).order_by(OfferVersion.version_number)).all()
         approvals = db.scalars(select(OfferApproval).where(OfferApproval.organization_id == principal.organization_id, OfferApproval.offer_id == offer_id).order_by(OfferApproval.round_number, OfferApproval.sequence)).all()
+        responses = db.scalars(select(OfferResponse).where(OfferResponse.organization_id == principal.organization_id, OfferResponse.offer_id == offer_id).order_by(OfferResponse.responded_at, OfferResponse.id)).all()
         events = db.scalars(select(OfferEvent).where(OfferEvent.organization_id == principal.organization_id, OfferEvent.offer_id == offer_id).order_by(OfferEvent.created_at, OfferEvent.id)).all()
         can_view_sensitive = _can_manage(db, principal, offer) or _is_approval_participant(db, principal, offer)
         return _response({
@@ -282,6 +382,7 @@ def offer_history(offer_id: UUID, request: Request):
                 "reason": approval.reason if can_view_sensitive else None,
                 "decided_at": approval.decided_at.isoformat() if approval.decided_at else None,
             } for approval in approvals] if can_view_sensitive else [],
+            "responses": [_offer_response_view(response) for response in responses],
             "events": [{
                 "id": str(event.id),
                 "event_type": event.event_type,
@@ -330,19 +431,29 @@ def pending_approvals(request: Request):
 def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(None, alias="If-Match"), idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
     principal, expected, key = _principal(request), _version(request, if_match), _idempotency(request, idempotency_key)
     if any(isinstance(item, JSONResponse) for item in (principal, expected, key)): return next(item for item in (principal, expected, key) if isinstance(item, JSONResponse))
-    if request.app.state.settings.offer_public_base_url is None:
-        return _error(request, 409, "offer_send_unavailable")
     with request.app.state.identity_store.sync_session() as db:
         try:
             def action():
-                offer = _offer(db, principal, offer_id)
+                offer = _offer(db, principal, offer_id, lock=True)
                 if offer is None or not _can_manage(db, principal, offer): raise OfferNotFound
                 if offer.version != expected: raise OfferVersionConflict
                 current = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == offer.organization_id, OfferVersion.id == offer.current_version_id).with_for_update())
                 now = datetime.now(timezone.utc)
                 if offer.status != "ready_to_send" or current is None or any(getattr(current, field) is None for field in ("pdf_object_key", "pdf_sha256", "pdf_size_bytes", "pdf_rendered_at")) or current.candidate_response_deadline <= now:
                     raise OfferApprovalError
+                if request.app.state.settings.offer_public_base_url is None:
+                    raise RuntimeError("offer public base URL is not configured")
                 application = db.scalar(select(Application).where(Application.organization_id == offer.organization_id, Application.id == offer.application_id).with_for_update())
+                if application is None:
+                    raise OfferNotFound
+                active_token = db.scalar(select(OfferAccessToken.id).where(
+                    OfferAccessToken.organization_id == offer.organization_id,
+                    OfferAccessToken.offer_id == offer.id,
+                    OfferAccessToken.offer_version_id == current.id,
+                    OfferAccessToken.revoked_at.is_(None),
+                ))
+                if active_token is not None:
+                    raise OfferApprovalError("offer send is already queued")
                 recipient = resolve_confirmed_candidate_email(db, organization_id=offer.organization_id, candidate_id=application.candidate_id, contact_cipher=request.app.state.contact_cipher)
                 token, _ = issue_offer_access_token(db, offer.organization_id, offer, current, codec=request.app.state.offer_token_codec, now=now)
                 # The worker reconstructs the capability from token row ID.  Delivery storage holds no link or raw token.
@@ -359,6 +470,8 @@ def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(N
             db.rollback(); return _error(request, 409, "resource_version_conflict")
         except OfferApprovalError:
             db.rollback(); return _error(request, 409, "offer_not_ready_to_send")
+        except RuntimeError:
+            db.rollback(); return _error(request, 409, "offer_send_unavailable")
         except IdempotencyConflict:
             db.rollback(); return _error(request, 409, "idempotency_conflict")
     return _response(body["data"], status, etag=body["data"]["version"])
@@ -380,16 +493,24 @@ def _public_error(request):
 def get_public_offer(token: str, request: Request):
     with request.app.state.identity_store.sync_session() as db:
         try:
-            access, offer, version, application = public_offer_access(db, token, codec=request.app.state.offer_token_codec, now=datetime.now(timezone.utc), allow_revoked=True)
+            access, offer, version, application = public_offer_access(db, token, codec=request.app.state.offer_token_codec, now=datetime.now(timezone.utc), allow_inactive=True)
         except (OfferNotFound, ValueError):
             return _public_error(request)
         candidate = db.get(Candidate, application.candidate_id); job = db.get(Job, offer.job_id); organization = db.get(Organization, offer.organization_id)
         hr = db.get(User, application.owner_id)
+        jd = db.scalar(select(JobJdVersion).where(
+            JobJdVersion.organization_id == offer.organization_id,
+            JobJdVersion.job_id == offer.job_id,
+        ).order_by(JobJdVersion.version_number.desc(), JobJdVersion.id.desc()).limit(1))
         expiry = access.expires_at.replace(tzinfo=timezone.utc) if access.expires_at.tzinfo is None else access.expires_at
-        if expiry <= datetime.now(timezone.utc): status = "expired"
-        elif offer.current_version_id != version.id: status = "superseded"
-        else: status = offer.status
-        return _public_response({"display_status": status, "company_name": organization.name if organization else None, "candidate_name": candidate.display_name if candidate else None, "job_title": job.title if job else None, "location": candidate.location if candidate else None, "hr_contact": hr.display_name if hr else None, "content": version.content, "candidate_response_deadline": version.candidate_response_deadline.isoformat(), "pdf_available": status == "sent"})
+        if offer.status in {"accepted", "declined", "withdrawn"}: status = offer.status
+        elif offer.current_version_id != version.id or access.revoked_at is not None: status = "superseded"
+        elif expiry <= datetime.now(timezone.utc): status = "expired"
+        elif offer.status == "sent" and access.delivered_at is not None: status = "sent"
+        else: return _public_error(request)
+        location = jd.content.get("location") if jd and isinstance(jd.content, dict) else None
+        hr_contact = " · ".join(value for value in (hr.display_name if hr else None, hr.email if hr else None) if value)
+        return _public_response({"status": status, "company_name": organization.name if organization else None, "candidate_name": candidate.display_name if candidate else None, "job_title": job.title if job else None, "location": location, "hr_contact": hr_contact or None, "content": version.content, "candidate_response_deadline": version.candidate_response_deadline.isoformat(), "pdf_available": status == "sent"})
 
 
 @router.get("/api/public/v1/offers/{token}/pdf")
@@ -415,6 +536,11 @@ def respond_public_offer(token: str, payload: PublicOfferResponse, request: Requ
     with request.app.state.identity_store.sync_session() as db:
         try:
             response, duplicate = record_public_offer_response(db, token, payload, codec=request.app.state.offer_token_codec, now=datetime.now(timezone.utc), trace_id=request.state.trace_id)
+            if not duplicate:
+                offer = db.scalar(select(Offer).where(Offer.organization_id == response.organization_id, Offer.id == response.offer_id))
+                if offer is None:
+                    raise OfferNotFound
+                _queue_offer_response_confirmation(db, request, offer, response)
             db.commit()
         except OfferVersionConflict:
             db.rollback(); return _public_response({"code": "offer_response_conflict"}, 409)

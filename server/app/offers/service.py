@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import json
 import uuid
 from datetime import datetime, timezone
 
@@ -22,6 +23,10 @@ class OfferVersionConflict(ResourceVersionConflict):
 
 
 class OfferApprovalError(Exception):
+    pass
+
+
+class OfferResponseUnavailable(OfferVersionConflict):
     pass
 
 
@@ -69,46 +74,163 @@ def issue_offer_access_token(db, organization_id, offer, version, *, codec: Offe
     return token, raw
 
 
-def public_offer_access(db, raw_token: str, *, codec: OfferTokenCodec, now: datetime, lock: bool = False, allow_revoked: bool = False):
+def public_offer_access(db, raw_token: str, *, codec: OfferTokenCodec, now: datetime, lock: bool = False, allow_inactive: bool = False):
     digest = hashlib.sha256(raw_token.encode("ascii")).hexdigest()
     query = select(OfferAccessToken).where(OfferAccessToken.token_hash == digest)
     token = db.scalar(query.with_for_update() if lock else query)
-    if token is None or not codec.matches(token, raw_token) or (token.revoked_at is not None and not allow_revoked) or (_utc(token.expires_at) <= _utc(now) and not allow_revoked):
+    if token is None or not codec.matches(token, raw_token):
         raise OfferNotFound
     offer_query = select(Offer).where(Offer.organization_id == token.organization_id, Offer.id == token.offer_id)
     version_query = select(OfferVersion).where(OfferVersion.organization_id == token.organization_id, OfferVersion.id == token.offer_version_id, OfferVersion.offer_id == token.offer_id)
     offer = db.scalar(offer_query.with_for_update() if lock else offer_query)
     version = db.scalar(version_query.with_for_update() if lock else version_query)
-    if offer is None or version is None or offer.current_version_id != version.id or (offer.status != "sent" and not allow_revoked):
+    if offer is None or version is None:
         raise OfferNotFound
     application_query = select(Application).where(Application.organization_id == token.organization_id, Application.id == offer.application_id)
     application = db.scalar(application_query.with_for_update() if lock else application_query)
     if application is None:
         raise OfferNotFound
+    if not allow_inactive and (
+        token.revoked_at is not None
+        or token.delivered_at is None
+        or _utc(token.expires_at) <= _utc(now)
+        or offer.current_version_id != version.id
+        or offer.status != "sent"
+    ):
+        raise OfferNotFound
     return token, offer, version, application
 
 
-def record_public_offer_response(db, raw_token, payload, *, codec: OfferTokenCodec, now: datetime, trace_id: str):
-    token, offer, version, application = public_offer_access(db, raw_token, codec=codec, now=now, lock=True, allow_revoked=True)
-    canonical = f"{payload.decision}|{payload.expected_start_date.isoformat() if payload.expected_start_date else ''}|{payload.reason_text or ''}"
-    request_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    existing = db.scalar(select(OfferResponse).where(OfferResponse.organization_id == offer.organization_id, OfferResponse.offer_id == offer.id).with_for_update())
+def _offer_response_hash(*, source, actor_user_id, decision, expected_start_date, reason_text, communication_channel, communicated_at, note):
+    canonical = json.dumps({
+        "source": source,
+        "actor_user_id": str(actor_user_id) if actor_user_id else None,
+        "decision": decision,
+        "expected_start_date": expected_start_date.isoformat() if expected_start_date else None,
+        "reason_text": reason_text,
+        "communication_channel": communication_channel,
+        "communicated_at": _utc(communicated_at).isoformat() if communicated_at else None,
+        "note": note,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def record_offer_response(
+    db,
+    *,
+    organization_id,
+    offer_id,
+    offer_version_id,
+    decision,
+    expected_start_date,
+    reason_text,
+    source,
+    actor_user_id,
+    communication_channel,
+    communicated_at,
+    note,
+    now,
+    trace_id,
+    access_token_id=None,
+):
+    """Serialize candidate and proxy decisions on the same Offer row lock."""
+    offer = _offer(db, organization_id, offer_id, lock=True)
+    request_hash = _offer_response_hash(
+        source=source, actor_user_id=actor_user_id, decision=decision,
+        expected_start_date=expected_start_date, reason_text=reason_text,
+        communication_channel=communication_channel, communicated_at=communicated_at, note=note,
+    )
+    existing = db.scalar(select(OfferResponse).where(
+        OfferResponse.organization_id == organization_id,
+        OfferResponse.offer_id == offer.id,
+    ).with_for_update())
     if existing is not None:
         if existing.request_hash and hmac.compare_digest(existing.request_hash, request_hash):
             return existing, True
         raise OfferVersionConflict("conflicting response")
-    if token.revoked_at is not None:
+
+    version = db.scalar(select(OfferVersion).where(
+        OfferVersion.organization_id == organization_id,
+        OfferVersion.offer_id == offer.id,
+        OfferVersion.id == offer_version_id,
+    ))
+    if version is None or offer.current_version_id != version.id or offer.status != "sent":
+        raise OfferResponseUnavailable("offer is not open for response")
+    if access_token_id is not None:
+        token = db.scalar(select(OfferAccessToken).where(
+            OfferAccessToken.organization_id == organization_id,
+            OfferAccessToken.offer_id == offer.id,
+            OfferAccessToken.offer_version_id == version.id,
+            OfferAccessToken.id == access_token_id,
+        ).with_for_update())
+        if token is None or token.revoked_at is not None or token.delivered_at is None or _utc(token.expires_at) <= _utc(now):
+            raise OfferNotFound
+
+    application = db.scalar(select(Application).where(
+        Application.organization_id == organization_id,
+        Application.id == offer.application_id,
+    ))
+    if application is None:
         raise OfferNotFound
     from server.app.recruiting.service import apply_application_workflow_action_record
-    action = "offer_accepted" if payload.decision == "accepted" else "offer_declined"
-    internal_reason = payload.reason_text if payload.reason_text else "offer_declined_by_candidate" if action == "offer_declined" else None
-    apply_application_workflow_action_record(db, offer.organization_id, application.id, action, expected_version=application.version, actor_user_id=application.owner_id, trace_id=trace_id, reason_text=internal_reason)
-    response = OfferResponse(organization_id=offer.organization_id, offer_id=offer.id, offer_version_id=version.id, status="accepted" if action == "offer_accepted" else "declined", expected_start_date=payload.expected_start_date, reason_text=payload.reason_text, request_hash=request_hash, responded_at=now)
+    action = "offer_accepted" if decision == "accepted" else "offer_declined"
+    internal_reason = reason_text if reason_text else "offer_declined_by_candidate" if action == "offer_declined" else None
+    try:
+        apply_application_workflow_action_record(
+            db, offer.organization_id, application.id, action,
+            expected_version=application.version,
+            actor_user_id=actor_user_id or application.owner_id,
+            notification_actor_user_id=actor_user_id,
+            trace_id=trace_id, reason_text=internal_reason,
+        )
+    except Exception as error:
+        from server.app.recruiting.service import InvalidStateTransition, ResourceVersionConflict
+        if isinstance(error, (InvalidStateTransition, ResourceVersionConflict)):
+            raise OfferVersionConflict("application changed while responding") from error
+        raise
+    response = OfferResponse(
+        organization_id=offer.organization_id, offer_id=offer.id,
+        offer_version_id=version.id, version_number=version.version_number,
+        status=decision, source=source, actor_user_id=actor_user_id,
+        expected_start_date=expected_start_date, reason_text=reason_text,
+        communication_channel=communication_channel, communicated_at=communicated_at,
+        note=note, request_hash=request_hash, responded_at=now,
+    )
     db.add(response)
-    offer.status = response.status; offer.version += 1; token.revoked_at = now
-    _audit(db, offer, None, f"offer.{response.status}", trace_id, {"version_number": version.version_number})
+    offer.status = response.status; offer.version += 1
+    revoke_offer_access_tokens(db, offer, now=now)
+    _audit(db, offer, actor_user_id, f"offer.{response.status}", trace_id, {
+        "version_number": version.version_number, "source": source,
+        "communication_channel": communication_channel,
+        "communicated_at": _utc(communicated_at).isoformat() if communicated_at else None,
+    })
     db.flush()
     return response, False
+
+
+def record_public_offer_response(db, raw_token, payload, *, codec: OfferTokenCodec, now: datetime, trace_id: str):
+    token, offer, version, _ = public_offer_access(db, raw_token, codec=codec, now=now, allow_inactive=True)
+    try:
+        return record_offer_response(
+            db, organization_id=offer.organization_id, offer_id=offer.id, offer_version_id=version.id,
+            decision=payload.decision, expected_start_date=payload.expected_start_date,
+            reason_text=payload.reason_text, source="candidate", actor_user_id=None,
+            communication_channel=None, communicated_at=None, note=None,
+            now=now, trace_id=trace_id, access_token_id=token.id,
+        )
+    except OfferResponseUnavailable as error:
+        raise OfferNotFound from error
+
+
+def record_proxy_offer_response(db, offer, payload, *, actor_user_id, now: datetime, trace_id: str):
+    return record_offer_response(
+        db, organization_id=offer.organization_id, offer_id=offer.id,
+        offer_version_id=offer.current_version_id, decision=payload.decision,
+        expected_start_date=payload.expected_start_date, reason_text=payload.reason_text,
+        source="hr_proxy", actor_user_id=actor_user_id,
+        communication_channel=payload.channel, communicated_at=payload.communicated_at,
+        note=payload.note, now=now, trace_id=trace_id,
+    )
 
 
 def mark_offer_delivery_sent(db, delivery, *, now: datetime):
@@ -126,6 +248,20 @@ def mark_offer_delivery_sent(db, delivery, *, now: datetime):
 def revoke_offer_delivery_token(db, delivery, *, now: datetime):
     token = db.scalar(select(OfferAccessToken).where(OfferAccessToken.organization_id == delivery.organization_id, OfferAccessToken.id == delivery.resource_id).with_for_update())
     if token is not None and token.revoked_at is None:
+        token.revoked_at = now
+
+
+def revoke_offer_access_tokens(db, offer, *, now: datetime) -> None:
+    tokens = db.scalars(
+        select(OfferAccessToken)
+        .where(
+            OfferAccessToken.organization_id == offer.organization_id,
+            OfferAccessToken.offer_id == offer.id,
+            OfferAccessToken.revoked_at.is_(None),
+        )
+        .with_for_update()
+    )
+    for token in tokens:
         token.revoked_at = now
 
 
@@ -238,6 +374,8 @@ def update_offer_version(db, organization_id, offer_id, actor_user_id, command, 
     _require_version(offer, expected_version)
     if offer.status not in REVISION_SOURCE_STATUSES:
         raise OfferVersionConflict
+    if offer.status == "sent":
+        revoke_offer_access_tokens(db, offer, now=datetime.now(timezone.utc))
     current = _current_version(db, offer)
     fields = command.model_fields_set
     content = command.content if "content" in fields else current.content
@@ -351,6 +489,7 @@ def withdraw_offer(db, organization_id, offer_id, actor_user_id, *, trace_id, ex
     _require_version(offer, expected_version)
     if offer.status in FINAL_OFFER_STATUSES:
         raise OfferApprovalError("offer is final")
+    revoke_offer_access_tokens(db, offer, now=datetime.now(timezone.utc))
     offer.status = "withdrawn"
     offer.version += 1
     _audit(db, offer, actor_user_id, "offer.withdrawn", trace_id, {})

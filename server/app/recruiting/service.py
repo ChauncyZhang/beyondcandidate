@@ -259,6 +259,8 @@ APPLICATION_WORKFLOW_ACTIONS = {
     "offer_declined": ("passed", "withdrawn"),
 }
 
+_NOTIFICATION_ACTOR_UNSET = object()
+
 
 def apply_application_workflow_action_record(
     db,
@@ -270,10 +272,12 @@ def apply_application_workflow_action_record(
     actor_user_id,
     trace_id,
     reason_text=None,
+    notification_actor_user_id=_NOTIFICATION_ACTOR_UNSET,
 ):
     from server.app.identity.models import Job
     from server.app.integrations.feishu.notifications import schedule_feishu_notification
     from server.app.recruiting.models import Application
+    from server.app.notifications.service import create_user_notification
     from server.app.recruiting.review_assignments import review_notification_user_ids
     from server.app.recruiting.tasks import close_review_task
 
@@ -339,22 +343,32 @@ def apply_application_workflow_action_record(
     if job is None:
         raise InvalidStateTransition
     hiring_recipients = review_notification_user_ids(db, job)
+    notification_actor = actor_user_id if notification_actor_user_id is _NOTIFICATION_ACTOR_UNSET else notification_actor_user_id
+    offer_recipients = [application.owner_id] if application.owner_id != notification_actor else []
     event_and_recipients = {
         "review_approved": ("interview_arrangement_requested", [application.owner_id]),
         "review_rejected": ("candidate_rejected", [application.owner_id]),
         "hiring_approved": ("candidate_passed", [application.owner_id]),
         "hiring_rejected": ("candidate_rejected", [application.owner_id]),
-        "offer_accepted": ("offer_accepted", hiring_recipients),
-        "offer_declined": ("offer_declined", hiring_recipients),
+        "offer_accepted": ("offer_accepted", offer_recipients),
+        "offer_declined": ("offer_declined", offer_recipients),
     }
     event_type, recipient_user_ids = event_and_recipients[action]
+    if action in {"offer_accepted", "offer_declined"}:
+        for recipient_user_id in recipient_user_ids:
+            create_user_notification(
+                db, organization_id=organization_id, user_id=recipient_user_id,
+                event_type=event_type, resource_type="application", resource_id=application.id,
+                recipient_masked="", safe_error_code="",
+            )
     schedule_feishu_notification(
         db,
         organization_id=organization_id,
         recipient_user_ids=recipient_user_ids,
         event_type=event_type,
         application_id=application.id,
-        actor_user_id=actor_user_id,
+        actor_user_id=notification_actor,
+        exclude_actor=action in {"offer_accepted", "offer_declined"},
     )
     return application
 

@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -7,7 +7,8 @@ from sqlalchemy import select
 from server.app.core.settings import Settings
 from server.app.identity.models import Job, JobCollaborator, User
 from server.app.main import create_app
-from server.app.offers.models import OfferApproval, OfferTemplate
+from server.app.notifications.models import UserNotification
+from server.app.offers.models import Offer, OfferApproval, OfferResponse, OfferTemplate, OfferVersion
 from server.app.recruiting.models import Application, Candidate, FileObject, Resume
 from server.tests.test_recruiting_api import login, seed_user
 
@@ -83,6 +84,68 @@ def seed_offer_application(app):
         db.add_all([application, JobCollaborator(organization_id=admin.organization_id, job_id=job.id, user_id=viewer_id, access_role="job_recruiter")])
         db.commit()
         return {"application_id": str(application.id), "template_id": str(template.id), "admin": "offer-admin@example.test", "approver": "offer-approver@example.test", "viewer": "offer-viewer@example.test"}
+
+
+def seed_sent_offer(app, application_id):
+    with app.state.identity_store.sync_session() as db:
+        application = db.get(Application, UUID(application_id))
+        version_id, offer_id = uuid4(), uuid4()
+        offer = Offer(
+            id=offer_id, organization_id=application.organization_id,
+            application_id=application.id, job_id=application.job_id,
+            current_version_id=version_id, status="sent",
+            candidate_response_deadline=datetime(2099, 8, 20, tzinfo=timezone.utc),
+        )
+        version = OfferVersion(
+            id=version_id, organization_id=application.organization_id, offer_id=offer_id,
+            version_number=1, content={"body": "Offer"},
+            candidate_response_deadline=offer.candidate_response_deadline,
+            is_special=False, special_reason=None, created_by=application.owner_id,
+        )
+        db.add_all([offer, version]); db.commit()
+        return str(offer_id)
+
+
+def test_proxy_response_requires_management_headers_and_projects_immutable_result(tmp_path, monkeypatch) -> None:
+    app = make_app(tmp_path)
+    queued = []
+    monkeypatch.setattr("server.app.offers.api.resolve_confirmed_candidate_email", lambda *args, **kwargs: "candidate@example.test")
+    monkeypatch.setattr("server.app.offers.api.enqueue_delivery", lambda db, command, **kwargs: queued.append(command))
+    seed = seed_offer_application(app)
+    proxy_email = "offer-proxy@example.test"
+    proxy_id = seed_user(app, "recruiting_admin", proxy_email)
+    offer_id = seed_sent_offer(app, seed["application_id"])
+    payload = {
+        "decision": "accepted", "expected_start_date": "2099-09-01",
+        "channel": "wechat", "communicated_at": "2026-08-08T08:00:00Z", "note": "微信确认",
+    }
+    with TestClient(app) as client:
+        missing = client.post(f"/api/v1/offers/{offer_id}/proxy-responses", json=payload, headers=login(client, proxy_email))
+        denied = client.post(f"/api/v1/offers/{offer_id}/proxy-responses", json=payload, headers={**login(client, seed["viewer"]), "If-Match": '"1"', "Idempotency-Key": "denied"})
+        headers = {**login(client, proxy_email), "If-Match": '"1"', "Idempotency-Key": "proxy-response"}
+        accepted = client.post(f"/api/v1/offers/{offer_id}/proxy-responses", json=payload, headers=headers)
+        replay = client.post(f"/api/v1/offers/{offer_id}/proxy-responses", json=payload, headers=headers)
+        conflict = client.post(f"/api/v1/offers/{offer_id}/proxy-responses", json={**payload, "note": "不同备注"}, headers=headers)
+        detail = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, proxy_email))
+        history = client.get(f"/api/v1/offers/{offer_id}/history", headers=login(client, proxy_email))
+
+    assert missing.status_code == 428 and denied.status_code == 404
+    assert accepted.status_code == replay.status_code == 200
+    assert conflict.status_code == 409 and conflict.json()["code"] == "idempotency_conflict"
+    result = detail.json()["data"]
+    assert result["status"] == "accepted" and result["allowed_actions"]["proxy_response"] is False
+    assert result["response"]["source"] == "hr_proxy" and result["response"]["actor_user_id"] == str(proxy_id)
+    assert history.json()["data"]["responses"] == [result["response"]]
+    assert len(queued) == 1 and queued[0].resource_type == "offer_response"
+    assert "token" not in queued[0].body.lower() and "接受" in queued[0].body
+    with app.state.identity_store.sync_session() as db:
+        response = db.scalar(select(OfferResponse).where(OfferResponse.offer_id == UUID(offer_id)))
+        owner_id = db.get(Application, UUID(seed["application_id"])).owner_id
+        owner_events = db.scalars(select(UserNotification.event_type).where(UserNotification.user_id == owner_id)).all()
+        proxy_events = db.scalars(select(UserNotification.event_type).where(UserNotification.user_id == proxy_id)).all()
+        assert response.source == "hr_proxy" and response.communication_channel == "wechat"
+        assert owner_events.count("offer_accepted") == 1
+        assert proxy_events.count("offer_accepted") == 0
 
 
 def test_offer_lifecycle_is_idempotent_versioned_and_never_auto_sends(tmp_path) -> None:

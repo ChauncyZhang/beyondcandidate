@@ -107,6 +107,34 @@ class PublicOfferResponse(OfferSchema):
         return self
 
 
+class ProxyOfferResponse(PublicOfferResponse):
+    channel: str
+    communicated_at: datetime
+    note: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("channel")
+    @classmethod
+    def validate_channel(cls, value: str) -> str:
+        if value not in {"phone", "wechat", "email", "other"}:
+            raise ValueError("channel must be phone, wechat, email, or other")
+        return value
+
+    @field_validator("communicated_at")
+    @classmethod
+    def validate_communicated_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("communicated_at must include a timezone")
+        if value > datetime.now(value.tzinfo):
+            raise ValueError("communicated_at must not be in the future")
+        return value
+
+    @field_validator("note")
+    @classmethod
+    def normalize_note(cls, value: str | None) -> str | None:
+        value = value.strip() if value else None
+        return value or None
+
+
 class OfferTemplateCommand(OfferSchema):
     name: str = Field(min_length=1, max_length=200)
     content: dict[str, Any] = Field(default_factory=dict)

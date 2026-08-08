@@ -7,15 +7,17 @@ from sqlalchemy.orm import Session
 
 from server.app.core.settings import Settings
 from server.app.identity.models import Base, Job, Organization, User, UserRole
-from server.app.offers.models import Offer, OfferAccessToken, OfferVersion
-from server.app.offers.schemas import PublicOfferResponse
+from server.app.offers.models import Offer, OfferAccessToken, OfferResponse, OfferVersion
+from server.app.offers.schemas import ProxyOfferResponse, PublicOfferResponse
 from server.app.offers.service import (
     OfferNotFound,
     OfferTokenCodec,
     OfferVersionConflict,
     issue_offer_access_token,
     public_offer_access,
+    record_proxy_offer_response,
     record_public_offer_response,
+    withdraw_offer,
 )
 from server.app.recruiting.models import Application, Candidate, Resume
 
@@ -56,6 +58,7 @@ def _sent_offer(db):
     db.add_all([job, candidate, resume, application, offer, version]); db.flush()
     codec = OfferTokenCodec(b"t" * 32)
     token, raw = issue_offer_access_token(db, org_id, offer, version, codec=codec, now=datetime.now(timezone.utc))
+    token.delivered_at = datetime.now(timezone.utc)
     db.flush()
     return codec, raw, token, offer, application
 
@@ -73,11 +76,34 @@ def test_expired_revoked_and_superseded_tokens_are_publicly_invalid():
             public_offer_access(db, raw, codec=codec, now=datetime.now(timezone.utc))
         token.revoked_at = None
         replacement, replacement_raw = issue_offer_access_token(db, offer.organization_id, offer, db.get(OfferVersion, offer.current_version_id), codec=codec, now=datetime.now(timezone.utc))
+        replacement.delivered_at = datetime.now(timezone.utc)
         assert replacement.id != token.id
         assert token.revoked_at is not None
         with pytest.raises(OfferNotFound):
             public_offer_access(db, raw, codec=codec, now=datetime.now(timezone.utc))
         assert public_offer_access(db, replacement_raw, codec=codec, now=datetime.now(timezone.utc))[0].id == replacement.id
+
+
+def test_read_only_access_can_classify_inactive_links_without_making_them_mutable():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        codec, raw, token, offer, _ = _sent_offer(db)
+        token.revoked_at = datetime.now(timezone.utc)
+        assert public_offer_access(db, raw, codec=codec, now=datetime.now(timezone.utc), allow_inactive=True)[1].id == offer.id
+        with pytest.raises(OfferNotFound):
+            record_public_offer_response(db, raw, PublicOfferResponse(decision="declined"), codec=codec, now=datetime.now(timezone.utc), trace_id="trace")
+
+
+def test_withdrawal_revokes_the_public_capability_and_blocks_a_response():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        codec, raw, token, offer, application = _sent_offer(db)
+        withdraw_offer(db, offer.organization_id, offer.id, application.owner_id, trace_id="trace", expected_version=offer.version)
+        assert token.revoked_at is not None
+        with pytest.raises(OfferNotFound):
+            record_public_offer_response(db, raw, PublicOfferResponse(decision="accepted", expected_start_date=date(2026, 9, 1)), codec=codec, now=datetime.now(timezone.utc), trace_id="trace")
 
 
 def test_identical_public_response_replays_conflicts_and_transitions_application():
@@ -101,6 +127,37 @@ def test_decline_uses_real_workflow_and_stable_internal_reason_when_omitted():
         codec, raw, _, offer, application = _sent_offer(db)
         response, duplicate = record_public_offer_response(db, raw, PublicOfferResponse(decision="declined"), codec=codec, now=datetime.now(timezone.utc), trace_id="trace")
         assert (response.status, duplicate, db.get(Application, application.id).stage) == ("declined", False, "withdrawn")
+
+
+def test_proxy_response_records_immutable_source_snapshot_and_wins_against_candidate():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        codec, raw, token, offer, application = _sent_offer(db)
+        communicated_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        payload = ProxyOfferResponse(
+            decision="accepted", expected_start_date=date(2026, 9, 1),
+            channel="phone", communicated_at=communicated_at, note="候选人电话确认",
+        )
+        response, duplicate = record_proxy_offer_response(
+            db, offer, payload, actor_user_id=application.owner_id,
+            now=datetime.now(timezone.utc), trace_id="trace",
+        )
+        assert duplicate is False
+        assert response.source == "hr_proxy" and response.actor_user_id == application.owner_id
+        assert response.offer_version_id == offer.current_version_id and response.version_number == 1
+        assert response.communication_channel == "phone" and response.note == "候选人电话确认"
+        assert token.revoked_at is not None and db.get(Application, application.id).stage == "hired"
+        with pytest.raises(OfferVersionConflict):
+            record_public_offer_response(db, raw, PublicOfferResponse(decision="accepted", expected_start_date=date(2026, 9, 1)), codec=codec, now=datetime.now(timezone.utc), trace_id="candidate")
+
+
+def test_proxy_response_validation_rejects_future_time_and_missing_start_date():
+    with pytest.raises(ValueError):
+        ProxyOfferResponse(decision="accepted", channel="phone", communicated_at=datetime.now(timezone.utc))
+    with pytest.raises(ValueError):
+        ProxyOfferResponse(decision="declined", channel="phone", communicated_at=datetime.now(timezone.utc) + timedelta(minutes=1))
+    assert "ck_offer_responses_source" in {constraint.name for constraint in OfferResponse.__table__.constraints}
 
 
 @pytest.mark.parametrize("value", ["https://careers.example.test/path", "https://user@careers.example.test", "https://careers.example.test/?q=1", "https://careers.example.test/#x", "ftp://careers.example.test"])

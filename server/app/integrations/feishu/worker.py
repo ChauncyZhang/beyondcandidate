@@ -374,9 +374,9 @@ def _notification_recipient_is_current(
     if event_type == "candidate_rejected":
         return application.stage == "rejected" and application.owner_id == recipient_user_id
     if event_type == "offer_accepted":
-        return application.stage == "hired" and recipient_user_id in review_notification_user_ids(db, job)
+        return application.stage == "hired" and application.owner_id == recipient_user_id
     if event_type == "offer_declined":
-        return application.stage == "withdrawn" and recipient_user_id in review_notification_user_ids(db, job)
+        return application.stage == "withdrawn" and application.owner_id == recipient_user_id
     if participant is None or interview is None:
         return False
     if event_type == "interview_scheduled":
