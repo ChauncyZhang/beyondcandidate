@@ -3,12 +3,13 @@ import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect,text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from server.tests.test_interview_persistence_postgres import _seed_application
 
@@ -271,6 +272,160 @@ def _seed_offer_rows(connection):
         VALUES(:version,:organization,:offer,1,'{\"body\":\"offer\"}',:template,now() + interval '7 days',false,null,:owner,null,now(),now())
     """), identifiers)
     return identifiers
+
+
+PDF_RECEIPT_CASE_VERSIONS = (
+    "partial_pdf_version",
+    "invalid_digest_pdf_version",
+    "invalid_size_pdf_version",
+    "content_mutation_pdf_version",
+    "template_mutation_pdf_version",
+    "deadline_mutation_pdf_version",
+)
+
+
+def _seed_offer_pdf_receipt_cases(connection):
+    identifiers = _seed_offer_rows(connection)
+    identifiers.update({name: uuid.uuid4() for name in PDF_RECEIPT_CASE_VERSIONS})
+    connection.execute(text("UPDATE offer_versions SET submitted_at=now() WHERE id=:version"), identifiers)
+    for version_number, name in enumerate(PDF_RECEIPT_CASE_VERSIONS, start=2):
+        connection.execute(
+            text(
+                """
+                INSERT INTO offer_versions(
+                  id,organization_id,offer_id,version_number,content,template_id,
+                  candidate_response_deadline,is_special,special_reason,created_by,
+                  submitted_at,created_at,updated_at
+                ) VALUES(
+                  :case_version,:organization,:offer,:version_number,'{"body":"offer"}',:template,
+                  now() + interval '7 days',false,null,:owner,now(),now(),now()
+                )
+                """
+            ),
+            {**identifiers, "case_version": identifiers[name], "version_number": version_number},
+        )
+    return identifiers
+
+
+def _assert_postgres_statement_rejected(engine, statement, identifiers):
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(DBAPIError):
+            connection.execute(text(statement), identifiers)
+        transaction.rollback()
+
+
+def _assert_offer_pdf_receipt_guards(engine, identifiers):
+    receipt = {
+        **identifiers,
+        "pdf_key": f"offers/{identifiers['organization']}/offers/{identifiers['offer']}/versions/{identifiers['version']}.pdf",
+        "pdf_digest": "a" * 64,
+        "pdf_size": 1024,
+    }
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE offer_versions
+                SET pdf_object_key=:pdf_key,pdf_sha256=:pdf_digest,
+                    pdf_size_bytes=:pdf_size,pdf_rendered_at=now(),updated_at=now()
+                WHERE id=:version
+                """
+            ),
+            receipt,
+        )
+        assert connection.execute(
+            text("SELECT pdf_object_key,pdf_sha256,pdf_size_bytes,pdf_rendered_at IS NOT NULL FROM offer_versions WHERE id=:version"),
+            receipt,
+        ).one() == (receipt["pdf_key"], receipt["pdf_digest"], receipt["pdf_size"], True)
+
+    _assert_postgres_statement_rejected(
+        engine,
+        "UPDATE offer_versions SET pdf_sha256=repeat('b',64),updated_at=now() WHERE id=:version",
+        receipt,
+    )
+    _assert_postgres_statement_rejected(
+        engine,
+        "UPDATE offer_versions SET pdf_object_key='offers/partial.pdf',updated_at=now() WHERE id=:partial_pdf_version",
+        receipt,
+    )
+    _assert_postgres_statement_rejected(
+        engine,
+        """
+        UPDATE offer_versions SET pdf_object_key='offers/invalid-digest.pdf',pdf_sha256=repeat('g',64),
+          pdf_size_bytes=1,pdf_rendered_at=now(),updated_at=now()
+        WHERE id=:invalid_digest_pdf_version
+        """,
+        receipt,
+    )
+    _assert_postgres_statement_rejected(
+        engine,
+        """
+        UPDATE offer_versions SET pdf_object_key='offers/invalid-size.pdf',pdf_sha256=repeat('c',64),
+          pdf_size_bytes=0,pdf_rendered_at=now(),updated_at=now()
+        WHERE id=:invalid_size_pdf_version
+        """,
+        receipt,
+    )
+    business_mutations = (
+        ("content_mutation_pdf_version", "content=json_build_object('changed',true)"),
+        ("template_mutation_pdf_version", "template_id=null"),
+        ("deadline_mutation_pdf_version", "candidate_response_deadline=candidate_response_deadline + interval '1 day'"),
+    )
+    for index, (version_parameter, mutation) in enumerate(business_mutations, start=1):
+        _assert_postgres_statement_rejected(
+            engine,
+            f"""
+            UPDATE offer_versions SET pdf_object_key='offers/mutation-{index}.pdf',pdf_sha256=repeat('d',64),
+              pdf_size_bytes=1,pdf_rendered_at=now(),{mutation},updated_at=now()
+            WHERE id=:{version_parameter}
+            """,
+            receipt,
+        )
+
+
+def test_0034_offer_pdf_receipt_trigger_static_contract() -> None:
+    migration = Path("server/migrations/versions/0034_offer_version_pdf_receipts.py").read_text(encoding="utf-8")
+
+    for guard in (
+        "NEW.content IS NOT DISTINCT FROM OLD.content",
+        "NEW.template_id IS NOT DISTINCT FROM OLD.template_id",
+        "NEW.candidate_response_deadline IS NOT DISTINCT FROM OLD.candidate_response_deadline",
+        "OLD.pdf_object_key IS NULL",
+        "NEW.pdf_object_key IS NOT NULL",
+        "NEW.pdf_sha256 IS NOT NULL",
+        "NEW.pdf_size_bytes IS NOT NULL",
+        "NEW.pdf_rendered_at IS NOT NULL",
+    ):
+        assert guard in migration
+    assert "pdf_sha256 !~ '[^0-9a-f]'" in migration
+    assert "pdf_size_bytes > 0" in migration
+    assert migration.count("CREATE TRIGGER offer_versions_immutable_after_submission") == 2
+    assert migration.count("RETURN OLD;") == 2
+    assert migration.count("RETURN NEW;") == 3
+
+
+@pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")
+def test_0034_offer_pdf_receipt_trigger_round_trip_guards() -> None:
+    url = os.environ["POSTGRES_SMOKE_URL"]
+    env = {**os.environ, "DATABASE_URL": url}
+    engine = create_engine(url.replace("+asyncpg", "+psycopg"))
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "0034_offer_version_pdf_receipts"], check=True, env=env)
+    with engine.begin() as connection:
+        connection.execute(text("TRUNCATE organizations CASCADE"))
+        identifiers = _seed_offer_pdf_receipt_cases(connection)
+
+    _assert_offer_pdf_receipt_guards(engine, identifiers)
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "downgrade", "0033_offer_workflow"], check=True, env=env)
+    assert not ({"pdf_object_key", "pdf_sha256", "pdf_size_bytes", "pdf_rendered_at"} & {
+        column["name"] for column in inspect(engine).get_columns("offer_versions")
+    })
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "0034_offer_version_pdf_receipts"], check=True, env=env)
+    assert {"pdf_object_key", "pdf_sha256", "pdf_size_bytes", "pdf_rendered_at"} <= {
+        column["name"] for column in inspect(engine).get_columns("offer_versions")
+    }
+    _assert_offer_pdf_receipt_guards(engine, identifiers)
+    engine.dispose()
 
 
 @pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")
