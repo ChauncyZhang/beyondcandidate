@@ -47,7 +47,7 @@ def _is_governance_path(path: str) -> bool:
 
 
 def _requires_no_store(path: str) -> bool:
-    return _is_governance_path(path) or path.startswith("/api/v1/notifications/") or path.startswith("/api/v1/auth/feishu") or path == "/api/v1/settings" or path.startswith(
+    return _is_governance_path(path) or path.startswith("/api/v1/email-deliveries") or path.startswith("/api/v1/email-templates") or path.startswith("/api/v1/notifications/") or path.startswith("/api/v1/auth/feishu") or path == "/api/v1/settings" or path.startswith(
         "/api/v1/settings/"
     )
 
@@ -171,6 +171,11 @@ def create_app(
         app.state.feishu_provider,
         app.state.feishu_secret_cipher,
     )
+    from server.app.communications.security import EmailSecretCipher
+    email_key = settings.contact_encryption_key.get_secret_value()
+    if email_key == "change-me":
+        email_key = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    app.state.email_secret_cipher = EmailSecretCipher(email_key.encode())
     app.include_router(identity_router)
     app.include_router(identity_admin_router)
     app.include_router(recruiting_router)
@@ -189,6 +194,8 @@ def create_app(
     app.include_router(governance_router)
     from server.app.integrations.feishu.api import router as feishu_router
     app.include_router(feishu_router)
+    from server.app.communications.api import router as communications_router
+    app.include_router(communications_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_problem(request: Request, _: RequestValidationError):

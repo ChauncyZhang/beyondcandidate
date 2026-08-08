@@ -5,7 +5,8 @@ from datetime import timedelta
 
 import pytest
 
-from server.app.queue.payloads import IntegerField, OpaqueIdField, PayloadPolicyRegistry, PayloadSchema, UnsafePayload
+from server.app.queue.payloads import DEFAULT_PAYLOAD_POLICIES, IntegerField, OpaqueIdField, PayloadPolicyRegistry, PayloadSchema, UnsafePayload
+from server.app.queue.repository import QueueRepository
 from server.app.queue.service import PermanentJobError, RetryableJobError, retry_delay
 from server.app.queue.outbox import OutboxDispatcher
 from server.app.worker.main import Worker
@@ -21,6 +22,15 @@ def test_payloads_are_schema_limited_and_reject_sensitive_fields() -> None:
     for payload in ({"candidate_id": candidate_id, "count": 2, "resume_text": "secret"}, {"candidate_id": "person@example.test", "count": 2}, {"candidate_id": candidate_id, "count": RuntimeError("raw")}):
         with pytest.raises(UnsafePayload):
             policies.validate_job("test.work", payload)
+
+
+def test_email_delivery_payload_is_opaque_and_terminal_callback_is_allowlisted() -> None:
+    organization_id, delivery_id = str(uuid.uuid4()), str(uuid.uuid4())
+    assert DEFAULT_PAYLOAD_POLICIES.validate_job("communications.send_email", {"organization_id": organization_id, "delivery_id": delivery_id}) == {"organization_id": organization_id, "delivery_id": delivery_id}
+    for extra in ({"recipient": "candidate@example.test"}, {"smtp_error": "raw provider detail"}):
+        with pytest.raises(UnsafePayload):
+            DEFAULT_PAYLOAD_POLICIES.validate_job("communications.send_email", {"organization_id": organization_id, "delivery_id": delivery_id, **extra})
+    QueueRepository(object(), terminal_callbacks={"communications.send_email": lambda *_: None})
 
 
 def test_retry_delay_is_bounded_and_accepts_deterministic_jitter() -> None:

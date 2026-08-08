@@ -123,6 +123,7 @@ class PayloadPolicyRegistry:
 
 
 DEFAULT_PAYLOAD_POLICIES = PayloadPolicyRegistry()
+DEFAULT_PAYLOAD_POLICIES.register_job("communications.send_email", PayloadSchema({"organization_id":OpaqueIdField(),"delivery_id":OpaqueIdField()}))
 DEFAULT_PAYLOAD_POLICIES.register_job("screening.parse_item", PayloadSchema({"organization_id":OpaqueIdField(),"screening_item_id":OpaqueIdField(),"parser_version":IdentifierField()}))
 DEFAULT_PAYLOAD_POLICIES.register_job("screening.score_item", PayloadSchema({"organization_id":OpaqueIdField(),"screening_item_id":OpaqueIdField(),"jd_version_id":OpaqueIdField(),"rule_version_id":OpaqueIdField(),"rule_engine_version":IdentifierField()}))
 DEFAULT_PAYLOAD_POLICIES.register_job("screening.profile_resume", PayloadSchema({"organization_id":OpaqueIdField(),"resume_id":OpaqueIdField()}))

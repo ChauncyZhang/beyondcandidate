@@ -7,6 +7,7 @@ BeyondCandidate 源码采用 MIT License。构建和运行过程中使用的第�
 | 依赖 | 版本 | 许可证 |
 | --- | --- | --- |
 | Alembic | 1.16.4 | MIT |
+| aiosmtplib | 5.1.2 | MIT |
 | argon2-cffi | 25.1.0 | MIT |
 | asyncpg | 0.30.0 | Apache-2.0 |
 | cryptography | 45.0.5 | Apache-2.0 OR BSD-3-Clause |
