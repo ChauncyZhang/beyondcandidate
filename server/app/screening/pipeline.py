@@ -21,6 +21,7 @@ from server.app.llm.screening import SCREENING_SYSTEM_PROMPT
 from server.app.screening.routing import route_llm_screening_terminal
 from server.app.screening.document_quality import assess_text_quality
 from server.app.screening.resume_enrichment import EnrichedResumeText
+from server.app.communications.extraction import contact_cipher_from_settings,extract_email_candidates,persist_extracted_emails
 
 _RETRYABLE={"scanner_unavailable","scanner_error","storage_unavailable"}
 def _uuid(item_id,name): return uuid.uuid5(uuid.UUID(str(item_id)),name)
@@ -37,11 +38,12 @@ def _ensure_screening_prompt(db,organization_id,created_by,*,content=None,versio
     return prompt
 
 class ScreeningPipeline:
-    def __init__(self,sessions,storage,scanner,settings,parser=None,text_enhancer=None,profile_builder:ResumeProfileBuilder|None=None):
+    def __init__(self,sessions,storage,scanner,settings,parser=None,text_enhancer=None,profile_builder:ResumeProfileBuilder|None=None,contact_cipher=None):
         self.sessions,self.storage,self.scanner,self.settings=sessions,storage,scanner,settings
         self.parser=parser or IsolatedParser(settings.parser_hard_timeout_seconds)
         self.text_enhancer=text_enhancer
         self.profile_builder=profile_builder
+        self.contact_cipher=contact_cipher or contact_cipher_from_settings(settings)
     def _limits(self):
         s=self.settings; return ParserLimits(s.parser_max_source_bytes,s.parser_max_text_chars,s.parser_pdf_max_pages,s.parser_docx_max_entries,s.parser_docx_max_uncompressed_bytes,s.parser_docx_max_compression_ratio)
     async def parse_item(self,job):
@@ -134,6 +136,14 @@ class ScreeningPipeline:
             resume_id,application_id=_uuid(item.id,"resume"),_uuid(item.id,"application")
             candidate=candidate or Candidate(id=candidate_id,organization_id=organization_id,display_name=candidate_name,owner_id=run.created_by)
             if candidate not in db: db.add(candidate)
+            persist_extracted_emails(
+                db,
+                organization_id=organization_id,
+                candidate_id=candidate_id,
+                values=extract_email_candidates(enriched.text),
+                source="ocr" if enriched.used_ocr else "native",
+                cipher=self.contact_cipher,
+            )
             resume=db.get(Resume,resume_id) or Resume(id=resume_id,organization_id=organization_id,candidate_id=candidate_id,file_object_id=item.file_object_id,version_number=1,parsed_text=enriched.text)
             if resume not in db: db.add(resume)
             resume_profile=db.scalar(select(ResumeProfile).where(ResumeProfile.organization_id==organization_id,ResumeProfile.resume_id==resume_id))

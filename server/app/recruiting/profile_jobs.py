@@ -13,13 +13,15 @@ from server.app.recruiting.models import (
     ResumeProfile,
 )
 from server.app.recruiting.profile_builder import PROFILE_VERSION
+from server.app.communications.extraction import contact_cipher_from_settings,extract_email_candidates,persist_extracted_emails
 
 
 class ResumeProfileJobHandler:
-    def __init__(self, sessions, text_enhancer, profile_builder):
+    def __init__(self, sessions, text_enhancer, profile_builder, contact_cipher=None):
         self.sessions = sessions
         self.text_enhancer = text_enhancer
         self.profile_builder = profile_builder
+        self.contact_cipher = contact_cipher
 
     async def __call__(self, job):
         try:
@@ -127,6 +129,15 @@ class ResumeProfileJobHandler:
                     )
                 ):
                     return
+                cipher = self.contact_cipher or contact_cipher_from_settings(self.text_enhancer.settings)
+                persist_extracted_emails(
+                    database,
+                    organization_id=organization_id,
+                    candidate_id=active_candidate.id,
+                    values=extract_email_candidates(enriched.text),
+                    source="ocr" if enriched.used_ocr else "native",
+                    cipher=cipher,
+                )
                 database.add(
                     ResumeProfile(
                         id=uuid.uuid5(resume_id, "resume-profile"),

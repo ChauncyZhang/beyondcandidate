@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func,select
 
 from server.app.identity.models import User
-from server.app.recruiting.models import Application,ApplicationReviewTask,Candidate,FileObject,Resume,ResumeProfile
+from server.app.recruiting.models import Application,ApplicationReviewTask,Candidate,CandidateContact,FileObject,Resume,ResumeProfile
 from server.app.screening.models import ScreeningItem,ScreeningResult,ScreeningRun
 from server.app.llm.models import LlmProviderConfig,PromptVersion
 from server.app.queue.models import BackgroundJob
@@ -93,6 +93,21 @@ def test_clean_parse_then_score_is_replay_safe_and_auto_sends_completed_resume_t
         application=db.scalar(select(Application)); result=db.scalar(select(ScreeningResult)); completed=db.get(ScreeningRun,uuid.UUID(run["id"])); task=db.scalar(select(ApplicationReviewTask))
         assert application.stage=="review" and application.version==2 and application.source=="screening" and result.rule_score<=100 and completed.status=="completed" and completed.processed_count==1 and db.scalar(select(ScreeningItem.finished_at)).isoformat()
         assert task.ai_status=="failed" and task.safe_error_code=="llm_config_disabled"
+
+
+def test_parse_item_persists_final_native_text_email_as_unconfirmed_contact(tmp_path):
+    app,pipeline,_,_,job,_,item=seeded_pipeline(
+        tmp_path,
+        text=b"required: Python\nContact: native@example.com",
+    )
+
+    asyncio.run(pipeline.parse_item(job))
+
+    with app.state.identity_store.sync_session() as db:
+        candidate_id=db.get(ScreeningItem,uuid.UUID(item["id"])).candidate_id
+        contact=db.scalar(select(CandidateContact).where(CandidateContact.candidate_id==candidate_id))
+        assert contact.source=="native" and contact.confirmation_status=="unconfirmed"
+        assert app.state.contact_cipher.decrypt(contact.ciphertext)=="native@example.com"
 
 def test_worker_startup_enqueues_missing_historical_resume_profiles(tmp_path):
     app,pipeline,_,_,job,_,item=seeded_pipeline(tmp_path)
@@ -202,6 +217,35 @@ def test_profile_job_does_not_restore_profile_after_candidate_is_deleted(tmp_pat
     asyncio.run(handler(profile_job))
     with app.state.identity_store.sync_session() as db:
         assert db.scalar(select(ResumeProfile).where(ResumeProfile.resume_id==resume_id)) is None
+
+
+def test_profile_job_persists_final_ocr_text_email_as_unconfirmed_contact(tmp_path):
+    app,pipeline,_,_,job,_,item=seeded_pipeline(tmp_path)
+    asyncio.run(pipeline.parse_item(job))
+    with app.state.identity_store.sync_session() as db:
+        stored=db.get(ScreeningItem,uuid.UUID(item["id"])); resume_id=stored.resume_id
+        organization_id=stored.organization_id
+        db.query(ResumeProfile).delete(); db.commit()
+
+    class OcrEnhancer:
+        async def enhance(self,*args,**kwargs):
+            return SimpleNamespace(text="OCR contact ocr @ example.com",used_ocr=True,safe_error_code=None)
+
+    class Builder:
+        async def build(self,*args,**kwargs):
+            return ProfileBuild({"summary":None,"skills":["Python"],"experience":None,"education":None,"status":"partial","source":"rules"},"partial","rules")
+
+    handler=ResumeProfileJobHandler(app.state.identity_store.sync_session,OcrEnhancer(),Builder(),app.state.contact_cipher)
+    asyncio.run(handler(SimpleNamespace(
+        organization_id=organization_id,
+        payload={"organization_id":str(organization_id),"resume_id":str(resume_id)},
+        trace_id="ocr-email",
+    )))
+
+    with app.state.identity_store.sync_session() as db:
+        contact=db.scalar(select(CandidateContact).where(CandidateContact.candidate_id==stored.candidate_id))
+        assert contact.source=="ocr" and contact.confirmation_status=="unconfirmed"
+        assert app.state.contact_cipher.decrypt(contact.ciphertext)=="ocr@example.com"
 
 def test_rule_score_atomically_enqueues_eligible_llm_without_finishing_item(tmp_path):
     app,pipeline,storage,scanner,job,run,item=seeded_pipeline(tmp_path); asyncio.run(pipeline.parse_item(job))
