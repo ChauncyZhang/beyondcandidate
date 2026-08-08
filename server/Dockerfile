@@ -2,6 +2,13 @@ FROM python:3.12.11-slim@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /opt/beyondcandidate
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        fonts-noto-cjk \
+        libharfbuzz-subset0 \
+        libpango-1.0-0 \
+        libpangoft2-1.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 COPY server/requirements.txt /opt/beyondcandidate/server/requirements.txt
 RUN pip install --no-cache-dir -r server/requirements.txt
 COPY server /opt/beyondcandidate/server

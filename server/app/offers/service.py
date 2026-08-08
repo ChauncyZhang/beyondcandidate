@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from datetime import datetime, timezone
 
@@ -7,6 +8,7 @@ from server.app.identity.models import AuditLog, Job
 from server.app.recruiting.models import Application
 from server.app.recruiting.service import ResourceVersionConflict
 from server.app.offers.models import Offer, OfferApproval, OfferEvent, OfferResponse, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
+from server.app.offers.pdf import offer_pdf_storage_key, render_offer_pdf
 
 
 class OfferNotFound(Exception):
@@ -24,6 +26,7 @@ class OfferApprovalError(Exception):
 FINAL_OFFER_STATUSES = {"withdrawn", "expired"}
 ACTIVE_OFFER_STATUSES = {"draft", "pending_approval", "changes_requested", "ready_to_send", "sent"}
 REVISION_SOURCE_STATUSES = {"draft", "changes_requested", "ready_to_send", "sent"}
+PDF_RECEIPT_FIELDS = ("pdf_object_key", "pdf_sha256", "pdf_size_bytes", "pdf_rendered_at")
 
 
 def _audit(db, offer, actor_user_id, event_type, trace_id, payload):
@@ -49,6 +52,42 @@ def _current_version(db, offer):
     version = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == offer.organization_id, OfferVersion.offer_id == offer.id, OfferVersion.id == offer.current_version_id).with_for_update())
     if version is None:
         raise OfferApprovalError("offer has no current version")
+    return version
+
+
+def persist_offer_version_pdf(
+    db,
+    organization_id,
+    offer_version_id,
+    template_html,
+    variables,
+    storage,
+):
+    version = db.scalar(
+        select(OfferVersion)
+        .where(
+            OfferVersion.organization_id == organization_id,
+            OfferVersion.id == offer_version_id,
+        )
+        .with_for_update()
+    )
+    if version is None:
+        raise OfferNotFound
+    receipt_values = tuple(getattr(version, field) for field in PDF_RECEIPT_FIELDS)
+    if all(value is not None for value in receipt_values):
+        return version
+    if any(value is not None for value in receipt_values):
+        raise OfferApprovalError("offer PDF receipt is incomplete")
+
+    pdf_bytes = render_offer_pdf(template_html, variables)
+    digest = hashlib.sha256(pdf_bytes).hexdigest()
+    storage_key = offer_pdf_storage_key(version.organization_id, version.offer_id, version.id)
+    storage.write_immutable(storage_key, pdf_bytes, digest)
+    version.pdf_object_key = storage_key
+    version.pdf_sha256 = digest
+    version.pdf_size_bytes = len(pdf_bytes)
+    version.pdf_rendered_at = datetime.now(timezone.utc)
+    db.flush()
     return version
 
 

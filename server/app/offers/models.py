@@ -88,11 +88,22 @@ class OfferVersion(OfferRecord, Base):
     special_reason: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pdf_object_key: Mapped[str | None] = mapped_column(String(512))
+    pdf_sha256: Mapped[str | None] = mapped_column(String(64))
+    pdf_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    pdf_rendered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         UniqueConstraint("organization_id", "id"),
         UniqueConstraint("organization_id", "offer_id", "version_number"),
         UniqueConstraint("organization_id", "id", "offer_id"),
         UniqueConstraint("organization_id", "offer_id", "id", "version_number"),
+        CheckConstraint(
+            "(pdf_object_key is null and pdf_sha256 is null and pdf_size_bytes is null and pdf_rendered_at is null) or "
+            "(pdf_object_key is not null and pdf_sha256 is not null and length(pdf_sha256) = 64 and "
+            "pdf_sha256 = lower(pdf_sha256) and pdf_sha256 not like '%[^0-9a-f]%' and "
+            "pdf_size_bytes > 0 and pdf_rendered_at is not null)",
+            name="ck_offer_versions_pdf_receipt",
+        ),
         ForeignKeyConstraint(["organization_id", "offer_id"], ["offers.organization_id", "offers.id"], ondelete="CASCADE"),
         ForeignKeyConstraint(["organization_id", "created_by"], ["users.organization_id", "users.id"]),
         ForeignKeyConstraint(["organization_id", "template_id"], ["offer_templates.organization_id", "offer_templates.id"]),

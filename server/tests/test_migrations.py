@@ -19,7 +19,7 @@ TABLES = {"organizations", "departments", "workflow_templates", "users", "user_r
 def test_latest_migration_revision_is_current() -> None:
     script_directory = ScriptDirectory.from_config(Config("server/alembic.ini"))
 
-    assert script_directory.get_current_head() == "0033_offer_workflow"
+    assert script_directory.get_current_head() == "0034_offer_version_pdf_receipts"
 
 
 def test_email_delivery_schema_has_versioned_provider_and_dedupe_guards() -> None:
