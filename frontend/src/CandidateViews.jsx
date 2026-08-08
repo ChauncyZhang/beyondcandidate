@@ -340,57 +340,81 @@ const candidateEmailRoles = new Set(["招聘管理员", "recruiting_admin", "HR 
 function CandidateEmailDialog({ candidate, controller, onClose, onConfirmed }) {
   const dialogRef = useRef(null);
   const restoreRef = useRef(typeof document === "undefined" ? null : document.activeElement);
-  const [state, setState] = useState({ status: "loading", email: null, error: "", conflict: false });
-  const [selectedAddress, setSelectedAddress] = useState("");
+  const [state, setState] = useState({ status: "loading", email: null, error: "", recovery: "" });
+  const [selectedContactId, setSelectedContactId] = useState("");
+  const [manualCorrection, setManualCorrection] = useState(false);
+  const [manualValue, setManualValue] = useState("");
   const [confirmedByHr, setConfirmedByHr] = useState(false);
 
   async function load() {
-    setState({ status: "loading", email: null, error: "", conflict: false });
+    setState({ status: "loading", email: null, error: "", recovery: "" });
     try {
       const email = await controller.getCandidateEmail(candidate.id);
-      setSelectedAddress(email.value || email.addresses[0]?.value || "");
+      const primary = email.addresses.find((item) => item.value === email.value) || email.addresses[0] || null;
+      setSelectedContactId(primary?.id || "");
+      setManualCorrection(!primary?.id);
+      setManualValue(primary?.id ? "" : email.value || "");
       setConfirmedByHr(false);
-      setState({ status: "ready", email, error: "", conflict: false });
-    } catch { setState({ status: "error", email: null, error: "邮箱信息加载失败，请确认权限或稍后重试。", conflict: false }); }
+      setState({ status: "ready", email, error: "", recovery: "" });
+    } catch { setState({ status: "error", email: null, error: "邮箱信息加载失败，请确认权限或稍后重试。", recovery: "retry-load" }); }
   }
 
   useEffect(() => { void load(); }, [candidate.id, controller]);
   useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog || typeof document === "undefined") return undefined;
-    dialog.querySelector("[data-email-dialog-initial-focus]")?.focus();
     return () => restoreRef.current?.isConnected !== false && restoreRef.current?.focus?.();
+  }, []);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog || typeof document === "undefined") return;
+    const active = document.activeElement;
+    if (dialog.contains(active) && !active?.disabled) return;
+    const target = dialog.querySelector("[data-email-dialog-initial-focus]:not(:disabled), input:not(:disabled), button:not(:disabled)");
+    (target || dialog).focus();
   }, [state.status]);
 
   function handleKeyDown(event) {
     if (event.key === "Escape") { event.preventDefault(); if (state.status !== "saving") onClose(); return; }
     if (event.key !== "Tab") return;
     const controls = [...dialogRef.current.querySelectorAll("button, input")].filter((item) => !item.disabled);
+    if (!controls.length) { event.preventDefault(); dialogRef.current.focus(); return; }
     const first = controls[0]; const last = controls.at(-1);
     if (event.shiftKey && (document.activeElement === first || !dialogRef.current.contains(document.activeElement))) { event.preventDefault(); last?.focus(); }
     else if (!event.shiftKey && (document.activeElement === last || !dialogRef.current.contains(document.activeElement))) { event.preventDefault(); first?.focus(); }
   }
 
   async function confirm() {
-    if (!state.email || !selectedAddress || !confirmedByHr) return;
-    setState((current) => ({ ...current, status: "saving", error: "", conflict: false }));
-    try { const saved = await controller.confirmCandidateEmail(candidate.id, state.email.version, selectedAddress); await onConfirmed(saved); onClose(); }
-    catch (error) { setState((current) => ({ ...current, status: "ready", conflict: error?.status === 409, error: error?.status === 409 ? "邮箱信息已被其他成员更新。你的确认未覆盖最新记录。" : "邮箱确认失败，请稍后重试。" })); }
+    const selection = manualCorrection ? { value: manualValue } : { contactId: selectedContactId };
+    if (!state.email || (!selection.contactId && !selection.value.trim()) || !confirmedByHr) return;
+    setState((current) => ({ ...current, status: "saving", error: "", recovery: "" }));
+    let saved;
+    try { saved = await controller.confirmCandidateEmail(candidate.id, state.email.version, selection); }
+    catch (error) {
+      if (error?.code === "resource_version_conflict") setState((current) => ({ ...current, status: "ready", recovery: "refresh", error: "邮箱信息已被其他成员更新。你的确认未覆盖最新记录。" }));
+      else if (error?.code === "candidate_email_conflict") setState((current) => ({ ...current, status: "ready", recovery: "manual", error: "所选邮箱与现有候选人联系方式冲突，请核对后改用手动更正。" }));
+      else if (error?.code === "idempotency_conflict") setState((current) => ({ ...current, status: "ready", recovery: "retry-confirm", error: "本次确认请求与先前操作不一致，未修改邮箱。请重新确认当前选择。" }));
+      else setState((current) => ({ ...current, status: "ready", recovery: "retry-confirm", error: "邮箱确认失败，请稍后重试。" }));
+      setConfirmedByHr(false);
+      return;
+    }
+    onClose();
+    await onConfirmed(saved);
   }
 
   const email = state.email;
   const addresses = email?.addresses || [];
-  return <div className="candidate-dialog-backdrop candidate-email-dialog-backdrop" role="presentation" onMouseDown={state.status === "saving" ? undefined : onClose}><section ref={dialogRef} className="candidate-dialog candidate-email-dialog" role="dialog" aria-modal="true" aria-labelledby="candidate-email-dialog-title" onMouseDown={(event) => event.stopPropagation()} onKeyDown={handleKeyDown}>
+  const selectedValue = manualCorrection ? manualValue.trim() : selectedContactId;
+  return <div className="candidate-dialog-backdrop candidate-email-dialog-backdrop" role="presentation" onMouseDown={state.status === "saving" ? undefined : onClose}><section ref={dialogRef} tabIndex={-1} className="candidate-dialog candidate-email-dialog" role="dialog" aria-modal="true" aria-labelledby="candidate-email-dialog-title" onMouseDown={(event) => event.stopPropagation()} onKeyDown={handleKeyDown}>
     <header><div><h3 id="candidate-email-dialog-title">确认候选人邮箱</h3><p>{candidate.name} · 明文仅在此授权窗口中显示</p></div><button className="icon-button" type="button" data-email-dialog-initial-focus aria-label="关闭" disabled={state.status === "saving"} onClick={onClose}><X size={19} /></button></header>
     <div className="candidate-dialog-body email-confirmation-body">
       {state.status === "loading" && <div className="candidate-email-state" role="status"><LoaderCircle className="spin" size={20} />正在读取授权邮箱…</div>}
       {state.status === "error" && <div className="candidate-email-state error" role="alert"><CircleAlert size={20} /><span>{state.error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
       {email && <><div className="email-source-summary"><span>来源</span><strong>{candidateEmailSourceLabels[email.source] || "来源未标记"}</strong><span>确认状态</span><strong>{email.confirmationStatus === "confirmed" ? "已确认" : "待确认"}</strong></div>
-        {addresses.length > 1 ? <fieldset className="candidate-email-options"><legend>选择要确认的邮箱地址</legend>{addresses.map((item) => <label key={`${item.value}-${item.source}`}><input type="radio" name="candidate-email" value={item.value} checked={selectedAddress === item.value} disabled={state.status === "saving"} onChange={(event) => { setSelectedAddress(event.target.value); setConfirmedByHr(false); }} /><span><strong>{item.value}</strong><small>{candidateEmailSourceLabels[item.source] || "来源未标记"}</small></span></label>)}</fieldset> : addresses.length === 1 ? <div className="candidate-email-value"><span>邮箱地址</span><strong>{addresses[0].value}</strong></div> : <label>邮箱地址<input type="email" value={selectedAddress} disabled={state.status === "saving"} onChange={(event) => { setSelectedAddress(event.target.value); setConfirmedByHr(false); }} placeholder="candidate@example.com" /></label>}
+        <fieldset className="candidate-email-options"><legend>选择要确认的邮箱地址</legend>{addresses.map((item) => <label key={item.id || `${item.value}-${item.source}`}><input type="radio" name="candidate-email" value={item.id} checked={!manualCorrection && selectedContactId === item.id} disabled={state.status === "saving"} onChange={() => { setSelectedContactId(item.id); setManualCorrection(false); setConfirmedByHr(false); }} /><span><strong>{item.value}</strong><small>{candidateEmailSourceLabels[item.source] || "来源未标记"} · {item.confirmationStatus === "confirmed" ? "已确认" : "待确认"}</small></span></label>)}<label><input type="radio" name="candidate-email" value="manual" checked={manualCorrection} disabled={state.status === "saving"} onChange={() => { setManualCorrection(true); setConfirmedByHr(false); }} /><span><strong>手动更正</strong><small>录入候选人明确提供的新地址</small></span></label></fieldset>
+        {manualCorrection && <label>手动更正邮箱<input type="email" value={manualValue} disabled={state.status === "saving"} onChange={(event) => { setManualValue(event.target.value); setConfirmedByHr(false); }} placeholder="candidate@example.com" /></label>}
         <label className="candidate-email-explicit"><input type="checkbox" checked={confirmedByHr} disabled={state.status === "saving"} onChange={(event) => setConfirmedByHr(event.target.checked)} /><span>我已与候选人核对，并确认将此地址用于招聘邮件。</span></label>
-        {state.error && <div className="candidate-email-state error" role="alert"><CircleAlert size={18} /><span>{state.error}</span>{state.conflict && <button type="button" onClick={() => void load()}>加载最新邮箱</button>}</div>}</>}
+        {state.error && <div className="candidate-email-state error" role="alert"><CircleAlert size={18} /><span>{state.error}</span>{state.recovery === "refresh" && <button type="button" onClick={() => void load()}>加载最新邮箱</button>}{state.recovery === "manual" && <button type="button" onClick={() => { setManualCorrection(true); setState((current) => ({ ...current, error: "", recovery: "" })); }}>改用手动更正</button>}{state.recovery === "retry-confirm" && <button type="button" onClick={() => setState((current) => ({ ...current, error: "", recovery: "" }))}>重新核对</button>}</div>}</>}
     </div>
-    <footer><button className="button secondary" type="button" disabled={state.status === "saving"} onClick={onClose}>取消</button><button className="button primary" type="button" disabled={state.status !== "ready" || !selectedAddress || !confirmedByHr} onClick={() => void confirm()}>{state.status === "saving" ? "确认中…" : email?.confirmationStatus === "confirmed" ? "重新确认此邮箱" : "确认并用于发送"}</button></footer>
+    <footer><button className="button secondary" type="button" disabled={state.status === "saving"} onClick={onClose}>取消</button><button className="button primary" type="button" disabled={state.status !== "ready" || !selectedValue || !confirmedByHr} onClick={() => void confirm()}>{state.status === "saving" ? "确认中…" : email?.confirmationStatus === "confirmed" ? "重新确认此邮箱" : "确认并用于发送"}</button></footer>
   </section></div>;
 }
 
@@ -608,7 +632,7 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
     </section></main><aside className="candidate-context"><section><h3>当前申请</h3><dl><div><dt>应聘职位</dt><dd>{candidate.position}</dd></div><div><dt>当前状态</dt><dd><StageTag stage={candidate.stage} /></dd></div><div><dt>招聘负责人（HR）</dt><dd>{candidate.owner}</dd></div><div><dt>下一步</dt><dd>{nextStep}</dd></div><div><dt>最近进展</dt><dd>{candidate.lastActivity || "未记录"}</dd></div></dl><p className="candidate-auto-stage-note">状态会在完成业务动作后自动更新，无需手动维护。</p></section>{candidate.reviewTask && candidate.stage === "待复核" && <section className="candidate-review-assignee"><h3>简历评审</h3><dl><div><dt>当前评审人</dt><dd>{candidate.reviewTask.assigneeName}</dd></div></dl>{canReassignReview && <button className="button secondary full" type="button" disabled={pendingAction === "review-reassignment"} onClick={() => { setActionError(""); setConflict(false); setReassignOpen(true); }}><UserRoundCheck size={16} />改派评审人</button>}</section>}<CandidateGovernance candidate={candidate} role={role} onNotify={onNotify} />{!candidate.serverBacked && <section><h3>标签</h3><div className="context-tags">{candidate.tags.map((item) => <span key={item}>{item}</span>)}</div><div className="inline-add"><input value={tagInput} onChange={(event) => setTagInput(event.target.value)} placeholder="添加标签" /><button type="button" aria-label="添加标签" onClick={addTag}><Plus size={15} /></button></div></section>}<section><h3>招聘备注</h3>{notes.map((item, index) => <p className="saved-note" key={typeof item === "object" ? item.id : `${item}-${index}`}>{typeof item === "object" ? item.body : item}</p>)}{notes.length === 0 && <p className="candidate-muted">暂无招聘备注</p>}<textarea rows="4" disabled={pendingAction === "note"} value={note} onChange={(event) => setNote(event.target.value)} placeholder="记录沟通重点或后续事项" /><button className="button secondary full" type="button" disabled={!note.trim() || pendingAction === "note"} onClick={() => void addNote()}>{pendingAction === "note" ? "保存中" : "保存备注"}</button></section></aside></div>
     {selectedWorkflowAction && <WorkflowActionDialog candidate={candidate} action={selectedWorkflowAction} serverBacked={candidate.serverBacked} submitting={pendingAction === "workflow"} actionError={actionError} conflict={conflict} onClose={() => setSelectedWorkflowAction(null)} onCommit={commitWorkflowAction} onConflictRefresh={(latestStage) => { if (candidate.serverBacked) { void onRefresh(); setSelectedWorkflowAction(null); return; } update({ stage: latestStage, version: 3, lastActivity: "刚刚", timeline: [{ time: "刚刚", actor: "系统", action: `检测到其他成员已更新流程` }, ...candidate.timeline] }); setSelectedWorkflowAction(null); onNotify("已刷新为服务端最新状态"); }} />}
     {reassignOpen && <ReviewReassignmentDialog candidate={candidate} controller={controller} submitting={pendingAction === "review-reassignment"} onClose={() => setReassignOpen(false)} onConfirm={commitReviewReassignment} />}
-    {emailDialogOpen && <CandidateEmailDialog candidate={candidate} controller={controller} onClose={() => setEmailDialogOpen(false)} onConfirmed={async () => { onNotify("候选人邮箱已确认"); await onRefresh(); }} />}
+    {emailDialogOpen && <CandidateEmailDialog candidate={candidate} controller={controller} onClose={() => setEmailDialogOpen(false)} onConfirmed={(saved) => { update({ email: saved.maskedValue || candidate.email }); onNotify("候选人邮箱已确认"); }} />}
     {previewState && <ResumePreview candidate={candidate} file={previewState.file} status={previewState.status} error={previewState.error} downloading={pendingAction === "download"} onClose={closePreview} onRetry={() => void loadPreview()} onDownload={() => void downloadResume()} />}
   </div>;
 }

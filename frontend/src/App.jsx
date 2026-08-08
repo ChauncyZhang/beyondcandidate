@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useBeforeUnload, useBlocker, useLocation, useNavigate } from "react-router-dom";
 import {
   BriefcaseBusiness,
   Building2,
@@ -168,6 +168,10 @@ function Modal({ title, children, onClose, footer }) {
   );
 }
 
+function UnsavedChangesDialog({ logout, onContinue, onDiscard }) {
+  return <div className="ux07-dialog-backdrop"><section className="ux07-dialog" role="dialog" aria-modal="true" aria-label="未保存的设置"><header><div><h3>设置尚未保存</h3><p>{logout ? "退出登录会丢弃当前邮件或 AI 设置修改。" : "离开当前页面会丢弃邮件或 AI 设置修改。"}</p></div></header><div className="ux07-danger-impact"><CircleAlert size={22} /><span>SMTP 密码替换值仅保留在当前编辑页面；取消离开可继续编辑且不会丢失。</span></div><footer><button className="button secondary" type="button" autoFocus onClick={onContinue}>继续编辑</button><button className="button danger" type="button" onClick={onDiscard}>{logout ? "放弃修改并退出" : "放弃修改并离开"}</button></footer></section></div>;
+}
+
 function inviteTokenFromHash() {
   if (typeof window === "undefined") return "";
   const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
@@ -212,6 +216,16 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
   const recentTaskStorageKey = getRecentScreeningTaskStorageKey(session.user);
   const location = useLocation();
   const navigate = useNavigate();
+  const [hasUnsavedSettings, setHasUnsavedSettings] = useState(false);
+  const [logoutPending, setLogoutPending] = useState(false);
+  const blocker = useBlocker(useCallback(({ currentLocation, nextLocation }) => (
+    hasUnsavedSettings && `${currentLocation.pathname}${currentLocation.search}` !== `${nextLocation.pathname}${nextLocation.search}`
+  ), [hasUnsavedSettings]));
+  useBeforeUnload(useCallback((event) => {
+    if (!hasUnsavedSettings) return;
+    event.preventDefault();
+    event.returnValue = "";
+  }, [hasUnsavedSettings]));
   const route = useMemo(() => parseAppRoute(location), [location.pathname, location.search]);
   const defaultNav = getDefaultNavItem(currentRole) || "设置";
   const activeNav = route.nav || defaultNav;
@@ -300,6 +314,31 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
   });
   const jobDraftUserId = session.user?.id || "";
   const jobCreateDraft = route.kind === "jobs" && route.mode === "new" ? readJobCreateDraft(window.sessionStorage, jobDraftUserId) : null;
+
+  async function performLogout() {
+    clearJobCreateDraft(window.sessionStorage, jobDraftUserId);
+    await onLogout();
+  }
+
+  function requestLogout() {
+    if (hasUnsavedSettings) { setLogoutPending(true); return; }
+    void performLogout().catch(() => {});
+  }
+
+  function continueEditing() {
+    setLogoutPending(false);
+    if (blocker.state === "blocked") blocker.reset();
+  }
+
+  function discardUnsavedChanges() {
+    setHasUnsavedSettings(false);
+    if (logoutPending) {
+      setLogoutPending(false);
+      void performLogout().catch(() => {});
+      return;
+    }
+    if (blocker.state === "blocked") blocker.proceed();
+  }
 
   const workbenchJobs = workbenchState.data?.jobs || [];
   const activeWorkbenchJob = workbenchJobs.find((job) => job.id === activeWorkbenchJobId) || workbenchJobs[0] || null;
@@ -1001,7 +1040,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
             {!screeningTask && activeNav === "工作台" && canPerformAction(currentRole, "导入简历") && <button className="button primary" type="button" onClick={() => setImportOpen(true)}><Import size={17} />导入简历</button>}
             <span className="page-primary-action-host" ref={setPageActionHost} />
             <IconButton label="个人设置" className="mobile-profile-action" onClick={() => setProfileOpen(true)}><UserRound size={18} /></IconButton>
-            <IconButton label={session.loggingOut ? "正在退出" : "退出登录"} className="logout-action" disabled={session.loggingOut} onClick={() => { clearJobCreateDraft(window.sessionStorage, jobDraftUserId); void onLogout().catch(() => {}); }}><LogOut size={18} /></IconButton>
+            <IconButton label={session.loggingOut ? "正在退出" : "退出登录"} className="logout-action" disabled={session.loggingOut} onClick={requestLogout}><LogOut size={18} /></IconButton>
           </div>
         </header>
 
@@ -1167,7 +1206,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
         )}
 
         {!screeningTask && activeNav === "设置" && (
-          <SettingsWorkspace currentRole={currentRole} onNotify={notify} section={route.section} organizationTab={settingsOrganizationTab} templateTab={route.section === "流程与评价模板" ? route.tab : undefined} onRouteChange={(section, tab) => navigate(settingsPath(section, tab, route.returnTo))} pageActionHost={pageActionHost} />
+          <SettingsWorkspace currentRole={currentRole} onNotify={notify} onUnsavedChangesChange={setHasUnsavedSettings} section={route.section} organizationTab={settingsOrganizationTab} templateTab={route.section === "流程与评价模板" ? route.tab : undefined} onRouteChange={(section, tab) => navigate(settingsPath(section, tab, route.returnTo))} pageActionHost={pageActionHost} />
         )}
 
         {!screeningTask && activeNav !== "工作台" && activeNav !== "职位" && activeNav !== "筛选任务" && activeNav !== "候选人" && activeNav !== "面试" && activeNav !== "人才库" && activeNav !== "报表" && activeNav !== "设置" && (
@@ -1179,6 +1218,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
 
       {importOpen && <ImportWizard activeJob={activeJob} recentTask={recentTask} controller={screeningController} onClose={() => setImportOpen(false)} onCreateTask={(task) => { setImportOpen(false); handleTaskChange(task); navigate(screeningTaskPath(task.id)); }} onRunCreated={persistRecentServerTask} onResumeTask={(task) => { setImportOpen(false); setScreeningTask(task); navigate(screeningTaskPath(task.id)); }} onNotify={notify} actorName={roleIdentity.name} />}
       {profileOpen && <ProfileSettings user={session.user} role={currentRole} client={accountClient} onClose={() => setProfileOpen(false)} />}
+      {(logoutPending || blocker.state === "blocked") && <UnsavedChangesDialog logout={logoutPending} onContinue={continueEditing} onDiscard={discardUnsavedChanges} />}
 
       {talentAddDialog && (
         <Modal

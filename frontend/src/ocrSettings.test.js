@@ -132,8 +132,9 @@ test("test is blocked for dirty, unconfigured, or keyless saved settings", () =>
 });
 
 test("AI Settings renders flat LLM and OCR sections with combined navigation protection", async () => {
-  const [source, styles] = await Promise.all([
+  const [source, appSource, styles] = await Promise.all([
     readFile(new URL("./SettingsViews.jsx", import.meta.url), "utf8"),
+    readFile(new URL("./App.jsx", import.meta.url), "utf8"),
     readFile(new URL("./product-theme-admin.css", import.meta.url), "utf8"),
   ]);
 
@@ -141,7 +142,8 @@ test("AI Settings renders flat LLM and OCR sections with combined navigation pro
   assert.match(source, /<h2 id="ocr-settings-title">OCR 文档识别<\/h2>/);
   assert.match(source, /仅扫描件或低质量 PDF 的页面图像会发送到外部 OCR 服务/);
   assert.match(source, /onDirtyChange\?\.\(llmDirty \|\| ocrDirty\)/);
-  assert.match(source, /window\.addEventListener\("beforeunload"/);
+  assert.match(appSource, /useBeforeUnload/);
+  assert.match(appSource, /useBlocker/);
   assert.match(source, /招聘管理员仅可查看安全配置状态/);
   assert.match(source, /仅支持小写字母、数字、下划线和连字符/);
   assert.match(styles, /\.ai-settings-block \+ \.ai-settings-block/);

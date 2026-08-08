@@ -1017,22 +1017,17 @@ function emailSettingsError(error, action) {
 }
 
 function EmailSettings({ onNotify, onDirtyChange, controller = emailSettingsController }) {
-  const empty = { configured: false, host: "", port: 587, tlsMode: "starttls", username: "", enabled: false, version: 0 };
+  const empty = { configured: false, host: "", port: 587, tlsMode: "starttls", username: "", enabled: false, version: 0, senderName: "", senderAddress: "", defaultReplyToEmail: "", defaultReplyToName: "" };
   const [saved, setSaved] = useState(empty);
   const [draft, setDraft] = useState(empty);
   const [passwordReplacement, setPasswordReplacement] = useState("");
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
-  const [testForm, setTestForm] = useState({ recipient: "", replyToEmail: "", replyToName: "" });
+  const [testRecipient, setTestRecipient] = useState("");
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(saved) || passwordReplacement.length > 0, [draft, saved, passwordReplacement]);
   const busy = ["loading", "saving", "testing"].includes(status);
 
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
-  useEffect(() => {
-    const beforeunload = (event) => { if (dirty) { event.preventDefault(); event.returnValue = ""; } };
-    window.addEventListener("beforeunload", beforeunload);
-    return () => window.removeEventListener("beforeunload", beforeunload);
-  }, [dirty]);
 
   async function load() {
     setStatus("loading"); setError("");
@@ -1044,53 +1039,38 @@ function EmailSettings({ onNotify, onDirtyChange, controller = emailSettingsCont
   async function save(event) {
     event.preventDefault(); setStatus("saving"); setError("");
     try { const config = await controller.save(draft, passwordReplacement); setSaved(config); setDraft(config); setPasswordReplacement(""); setStatus("ready"); onNotify("邮件发送设置已保存"); }
-    catch (requestError) { setStatus("ready"); setError(emailSettingsError(requestError, "save")); }
+    catch (requestError) { setStatus(requestError?.code === "resource_version_conflict" ? "conflict" : "ready"); setError(emailSettingsError(requestError, "save")); }
   }
   async function testSaved() {
     setStatus("testing"); setError("");
-    try { await controller.testSavedConfiguration(testForm, { dirty }); setStatus("ready"); onNotify("测试邮件已使用已保存配置进入发送队列"); }
+    try { await controller.testSavedConfiguration({ recipient: testRecipient }, { dirty }); setStatus("ready"); onNotify("测试邮件已使用已保存配置进入发送队列"); }
     catch (requestError) { setStatus("ready"); setError(emailSettingsError(requestError, "test")); }
   }
 
-  const testReady = saved.configured && !dirty && testForm.recipient.trim() && testForm.replyToEmail.trim() && testForm.replyToName.trim();
+  const testReady = saved.configured && !dirty && testRecipient.trim();
   const endpointChanged = ["host", "port", "tlsMode", "username"].some((key) => draft[key] !== saved[key]);
   const passwordRequired = !saved.configured || endpointChanged;
   return <section className="settings-section email-settings" aria-labelledby="email-settings-title">
-    <div className="settings-section-heading"><div><h2 id="email-settings-title"><Mail size={21} />邮件发送设置</h2><p>仅系统管理员可配置组织的 SMTP 连接；密码只在明确替换时提交。</p></div>{status === "error" && <button className="button secondary" type="button" onClick={() => void load()}><RefreshCw size={16} />重新加载</button>}</div>
+    <div className="settings-section-heading"><div><h2 id="email-settings-title"><Mail size={21} />邮件发送设置</h2><p>仅系统管理员可配置组织的 SMTP 连接；密码只在明确替换时提交。</p></div>{["error", "conflict"].includes(status) && <button className="button secondary" type="button" onClick={() => void load()}><RefreshCw size={16} />重新加载邮件设置</button>}</div>
     {status === "loading" && <div className="organization-state" role="status"><RefreshCw size={18} />正在加载邮件设置…</div>}
     {error && <div className="settings-error" role="alert"><AlertTriangle size={17} />{error}</div>}
-    {status !== "loading" && <><div className="email-server-policy"><LockKeyhole size={19} /><div><strong>发件身份由服务端统一管理</strong><p>发件人名称与地址不可在此修改，系统不会允许客户端伪造 From 身份。</p><small>默认回复地址：服务端当前未向设置 API 公开；业务发送由授权流程提供，测试时需在下方单独填写。</small></div></div>
-      <form className="email-settings-form" onSubmit={save}><label>SMTP 主机<input required maxLength="253" disabled={busy} value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} placeholder="smtp.example.com" /></label><label>端口<input required type="number" min="1" max="65535" disabled={busy} value={draft.port} onChange={(event) => setDraft({ ...draft, port: Number(event.target.value) })} /></label><label>TLS 模式<select disabled={busy} value={draft.tlsMode} onChange={(event) => setDraft({ ...draft, tlsMode: event.target.value })}><option value="starttls">STARTTLS</option><option value="tls">TLS</option></select></label><label>用户名<input required maxLength="320" autoComplete="username" disabled={busy} value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></label><label className="email-password-field">替换 SMTP 密码<input type="password" autoComplete="new-password" disabled={busy} value={passwordReplacement} onChange={(event) => setPasswordReplacement(event.target.value)} placeholder={saved.configured ? "留空表示不替换" : "首次配置必须填写"} /><small>系统不会读取、返回或保留已保存密码；首次配置或修改连接端点时必须明确输入替换值。</small></label><label className="email-enabled"><input type="checkbox" disabled={busy} checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />启用此 SMTP 配置</label><div className="email-settings-actions"><span aria-live="polite">{passwordRequired && dirty && !passwordReplacement ? "当前修改需要输入 SMTP 密码替换值。" : dirty ? "有未保存修改；保存前不能发送测试邮件。" : saved.configured ? `已保存版本 ${saved.version}` : "尚未保存 SMTP 配置"}</span><button className="button primary" type="submit" disabled={busy || !dirty || !draft.host.trim() || !draft.username.trim() || (passwordRequired && !passwordReplacement)}>{status === "saving" ? "保存中…" : "保存邮件设置"}</button></div></form>
-      <section className="email-test-panel"><header><h3>测试已保存配置</h3><p>测试只使用服务端已保存的 SMTP 配置，不会使用上方未保存内容。</p></header><div className="email-test-fields"><label>测试收件人<input type="email" disabled={busy} value={testForm.recipient} onChange={(event) => setTestForm({ ...testForm, recipient: event.target.value })} /></label><label>本次测试回复地址<input type="email" disabled={busy} value={testForm.replyToEmail} onChange={(event) => setTestForm({ ...testForm, replyToEmail: event.target.value })} /></label><label>本次测试回复名称<input disabled={busy} value={testForm.replyToName} onChange={(event) => setTestForm({ ...testForm, replyToName: event.target.value })} /></label><button className="button secondary" type="button" disabled={busy || !testReady} onClick={() => void testSaved()}>{status === "testing" ? "提交中…" : "发送测试邮件"}</button></div></section></>}
+    {status !== "loading" && <><div className="email-server-policy"><LockKeyhole size={19} /><div><strong>发件身份由服务端统一管理</strong><dl><div><dt>发件人名称</dt><dd>{saved.senderName || "未配置"}</dd></div><div><dt>发件地址</dt><dd>{saved.senderAddress || "未配置"}</dd></div></dl><small>固定 From 身份只读，由服务端策略管理，客户端不能修改或伪造。</small></div></div>
+      <form className="email-settings-form" onSubmit={save}><label>SMTP 主机<input required maxLength="253" disabled={busy} value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} placeholder="smtp.example.com" /></label><label>端口<input required type="number" min="1" max="65535" disabled={busy} value={draft.port} onChange={(event) => setDraft({ ...draft, port: Number(event.target.value) })} /></label><label>TLS 模式<select disabled={busy} value={draft.tlsMode} onChange={(event) => setDraft({ ...draft, tlsMode: event.target.value })}><option value="starttls">STARTTLS</option><option value="tls">TLS</option></select></label><label>用户名<input required maxLength="320" autoComplete="username" disabled={busy} value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></label><label>默认回复地址<input required type="email" maxLength="320" disabled={busy} value={draft.defaultReplyToEmail} onChange={(event) => setDraft({ ...draft, defaultReplyToEmail: event.target.value })} /></label><label>默认回复名称<input required maxLength="200" disabled={busy} value={draft.defaultReplyToName} onChange={(event) => setDraft({ ...draft, defaultReplyToName: event.target.value })} /></label><label className="email-password-field">替换 SMTP 密码<input type="password" autoComplete="new-password" disabled={busy} value={passwordReplacement} onChange={(event) => setPasswordReplacement(event.target.value)} placeholder={saved.configured ? "留空表示不替换" : "首次配置必须填写"} /><small>系统不会读取、返回或保留已保存密码；首次配置或修改连接端点时必须明确输入替换值。</small></label><label className="email-enabled"><input type="checkbox" disabled={busy} checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />启用此 SMTP 配置</label><div className="email-settings-actions"><span aria-live="polite">{passwordRequired && dirty && !passwordReplacement ? "当前修改需要输入 SMTP 密码替换值。" : dirty ? "有未保存修改；保存前不能发送测试邮件。" : saved.configured ? `已保存版本 ${saved.version}` : "尚未保存 SMTP 配置"}</span><button className="button primary" type="submit" disabled={busy || !dirty || !draft.host.trim() || !draft.username.trim() || !draft.defaultReplyToEmail.trim() || !draft.defaultReplyToName.trim() || (passwordRequired && !passwordReplacement)}>{status === "saving" ? "保存中…" : "保存邮件设置"}</button></div></form>
+      <section className="email-test-panel"><header><h3>测试已保存配置</h3><p>测试只使用服务端已保存的 SMTP 与默认回复地址：{saved.defaultReplyToName || "未配置"} {saved.defaultReplyToEmail || ""}</p></header><div className="email-test-fields"><label>测试收件人<input type="email" disabled={busy} value={testRecipient} onChange={(event) => setTestRecipient(event.target.value)} /></label><button className="button secondary" type="button" disabled={busy || !testReady} onClick={() => void testSaved()}>{status === "testing" ? "提交中…" : "发送测试邮件"}</button></div></section></>}
   </section>;
 }
 
-export function SettingsWorkspace({ currentRole, onRoleChange, onNotify, pageActionHost, section = "组织与权限", organizationTab = "成员", templateTab = "招聘流程", onRouteChange = () => {} }) {
+export function SettingsWorkspace({ currentRole, onRoleChange, onNotify, onUnsavedChangesChange = () => {}, pageActionHost, section = "组织与权限", organizationTab = "成员", templateTab = "招聘流程", onRouteChange = () => {} }) {
   const [aiDirty, setAiDirty] = useState(false);
   const [emailDirty, setEmailDirty] = useState(false);
-  const [pendingSection, setPendingSection] = useState(null);
   const allowedSettingsSections = getAllowedSettingsSections(currentRole);
   const visibleSettingsSections = settingsSections.filter(([label]) => allowedSettingsSections.includes(label));
   const activeSection = allowedSettingsSections.includes(section) ? section : allowedSettingsSections[0];
   const content = activeSection === "组织与权限" ? <OrganizationSettings role={currentRole} onNotify={onNotify} pageActionHost={pageActionHost} activeTab={organizationTab} onTabChange={(tab) => onRouteChange("组织与权限", tab)} /> : activeSection === "流程与评价模板" ? <TemplateSettings role={currentRole} onNotify={onNotify} activeTab={templateTab} onTabChange={(tab) => onRouteChange("流程与评价模板", tab)} /> : activeSection === "AI 设置" ? <><AiSettings role={currentRole} onNotify={onNotify} onDirtyChange={setAiDirty} />{currentRole === "系统管理员" && <EmailSettings onNotify={onNotify} onDirtyChange={setEmailDirty} />}</> : activeSection === "飞书集成" ? <FeishuIntegrationSettings onNotify={onNotify} /> : activeSection === "审计与数据治理" ? <AuditSettings key={currentRole} role={currentRole} onNotify={onNotify} /> : <section className="settings-denied"><LockKeyhole size={31} /><h3>无设置权限</h3><p>当前账号未获得系统设置访问权限。</p></section>;
-  useEffect(() => {
-    if (!aiDirty) return undefined;
-    const preventUnsavedExit = (event) => { event.preventDefault(); event.returnValue = ""; };
-    window.addEventListener("beforeunload", preventUnsavedExit);
-    return () => window.removeEventListener("beforeunload", preventUnsavedExit);
-  }, [aiDirty]);
+  useEffect(() => { onUnsavedChangesChange(aiDirty || emailDirty); }, [aiDirty, emailDirty, onUnsavedChangesChange]);
+  useEffect(() => () => onUnsavedChangesChange(false), [onUnsavedChangesChange]);
   function openSection(nextSection) {
-    if (activeSection === "AI 设置" && (aiDirty || emailDirty) && nextSection !== activeSection) {
-      setPendingSection(nextSection);
-      return;
-    }
     onRouteChange(nextSection, settingsDefaultTabs[nextSection]);
   }
-  function leaveAiSettings() {
-    setAiDirty(false);
-    setEmailDirty(false);
-    onRouteChange(pendingSection, settingsDefaultTabs[pendingSection]);
-    setPendingSection(null);
-  }
-  return <div className="settings-page"><RoleSwitch value={currentRole} onChange={onRoleChange} /><div className="settings-layout"><nav className="settings-subnav" aria-label="设置导航">{visibleSettingsSections.map(([label, Icon]) => <button type="button" key={label} className={activeSection === label ? "active" : ""} aria-current={activeSection === label ? "page" : undefined} onClick={() => openSection(label)}><Icon size={17} />{label}</button>)}</nav><main className="settings-content">{content}</main></div>{pendingSection && <div className="ux07-dialog-backdrop"><section className="ux07-dialog" role="dialog" aria-modal="true" aria-label="系统设置尚未保存"><header><div><h3>系统设置尚未保存</h3><p>离开将放弃当前页面中尚未保存的配置修改。</p></div><button className="icon-button" type="button" aria-label="关闭" onClick={() => setPendingSection(null)}><X size={19} /></button></header><div className="ux07-danger-impact"><AlertTriangle size={22} /><span>未保存的 AI 或邮件连接配置与密码替换输入都会被清除。</span></div><footer><button className="button secondary" type="button" onClick={() => setPendingSection(null)}>继续编辑</button><button className="button danger" type="button" onClick={leaveAiSettings}>放弃修改并离开</button></footer></section></div>}</div>;
+  return <div className="settings-page"><RoleSwitch value={currentRole} onChange={onRoleChange} /><div className="settings-layout"><nav className="settings-subnav" aria-label="设置导航">{visibleSettingsSections.map(([label, Icon]) => <button type="button" key={label} className={activeSection === label ? "active" : ""} aria-current={activeSection === label ? "page" : undefined} onClick={() => openSection(label)}><Icon size={17} />{label}</button>)}</nav><main className="settings-content">{content}</main></div></div>;
 }

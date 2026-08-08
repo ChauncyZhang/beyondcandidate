@@ -107,10 +107,18 @@ function normalizeCandidateEmail(value) {
   const addresses = safeArray(value?.addresses).flatMap((item) => {
     const address = typeof item === "string" ? item : safeString(item?.value);
     if (!address) return [];
-    return [{ value: address, source: safeString(item?.source, source) }];
+    return [{
+      id: safeString(item?.id),
+      maskedValue: safeString(item?.masked_value) || null,
+      value: address,
+      source: safeString(item?.source, source),
+      confirmationStatus: item?.confirmation_status === "confirmed" ? "confirmed" : "unconfirmed",
+      confirmedAt: safeString(item?.confirmed_at) || null,
+      version: Number.isInteger(item?.version) ? item.version : 1,
+    }];
   });
   const primaryValue = safeString(value?.value);
-  if (!addresses.length && primaryValue) addresses.push({ value: primaryValue, source });
+  if (!addresses.length && primaryValue) addresses.push({ id: "", maskedValue: safeString(value?.masked_value) || null, value: primaryValue, source, confirmationStatus: value?.confirmation_status === "confirmed" ? "confirmed" : "unconfirmed", confirmedAt: safeString(value?.confirmed_at) || null, version: Number.isInteger(value?.version) ? value.version : 1 });
   return {
     maskedValue: safeString(value?.masked_value) || null,
     value: primaryValue || addresses[0]?.value || null,
@@ -427,17 +435,18 @@ export function createCandidateController({ client = apiClient, idempotencyKey =
     return normalizeCandidateEmail(result?.data);
   }
 
-  async function confirmCandidateEmail(candidateId, version, value, { signal } = {}) {
+  async function confirmCandidateEmail(candidateId, version, selection, { signal } = {}) {
     const id = safeString(candidateId).trim();
-    const address = safeString(value).trim();
+    const contactId = safeString(selection?.contactId).trim();
+    const address = safeString(typeof selection === "string" ? selection : selection?.value).trim();
     if (!id) throw codedError("CANDIDATE_ID_REQUIRED", "candidate id required");
     if (!Number.isInteger(version) || version < 1) throw codedError("CANDIDATE_EMAIL_VERSION_REQUIRED", "candidate email version required");
-    if (!address) throw codedError("CANDIDATE_EMAIL_REQUIRED", "candidate email required");
+    if (!contactId && !address) throw codedError("CANDIDATE_EMAIL_REQUIRED", "candidate email required");
     const result = await client.request(`/api/v1/candidates/${encodeURIComponent(id)}/email`, {
       method: "PUT",
       ifMatch: `"${version}"`,
       idempotencyKey: idempotencyKey(),
-      body: { value: address },
+      body: contactId ? { contact_id: contactId } : { value: address },
       ...signalOption(signal),
     });
     return normalizeCandidateEmail(result?.data);

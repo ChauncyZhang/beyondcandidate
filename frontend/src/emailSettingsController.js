@@ -19,6 +19,10 @@ function normalizeConfig(value) {
     username: safeString(value?.username),
     enabled: value?.enabled === true,
     version: Number.isInteger(value?.version) ? value.version : 0,
+    senderName: safeString(value?.sender_name),
+    senderAddress: safeString(value?.sender_address),
+    defaultReplyToEmail: safeString(value?.default_reply_to_email),
+    defaultReplyToName: safeString(value?.default_reply_to_name),
   };
 }
 
@@ -38,6 +42,8 @@ export function createEmailSettingsController({ client = apiClient, idempotencyK
       tls_mode: settings?.tlsMode === "tls" ? "tls" : "starttls",
       username: safeString(settings?.username).trim(),
       enabled: settings?.enabled === true,
+      default_reply_to_email: safeString(settings?.defaultReplyToEmail).trim(),
+      default_reply_to_name: safeString(settings?.defaultReplyToName).trim(),
       ...(password ? { password } : {}),
     };
     const result = await client.request("/api/v1/settings/email", {
@@ -55,11 +61,7 @@ export function createEmailSettingsController({ client = apiClient, idempotencyK
     const result = await client.request("/api/v1/settings/email/test", {
       method: "POST",
       idempotencyKey: idempotencyKey(),
-      body: {
-        recipient: safeString(values?.recipient).trim(),
-        reply_to_email: safeString(values?.replyToEmail).trim(),
-        reply_to_name: safeString(values?.replyToName).trim(),
-      },
+      body: { recipient: safeString(values?.recipient).trim() },
       ...(signal ? { signal } : {}),
     });
     return result?.data ?? null;

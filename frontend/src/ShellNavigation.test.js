@@ -109,14 +109,16 @@ async function assertNavLabels(nav, expected) {
   assert.deepEqual(await nav.getByRole("button", { includeHidden: true }).allTextContents(), expected);
 }
 
-test("application shell uses BrowserRouter and URL-derived route state", async () => {
+test("application shell uses the data router required for navigation blocking and URL-derived route state", async () => {
   const [mainSource, appSource] = await Promise.all([
     readFile(new URL("./main.jsx", import.meta.url), "utf8"),
     readFile(new URL("./App.jsx", import.meta.url), "utf8"),
   ]);
-  assert.match(mainSource, /BrowserRouter/);
+  assert.match(mainSource, /createBrowserRouter/);
+  assert.match(mainSource, /RouterProvider/);
   assert.match(appSource, /useLocation/);
   assert.match(appSource, /useNavigate/);
+  assert.match(appSource, /useBlocker/);
   assert.match(appSource, /parseAppRoute\(location\)/);
   assert.match(appSource, /clearJobCreateDraft/);
   assert.match(appSource, /interviewController\.get\(route\.id/);
