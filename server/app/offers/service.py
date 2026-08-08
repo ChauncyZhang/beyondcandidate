@@ -73,13 +73,16 @@ def public_offer_access(db, raw_token: str, *, codec: OfferTokenCodec, now: date
     digest = hashlib.sha256(raw_token.encode("ascii")).hexdigest()
     query = select(OfferAccessToken).where(OfferAccessToken.token_hash == digest)
     token = db.scalar(query.with_for_update() if lock else query)
-    if token is None or not codec.matches(token, raw_token) or (token.revoked_at is not None and not allow_revoked) or _utc(token.expires_at) <= _utc(now):
+    if token is None or not codec.matches(token, raw_token) or (token.revoked_at is not None and not allow_revoked) or (_utc(token.expires_at) <= _utc(now) and not allow_revoked):
         raise OfferNotFound
-    offer = db.scalar(select(Offer).where(Offer.organization_id == token.organization_id, Offer.id == token.offer_id).with_for_update())
-    version = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == token.organization_id, OfferVersion.id == token.offer_version_id, OfferVersion.offer_id == token.offer_id).with_for_update())
+    offer_query = select(Offer).where(Offer.organization_id == token.organization_id, Offer.id == token.offer_id)
+    version_query = select(OfferVersion).where(OfferVersion.organization_id == token.organization_id, OfferVersion.id == token.offer_version_id, OfferVersion.offer_id == token.offer_id)
+    offer = db.scalar(offer_query.with_for_update() if lock else offer_query)
+    version = db.scalar(version_query.with_for_update() if lock else version_query)
     if offer is None or version is None or offer.current_version_id != version.id or (offer.status != "sent" and not allow_revoked):
         raise OfferNotFound
-    application = db.scalar(select(Application).where(Application.organization_id == token.organization_id, Application.id == offer.application_id).with_for_update())
+    application_query = select(Application).where(Application.organization_id == token.organization_id, Application.id == offer.application_id)
+    application = db.scalar(application_query.with_for_update() if lock else application_query)
     if application is None:
         raise OfferNotFound
     return token, offer, version, application
@@ -98,7 +101,8 @@ def record_public_offer_response(db, raw_token, payload, *, codec: OfferTokenCod
         raise OfferNotFound
     from server.app.recruiting.service import apply_application_workflow_action_record
     action = "offer_accepted" if payload.decision == "accepted" else "offer_declined"
-    apply_application_workflow_action_record(db, offer.organization_id, application.id, action, expected_version=application.version, actor_user_id=None, trace_id=trace_id, reason_text=payload.reason_text)
+    internal_reason = payload.reason_text if payload.reason_text else "offer_declined_by_candidate" if action == "offer_declined" else None
+    apply_application_workflow_action_record(db, offer.organization_id, application.id, action, expected_version=application.version, actor_user_id=application.owner_id, trace_id=trace_id, reason_text=internal_reason)
     response = OfferResponse(organization_id=offer.organization_id, offer_id=offer.id, offer_version_id=version.id, status="accepted" if action == "offer_accepted" else "declined", expected_start_date=payload.expected_start_date, reason_text=payload.reason_text, request_hash=request_hash, responded_at=now)
     db.add(response)
     offer.status = response.status; offer.version += 1; token.revoked_at = now

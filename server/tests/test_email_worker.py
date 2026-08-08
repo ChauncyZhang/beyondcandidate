@@ -94,7 +94,7 @@ def test_offer_capability_is_materialized_only_for_the_transient_worker_message(
     transient_body = _render_offer_link(stored_body, token_id, codec, "https://careers.example.test")
     raw = codec.raw_token(token_id)
     assert raw not in stored_body
-    assert transient_body == f"Your secure offer link: https://careers.example.test/api/public/v1/offers/{raw}"
+    assert transient_body == f"Your secure offer link: https://careers.example.test/offer/{raw}"
 
 
 def test_worker_retries_temporary_smtp_failure_without_marking_sent(tmp_path):

@@ -1,10 +1,11 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from server.app.core.settings import Settings
 from server.app.identity.models import Base, Job, Organization, User, UserRole
 from server.app.offers.models import Offer, OfferAccessToken, OfferVersion
 from server.app.offers.schemas import PublicOfferResponse
@@ -79,17 +80,36 @@ def test_expired_revoked_and_superseded_tokens_are_publicly_invalid():
         assert public_offer_access(db, replacement_raw, codec=codec, now=datetime.now(timezone.utc))[0].id == replacement.id
 
 
-def test_identical_public_response_replays_and_conflict_is_rejected(monkeypatch):
+def test_identical_public_response_replays_conflicts_and_transitions_application():
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
         codec, raw, token, offer, application = _sent_offer(db)
-        calls = []
-        monkeypatch.setattr("server.app.recruiting.service.apply_application_workflow_action_record", lambda *args, **kwargs: calls.append((args, kwargs)) or application)
-        accepted = PublicOfferResponse(decision="accepted", expected_start_date=datetime(2026, 9, 1, tzinfo=timezone.utc))
+        accepted = PublicOfferResponse(decision="accepted", expected_start_date=date(2026, 9, 1))
         response, duplicate = record_public_offer_response(db, raw, accepted, codec=codec, now=datetime.now(timezone.utc), trace_id="trace")
         replay, replay_duplicate = record_public_offer_response(db, raw, accepted, codec=codec, now=datetime.now(timezone.utc), trace_id="trace")
         assert response.id == replay.id and duplicate is False and replay_duplicate is True
-        assert calls[0][0][3] == "offer_accepted"
+        assert db.get(Application, application.id).stage == "hired"
         with pytest.raises(OfferVersionConflict):
             record_public_offer_response(db, raw, PublicOfferResponse(decision="declined", reason_text="No"), codec=codec, now=datetime.now(timezone.utc), trace_id="trace")
+
+
+def test_decline_uses_real_workflow_and_stable_internal_reason_when_omitted():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        codec, raw, _, offer, application = _sent_offer(db)
+        response, duplicate = record_public_offer_response(db, raw, PublicOfferResponse(decision="declined"), codec=codec, now=datetime.now(timezone.utc), trace_id="trace")
+        assert (response.status, duplicate, db.get(Application, application.id).stage) == ("declined", False, "withdrawn")
+
+
+@pytest.mark.parametrize("value", ["https://careers.example.test/path", "https://user@careers.example.test", "https://careers.example.test/?q=1", "https://careers.example.test/#x", "ftp://careers.example.test"])
+def test_offer_public_base_url_rejects_non_origins(value):
+    with pytest.raises(ValueError):
+        Settings(environment="test", offer_public_base_url=value)
+
+
+def test_offer_public_base_url_normalizes_and_requires_https_in_production():
+    assert Settings(environment="test", offer_public_base_url="http://careers.example.test/").offer_public_base_url == "http://careers.example.test"
+    with pytest.raises(ValueError):
+        Settings(environment="production", offer_public_base_url="http://careers.example.test")

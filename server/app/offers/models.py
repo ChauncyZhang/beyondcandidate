@@ -1,7 +1,7 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, Uuid, text
+from sqlalchemy import JSON, CheckConstraint, Date, DateTime, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server.app.identity.models import Base
@@ -139,7 +139,7 @@ class OfferResponse(OfferRecord, Base):
     # Nullable only for pre-0035 history; the public response service always writes it.
     offer_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
-    expected_start_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expected_start_date: Mapped[date | None] = mapped_column(Date)
     reason_text: Mapped[str | None] = mapped_column(Text)
     request_hash: Mapped[str | None] = mapped_column(String(64))
     responded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

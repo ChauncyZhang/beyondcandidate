@@ -227,6 +227,28 @@ def test_minio_offer_storage_is_private_immutable_and_idempotent() -> None:
         storage.write_immutable(key, b"changed", hashlib.sha256(b"changed").hexdigest())
 
 
+def test_public_pdf_read_requires_offer_scope_and_persisted_hash():
+    content = b"private-pdf"
+    key = "offers/tenant/offers/offer/versions/version.pdf"
+
+    class Response:
+        def read(self): return content
+        def close(self): pass
+        def release_conn(self): pass
+
+    class Reader:
+        def get_object(self, bucket, object_key):
+            assert (bucket, object_key) == ("private-offers", key)
+            return Response()
+
+    storage = MinioOfferPdfStorage(Reader(), "private-offers")
+    assert storage.read_verified(key, hashlib.sha256(content).hexdigest()) == content
+    with pytest.raises(OfferPdfStorageError):
+        storage.read_verified("exports/untrusted.pdf", hashlib.sha256(content).hexdigest())
+    with pytest.raises(OfferPdfStorageError):
+        storage.read_verified(key, "0" * 64)
+
+
 def test_atomic_different_payload_writers_persist_one_and_conflict_the_loser() -> None:
     client = AtomicFakeMinio(concurrent_writers=2)
     storage = MinioOfferPdfStorage(client, "private-offers")

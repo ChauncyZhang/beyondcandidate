@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def _render_offer_link(body: str, token_id: uuid.UUID, codec, public_base_url: str) -> str:
     """Materialize a capability only in the transient provider message."""
-    return body.replace("{{offer_public_link}}", f"{public_base_url.rstrip('/')}/api/public/v1/offers/{codec.raw_token(token_id)}")
+    return body.replace("{{offer_public_link}}", f"{public_base_url}/offer/{codec.raw_token(token_id)}")
 
 
 class EmailDeliveryJobHandler:

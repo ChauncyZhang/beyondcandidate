@@ -90,6 +90,18 @@ class Settings(BaseModel):
             raise ValueError("email header value is invalid")
         return value
 
+    @field_validator("offer_public_base_url")
+    @classmethod
+    def validate_offer_public_base_url(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("offer public base URL must be an http(s) origin")
+        if info.data.get("environment") == "production" and parsed.scheme != "https":
+            raise ValueError("production offer public base URL must use HTTPS")
+        return f"{parsed.scheme}://{parsed.netloc}"
+
     @field_validator("default_organization_slug")
     @classmethod
     def validate_default_organization_slug(cls, value: str | None) -> str | None:

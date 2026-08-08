@@ -35,7 +35,7 @@ def upgrade() -> None:
     op.create_index("ix_offer_access_tokens_lookup", "offer_access_tokens", ["token_hash"])
     op.create_index("ix_offer_access_tokens_offer_current", "offer_access_tokens", ["organization_id", "offer_id", "revoked_at"])
     op.add_column("offer_responses", sa.Column("offer_version_id", sa.Uuid()))
-    op.add_column("offer_responses", sa.Column("expected_start_date", sa.DateTime(timezone=True)))
+    op.add_column("offer_responses", sa.Column("expected_start_date", sa.Date()))
     op.add_column("offer_responses", sa.Column("reason_text", sa.Text()))
     op.add_column("offer_responses", sa.Column("request_hash", sa.String(64)))
     op.create_foreign_key(

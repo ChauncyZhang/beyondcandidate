@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy import exists, or_, select
 
 from server.app.identity.api import problem
-from server.app.identity.models import AuditLog, Job
+from server.app.identity.models import AuditLog, Job, Organization, User
 from server.app.offers.models import Offer, OfferAccessToken, OfferApproval, OfferEvent, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
 from server.app.offers.schemas import OfferApprovalDecision, OfferCommand, OfferTemplateCommand, OfferVersionCommand, PublicOfferResponse, SpecialOfferApproversCommand
 from server.app.offers.service import (
@@ -330,6 +330,8 @@ def pending_approvals(request: Request):
 def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(None, alias="If-Match"), idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
     principal, expected, key = _principal(request), _version(request, if_match), _idempotency(request, idempotency_key)
     if any(isinstance(item, JSONResponse) for item in (principal, expected, key)): return next(item for item in (principal, expected, key) if isinstance(item, JSONResponse))
+    if request.app.state.settings.offer_public_base_url is None:
+        return _error(request, 409, "offer_send_unavailable")
     with request.app.state.identity_store.sync_session() as db:
         try:
             def action():
@@ -378,10 +380,16 @@ def _public_error(request):
 def get_public_offer(token: str, request: Request):
     with request.app.state.identity_store.sync_session() as db:
         try:
-            _, offer, version, _ = public_offer_access(db, token, codec=request.app.state.offer_token_codec, now=datetime.now(timezone.utc))
+            access, offer, version, application = public_offer_access(db, token, codec=request.app.state.offer_token_codec, now=datetime.now(timezone.utc), allow_revoked=True)
         except (OfferNotFound, ValueError):
             return _public_error(request)
-        return _public_response({"status": offer.status, "content": version.content, "candidate_response_deadline": version.candidate_response_deadline.isoformat(), "pdf_available": True})
+        candidate = db.get(Candidate, application.candidate_id); job = db.get(Job, offer.job_id); organization = db.get(Organization, offer.organization_id)
+        hr = db.get(User, application.owner_id)
+        expiry = access.expires_at.replace(tzinfo=timezone.utc) if access.expires_at.tzinfo is None else access.expires_at
+        if expiry <= datetime.now(timezone.utc): status = "expired"
+        elif offer.current_version_id != version.id: status = "superseded"
+        else: status = offer.status
+        return _public_response({"display_status": status, "company_name": organization.name if organization else None, "candidate_name": candidate.display_name if candidate else None, "job_title": job.title if job else None, "location": candidate.location if candidate else None, "hr_contact": hr.display_name if hr else None, "content": version.content, "candidate_response_deadline": version.candidate_response_deadline.isoformat(), "pdf_available": status == "sent"})
 
 
 @router.get("/api/public/v1/offers/{token}/pdf")

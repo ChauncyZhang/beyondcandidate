@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -90,7 +90,7 @@ class OfferApprovalDecision(OfferSchema):
 
 class PublicOfferResponse(OfferSchema):
     decision: str
-    expected_start_date: datetime | None = None
+    expected_start_date: date | None = None
     reason_text: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
