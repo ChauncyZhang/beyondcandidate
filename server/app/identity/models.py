@@ -199,6 +199,8 @@ class Job(Timestamped, Base):
     priority: Mapped[str] = mapped_column(String(16), default="normal")
     hiring_owner_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     workflow_template_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    offer_approver_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    offer_template_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     owner_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     status: Mapped[str] = mapped_column(String(32), default="draft")
     version: Mapped[int] = mapped_column(Integer, default=1)
@@ -219,6 +221,14 @@ class Job(Timestamped, Base):
         ForeignKeyConstraint(
             ["organization_id", "workflow_template_id"],
             ["workflow_templates.organization_id", "workflow_templates.id"],
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "offer_approver_id"],
+            ["users.organization_id", "users.id"],
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "offer_template_id"],
+            ["offer_templates.organization_id", "offer_templates.id"],
         ),
     )
 

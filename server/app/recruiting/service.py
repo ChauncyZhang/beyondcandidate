@@ -38,6 +38,16 @@ def _job_definition_contents(command):
     return jd_content,rule_content
 
 
+def _validate_offer_defaults(db, organization_id, offer_approver_id, offer_template_id):
+    from server.app.identity.models import User
+    from server.app.offers.models import OfferTemplate
+
+    if offer_approver_id is not None and db.scalar(select(User.id).where(User.organization_id == organization_id, User.id == offer_approver_id)) is None:
+        raise InvalidAggregateRelationship
+    if offer_template_id is not None and db.scalar(select(OfferTemplate.id).where(OfferTemplate.organization_id == organization_id, OfferTemplate.id == offer_template_id)) is None:
+        raise InvalidAggregateRelationship
+
+
 def lock_active_candidate(db, organization_id, candidate_id):
     candidate = lock_candidate_retention_facts(db, organization_id, candidate_id)
     if candidate is None or candidate.deleted_at is not None:
@@ -393,12 +403,13 @@ def create_job_definition_record(db, organization_id, actor_user_id, command, *,
     from server.app.recruiting.models import JobJdVersion, ScreeningRuleVersion
 
     jd_content,rule_content=_job_definition_contents(command)
+    _validate_offer_defaults(db, organization_id, command.get("offer_approver_id"), command.get("offer_template_id"))
     recruiting_owner_id = command.get("recruiting_owner_id") or actor_user_id
     job = Job(
         organization_id=organization_id,
         owner_id=recruiting_owner_id,
         status="open" if command["publish"] else "draft",
-        **{key: command[key] for key in ("title", "department_id", "headcount", "priority", "hiring_owner_id")},
+        **{key: command[key] for key in ("title", "department_id", "headcount", "priority", "hiring_owner_id", "offer_approver_id", "offer_template_id")},
         workflow_template_id=command["workflow_template_id"],
     )
     db.add(job)
@@ -448,9 +459,10 @@ def replace_job_definition_record(db, organization_id, job_id, actor_user_id, co
         raise ResourceVersionConflict
     if command["publish"] and job.status != "draft":
         raise InvalidStateTransition
+    _validate_offer_defaults(db, organization_id, command.get("offer_approver_id"), command.get("offer_template_id"))
     source_status = job.status
     recruiting_owner_id = command.get("recruiting_owner_id") or job.owner_id
-    for key in ("title", "department_id", "headcount", "priority", "hiring_owner_id"):
+    for key in ("title", "department_id", "headcount", "priority", "hiring_owner_id", "offer_approver_id", "offer_template_id"):
         setattr(job, key, command[key])
     job.workflow_template_id = command["workflow_template_id"]
     job.owner_id = recruiting_owner_id

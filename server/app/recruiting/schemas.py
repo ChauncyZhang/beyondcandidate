@@ -94,6 +94,8 @@ class JobDefinitionCommand(ApiModel):
     location: str = Field(max_length=200)
     process_template: str = Field(min_length=1, max_length=100)
     workflow_template_id: UUID | None = None
+    offer_approver_id: UUID | None = None
+    offer_template_id: UUID | None = None
     llm_enabled: bool
     must_have: list[RuleItem] = Field(max_length=MAX_RULE_TERMS)
     nice_to_have: list[RuleItem] = Field(max_length=MAX_RULE_TERMS)
