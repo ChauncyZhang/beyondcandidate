@@ -1,12 +1,15 @@
 import hashlib
 import json
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from server.app.notifications.models import NotificationRead
+from server.app.notifications.models import NotificationRead, UserNotification
 
 
 def _serialized_datetime(value: datetime | None) -> str | None:
@@ -45,3 +48,38 @@ def read_versions(db, organization_id: UUID, user_id: UUID, application_ids: lis
         )
     ).all()
     return {application_id: version for application_id, version in rows}
+
+
+def create_user_notification(
+    db,
+    *,
+    organization_id: UUID,
+    user_id: UUID,
+    event_type: str,
+    resource_type: str,
+    resource_id: UUID,
+    recipient_masked: str,
+    safe_error_code: str,
+) -> UserNotification:
+    identity = {
+        "organization_id": organization_id, "user_id": user_id, "event_type": event_type,
+        "resource_type": resource_type, "resource_id": resource_id,
+    }
+    predicates = tuple(getattr(UserNotification, key) == value for key, value in identity.items())
+    existing = db.scalar(select(UserNotification).where(*predicates))
+    if existing is not None:
+        return existing
+    values = {
+        "id": uuid.uuid4(), **identity, "recipient_masked": recipient_masked,
+        "safe_error_code": safe_error_code, "created_at": datetime.now(timezone.utc),
+    }
+    dialect = db.get_bind().dialect.name
+    statement = postgresql_insert(UserNotification) if dialect == "postgresql" else sqlite_insert(UserNotification) if dialect == "sqlite" else None
+    if statement is None:
+        notification = UserNotification(**values)
+        db.add(notification); db.flush()
+        return notification
+    db.execute(statement.values(**values).on_conflict_do_nothing(
+        index_elements=["organization_id", "user_id", "event_type", "resource_type", "resource_id"],
+    ))
+    return db.scalar(select(UserNotification).where(*predicates))

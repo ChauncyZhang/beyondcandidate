@@ -8,6 +8,7 @@ from sqlalchemy import select
 from server.app.communications.models import EmailDelivery
 from server.app.integrations.feishu.models import FeishuOrganizationConfig
 from server.app.interviews.models import InterviewParticipant
+from server.app.notifications.models import UserNotification
 from server.app.queue.payloads import FEISHU_NOTIFICATION_EVENTS
 from server.app.queue.repository import QueueRepository
 
@@ -68,9 +69,15 @@ def schedule_feishu_notification(
             EmailDelivery.organization_id == organization_id,
             EmailDelivery.id == email_delivery_id,
         ))
-        if delivery is None or delivery.status != "failed" or delivery.created_by is None:
+        if delivery is None or delivery.status != "failed":
             return []
-        recipients = tuple(user_id for user_id in recipients if user_id == delivery.created_by)
+        durable_recipient_ids = set(db.scalars(select(UserNotification.user_id).where(
+            UserNotification.organization_id == organization_id,
+            UserNotification.event_type == "email_delivery_failed",
+            UserNotification.resource_type == "email_delivery",
+            UserNotification.resource_id == email_delivery_id,
+        )))
+        recipients = tuple(user_id for user_id in recipients if user_id in durable_recipient_ids)
     if any(not isinstance(user_id, UUID) for user_id in recipients):
         raise ValueError("recipient_user_ids must contain UUIDs")
     if event_type == "feedback_requested":

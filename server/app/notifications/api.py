@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, literal, select
@@ -13,7 +13,7 @@ from server.app.identity.api import problem, session_token
 from server.app.identity.models import Job
 from server.app.identity.policy import Principal
 from server.app.identity.service import InvalidSession
-from server.app.notifications.models import NotificationRead
+from server.app.notifications.models import NotificationRead, UserNotification
 from server.app.notifications.service import workbench_notification_version
 from server.app.recruiting.authorization import RecruitingAction, RecruitingAuthorizationService
 from server.app.recruiting.models import Application, ApplicationReviewTask, Candidate
@@ -44,6 +44,19 @@ class NotificationReadResource(BaseModel):
     data: NotificationReadOut
 
 
+def _user_notification_view(row: UserNotification) -> dict[str, Any]:
+    created_at = row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=timezone.utc)
+    read_at = row.read_at
+    if read_at is not None and read_at.tzinfo is None:
+        read_at = read_at.replace(tzinfo=timezone.utc)
+    return {
+        "id": str(row.id), "event_type": row.event_type, "resource_type": row.resource_type,
+        "resource_id": str(row.resource_id), "recipient": row.recipient_masked,
+        "safe_error_code": row.safe_error_code,
+        "created_at": created_at.isoformat(), "read_at": read_at.isoformat() if read_at else None,
+    }
+
+
 def _principal(request: Request) -> Principal | JSONResponse:
     token = session_token(request)
     if not token:
@@ -52,6 +65,45 @@ def _principal(request: Request) -> Principal | JSONResponse:
         return request.app.state.identity_service.principal(token)
     except InvalidSession:
         return problem(request, 401, "authentication_required", "Authentication is required.")
+
+
+@router.get("/in-app")
+def list_in_app_notifications(request: Request, unread_only: bool = Query(False), limit: int = Query(50, ge=1, le=100)):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
+    with request.app.state.identity_store.sync_session() as db:
+        query = select(UserNotification).where(
+            UserNotification.organization_id == principal.organization_id,
+            UserNotification.user_id == principal.user_id,
+        )
+        if unread_only:
+            query = query.where(UserNotification.read_at.is_(None))
+        rows = db.scalars(query.order_by(UserNotification.created_at.desc(), UserNotification.id.desc()).limit(limit)).all()
+        response = JSONResponse({"data": [_user_notification_view(row) for row in rows]})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+
+@router.put("/in-app/{notification_id}/read")
+def mark_in_app_notification_read(notification_id: UUID, request: Request):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
+    with request.app.state.identity_store.sync_session() as db:
+        row = db.scalar(select(UserNotification).where(
+            UserNotification.organization_id == principal.organization_id,
+            UserNotification.user_id == principal.user_id,
+            UserNotification.id == notification_id,
+        ).with_for_update())
+        if row is None:
+            return problem(request, 404, "resource_not_found", "The requested resource is unavailable.")
+        if row.read_at is None:
+            row.read_at = datetime.now(timezone.utc)
+        db.commit()
+        response = JSONResponse({"data": _user_notification_view(row)})
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
 
 def _base_projection():

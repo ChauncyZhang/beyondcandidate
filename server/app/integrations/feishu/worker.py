@@ -17,6 +17,7 @@ from server.app.integrations.feishu.models import (
 from server.app.integrations.feishu.notifications import FEISHU_NOTIFICATION_EVENTS
 from server.app.integrations.feishu.provider import CalendarEventRequest, FeishuCredentials, FeishuProviderError
 from server.app.interviews.models import Interview, InterviewParticipant
+from server.app.notifications.models import UserNotification
 from server.app.queue.service import PermanentJobError, RetryableJobError
 from server.app.recruiting.models import Application, ApplicationReviewTask, Candidate
 from server.app.recruiting.review_assignments import review_notification_user_ids
@@ -331,6 +332,7 @@ def _notification_recipient_is_current(
     job: Job | None,
     interview: Interview | None,
     email_delivery: EmailDelivery | None = None,
+    user_notification: UserNotification | None = None,
 ) -> bool:
     participant = None
     if interview is not None:
@@ -344,7 +346,14 @@ def _notification_recipient_is_current(
     if event_type == "interview_assignment_removed":
         return interview is not None and participant is None
     if event_type == "email_delivery_failed":
-        return email_delivery is not None and email_delivery.status == "failed" and email_delivery.created_by == recipient_user_id
+        return (
+            email_delivery is not None and email_delivery.status == "failed"
+            and user_notification is not None
+            and user_notification.user_id == recipient_user_id
+            and user_notification.event_type == "email_delivery_failed"
+            and user_notification.resource_type == "email_delivery"
+            and user_notification.resource_id == email_delivery.id
+        )
     if application is None or job is None:
         return False
     if event_type == "review_requested":
@@ -461,10 +470,17 @@ class FeishuNotificationOutboxHandler:
                 ))
                 if email_delivery is None:
                     raise PermanentJobError("feishu_notification_data_missing")
+                user_notification = db.scalar(select(UserNotification).where(
+                    UserNotification.organization_id == organization_id,
+                    UserNotification.user_id == recipient_user_id,
+                    UserNotification.event_type == "email_delivery_failed",
+                    UserNotification.resource_type == "email_delivery",
+                    UserNotification.resource_id == email_delivery_id,
+                ))
                 if not _notification_recipient_is_current(
                     db, organization_id=organization_id, recipient_user_id=recipient_user_id,
                     event_type=event_type, application=None, job=None, interview=None,
-                    email_delivery=email_delivery,
+                    email_delivery=email_delivery, user_notification=user_notification,
                 ):
                     return
                 card = _notification_card(

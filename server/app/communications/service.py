@@ -10,7 +10,8 @@ from sqlalchemy.exc import IntegrityError
 
 from server.app.communications.models import EmailDelivery, EmailProviderConfig, EmailTemplate
 from server.app.communications.security import EmailSecretCipher
-from server.app.identity.models import AuditLog
+from server.app.identity.models import AuditLog, User, UserRole, UserStatus
+from server.app.notifications.service import create_user_notification
 from server.app.queue.payloads import PayloadSchema, OpaqueIdField, UnsafePayload
 from server.app.queue.repository import QueueRepository
 from server.app.queue.service import normalize_safe_code
@@ -132,13 +133,44 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
     return delivery
 
 
+def _responsible_notification_user_id(db, delivery: EmailDelivery) -> uuid.UUID:
+    if delivery.created_by is not None:
+        creator = db.scalar(select(User).where(
+            User.organization_id == delivery.organization_id,
+            User.id == delivery.created_by,
+            User.status == UserStatus.ACTIVE,
+        ))
+        if creator is not None:
+            return creator.id
+    fallback = db.scalar(
+        select(User.id)
+        .join(UserRole, UserRole.user_id == User.id)
+        .where(
+            User.organization_id == delivery.organization_id,
+            User.status == UserStatus.ACTIVE,
+            UserRole.role == "recruiting_admin",
+        )
+        .order_by(User.created_at.asc(), User.id.asc())
+        .limit(1)
+    )
+    if fallback is None:
+        raise ValueError("email_notification_recipient_unavailable")
+    return fallback
+
+
 def mark_delivery_failed(db, delivery: EmailDelivery, safe_code: str, now: datetime | None = None) -> None:
     if delivery.status in {"sent", "failed"}:
         return
+    responsible_user_id = _responsible_notification_user_id(db, delivery)
     delivery.status = "failed"
     delivery.safe_error_code = normalize_safe_code(safe_code)
     delivery.failed_at = now or datetime.now(timezone.utc)
     delivery.version += 1
+    create_user_notification(
+        db, organization_id=delivery.organization_id, user_id=responsible_user_id,
+        event_type="email_delivery_failed", resource_type="email_delivery", resource_id=delivery.id,
+        recipient_masked=delivery.recipient_masked, safe_error_code=delivery.safe_error_code,
+    )
     db.add(AuditLog(
         organization_id=delivery.organization_id, actor_user_id=delivery.created_by,
         category="recruiting", event_type="email.delivery_failed", outcome="failure",
@@ -146,12 +178,11 @@ def mark_delivery_failed(db, delivery: EmailDelivery, safe_code: str, now: datet
         trace_id=f"email-{str(delivery.id)[:8]}",
         metadata_json={"delivery_id": str(delivery.id), "recipient": delivery.recipient_masked, "safe_error_code": delivery.safe_error_code},
     ))
-    if delivery.created_by is not None:
-        from server.app.integrations.feishu.notifications import schedule_feishu_notification
-        schedule_feishu_notification(
-            db, organization_id=delivery.organization_id, event_type="email_delivery_failed",
-            recipient_user_ids=[delivery.created_by], email_delivery_id=delivery.id,
-        )
+    from server.app.integrations.feishu.notifications import schedule_feishu_notification
+    schedule_feishu_notification(
+        db, organization_id=delivery.organization_id, event_type="email_delivery_failed",
+        recipient_user_ids=[responsible_user_id], email_delivery_id=delivery.id,
+    )
 
 
 def email_delivery_terminal_callback(db, job, safe_code, now) -> None:

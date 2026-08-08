@@ -31,6 +31,7 @@ from server.app.integrations.feishu.worker import (
     _notification_card,
 )
 from server.app.interviews.models import Interview, InterviewParticipant
+from server.app.notifications.models import UserNotification
 from server.app.queue.models import OutboxEvent
 from server.app.queue.payloads import DEFAULT_PAYLOAD_POLICIES, UnsafePayload
 from server.app.queue.service import RetryableJobError
@@ -184,7 +185,7 @@ def test_disabled_config_does_not_schedule_notification_and_payload_rejects_pii(
         )
 
 
-def test_failed_email_notification_is_opaque_and_revalidated_for_creator(tmp_path) -> None:
+def test_failed_email_notification_is_opaque_and_revalidated_for_durable_recipient(tmp_path) -> None:
     app = make_app(tmp_path)
     seed = seed_application(app)
     _enable_feishu(app, seed)
@@ -202,10 +203,16 @@ def test_failed_email_notification_is_opaque_and_revalidated_for_creator(tmp_pat
             sender_email="careers@beyondcandidate.com", sender_name="BeyondCandidate", reply_to_email=admin.email,
             reply_to_name=admin.display_name, rendered_subject="snapshot", rendered_body="snapshot", resource_type="email_test",
             resource_id=uuid4(), business_dedupe_key="a" * 64, request_fingerprint="b" * 64,
-            status="failed", safe_error_code="smtp_unavailable", created_by=admin.id, version=2,
+            status="failed", safe_error_code="smtp_unavailable", created_by=None, version=2,
         )
         db.add(delivery)
         db.add(FeishuIdentityBinding(organization_id=admin.organization_id, user_id=admin.id, union_id="on_admin", open_id="ou_admin", tenant_key="tenant"))
+        db.flush()
+        db.add(UserNotification(
+            organization_id=admin.organization_id, user_id=admin.id,
+            event_type="email_delivery_failed", resource_type="email_delivery", resource_id=delivery.id,
+            recipient_masked=delivery.recipient_masked, safe_error_code=delivery.safe_error_code,
+        ))
         db.flush()
         events = schedule_feishu_notification(
             db, organization_id=admin.organization_id, recipient_user_ids=[admin.id],

@@ -6,7 +6,7 @@ import pytest
 
 from server.app.identity.models import Job, Organization
 from server.app.notifications import api as notification_api
-from server.app.notifications.models import NotificationRead
+from server.app.notifications.models import NotificationRead, UserNotification
 from server.app.recruiting import api as recruiting_api
 from server.app.recruiting.models import ApplicationReviewTask, Candidate
 from server.tests.test_workbench_api import make_app, principal, seed_application, seed_user
@@ -45,6 +45,35 @@ def _notification(client: TestClient, group="decision"):
     notification_group = response.json()["data"]["notifications"][group]
     assert notification_group["count"] == 1
     return notification_group["items"][0]
+
+
+def test_durable_in_app_notifications_are_user_scoped_visible_and_idempotently_read(tmp_path, monkeypatch) -> None:
+    app = make_app(tmp_path)
+    first, second, resource_id = _seed_notification(app)
+    with app.state.identity_store.sync_session() as db:
+        row = UserNotification(
+            organization_id=first.organization_id, user_id=first.user_id,
+            event_type="email_delivery_failed", resource_type="email_delivery", resource_id=resource_id,
+            recipient_masked="c*******e@example.test", safe_error_code="smtp_unavailable",
+        )
+        db.add(row); db.commit(); notification_id = row.id
+    current = {"principal": first}
+    monkeypatch.setattr(notification_api, "_principal", lambda request: current["principal"])
+    monkeypatch.setattr(app.state.identity_service, "validate_csrf", lambda *args, **kwargs: True)
+    with TestClient(app) as client:
+        inbox = client.get("/api/v1/notifications/in-app")
+        assert inbox.status_code == 200 and inbox.headers["Cache-Control"] == "no-store"
+        assert inbox.json()["data"][0]["id"] == str(notification_id)
+        assert inbox.json()["data"][0]["recipient"] == "c*******e@example.test"
+        path = f"/api/v1/notifications/in-app/{notification_id}/read"
+        first_read = client.put(path, headers=WRITE_HEADERS)
+        replay = client.put(path, headers=WRITE_HEADERS)
+        assert first_read.status_code == replay.status_code == 200
+        assert first_read.json()["data"]["read_at"] == replay.json()["data"]["read_at"]
+        assert client.get("/api/v1/notifications/in-app?unread_only=true").json()["data"] == []
+        current["principal"] = second
+        assert client.get("/api/v1/notifications/in-app").json()["data"] == []
+        assert client.put(path, headers=WRITE_HEADERS).status_code == 404
 
 
 def test_notification_read_is_user_scoped_persistent_and_idempotent(tmp_path, monkeypatch) -> None:

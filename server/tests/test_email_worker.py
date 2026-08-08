@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -12,11 +13,13 @@ from server.app.communications.provider import MailMessage, PermanentMailError, 
 from server.app.communications.security import EmailSecretCipher
 from server.app.communications.service import DeliveryCommand, DeliveryIdempotencyConflict, SenderPolicy, email_delivery_terminal_callback, enqueue_delivery, render_template
 from server.app.communications.worker import EmailDeliveryJobHandler
-from server.app.identity.models import AuditLog, Base, Organization, User
+from server.app.identity.models import AuditLog, Base, Organization, User, UserRole
 from server.app.integrations.feishu.models import FeishuOrganizationConfig
+from server.app.interviews.models import Interview  # noqa: F401 - registers Feishu FK metadata
 from server.app.queue.models import BackgroundJob, JobAttempt, OutboxEvent
 from server.app.queue.repository import QueueRepository
 from server.app.queue.service import PermanentJobError, RetryableJobError
+from server.app.recruiting.models import Application  # noqa: F401 - registers notification FK metadata
 
 
 class FakeMailProvider:
@@ -31,7 +34,7 @@ class FakeMailProvider:
         return ProviderReceipt("receipt-123")
 
 
-def delivery_store(tmp_path):
+def delivery_store(tmp_path, *, feishu_state="enabled", automated=False, admin_role=True):
     engine = create_engine(f"sqlite:///{tmp_path / 'email-worker.db'}")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine, expire_on_commit=False)
@@ -39,10 +42,13 @@ def delivery_store(tmp_path):
     with sessions.begin() as db:
         organization = Organization(slug="mail-worker", name="Mail Worker", status="active")
         user = User(organization=organization, email="hr@example.test", normalized_email="hr@example.test", display_name="HR", password_hash="x")
+        if admin_role:
+            user.roles.append(UserRole(role="recruiting_admin"))
         db.add_all([organization, user]); db.flush()
         db.add(EmailProviderConfig(organization_id=organization.id, host="smtp.example.test", port=587, tls_mode="starttls", username="mailer@example.test", encrypted_password=cipher.encrypt_smtp_password("smtp-private"), enabled=True, version=1, created_by=user.id, updated_by=user.id))
-        db.add(FeishuOrganizationConfig(organization_id=organization.id, app_id="app", encrypted_app_secret=b"opaque", redirect_uri="https://hr.example.test/callback", calendar_id="primary", enabled=True, version=1, created_by=user.id, updated_by=user.id))
-        delivery = enqueue_delivery(db, DeliveryCommand(organization_id=organization.id, recipient="candidate@example.com", reply_to_email="hr@example.com", reply_to_name="Responsible HR", subject="Interview invitation", body="Hello Candidate", resource_type="test", resource_id=uuid.uuid4(), idempotency_key="worker-delivery", operation="test.worker", created_by=user.id), cipher=cipher, sender_policy=SenderPolicy("careers@example.com", "BeyondCandidate"))
+        if feishu_state != "absent":
+            db.add(FeishuOrganizationConfig(organization_id=organization.id, app_id="app", encrypted_app_secret=b"opaque", redirect_uri="https://hr.example.test/callback", calendar_id="primary", enabled=feishu_state == "enabled", version=1, created_by=user.id, updated_by=user.id))
+        delivery = enqueue_delivery(db, DeliveryCommand(organization_id=organization.id, recipient="candidate@example.com", reply_to_email="hr@example.com", reply_to_name="Responsible HR", subject="Interview invitation", body="Hello Candidate", resource_type="test", resource_id=uuid.uuid4(), idempotency_key="worker-delivery", operation="test.worker", created_by=None if automated else user.id), cipher=cipher, sender_policy=SenderPolicy("careers@example.com", "BeyondCandidate"))
         job = db.scalar(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email"))
     return sessions, cipher, delivery.id, job
 
@@ -142,8 +148,11 @@ def test_terminal_callback_marks_retry_exhaustion_failed(tmp_path):
         assert (stored.status, stored.safe_error_code) == ("failed", "smtp_timeout")
 
 
-def test_terminal_callback_is_idempotent_for_hr_failure_notification(tmp_path):
-    sessions, _, _, job = delivery_store(tmp_path)
+@pytest.mark.parametrize("feishu_state,expected_feishu_events", [("enabled", 1), ("disabled", 0), ("absent", 0)])
+def test_terminal_callback_replay_creates_one_durable_notification_independent_of_feishu(tmp_path, feishu_state, expected_feishu_events):
+    from server.app.notifications.models import UserNotification
+
+    sessions, _, delivery_id, job = delivery_store(tmp_path, feishu_state=feishu_state)
     with sessions.begin() as db:
         now = QueueRepository(db).database_now()
         email_delivery_terminal_callback(db, job, "smtp_timeout", now)
@@ -151,10 +160,44 @@ def test_terminal_callback_is_idempotent_for_hr_failure_notification(tmp_path):
     with sessions() as db:
         audits = db.scalars(select(AuditLog).where(AuditLog.event_type == "email.delivery_failed")).all()
         assert len(audits) == 1
+        notifications = db.scalars(select(UserNotification).where(UserNotification.resource_id == delivery_id)).all()
+        assert len(notifications) == 1
+        assert notifications[0].organization_id == job.organization_id
+        assert notifications[0].event_type == "email_delivery_failed"
         events = db.scalars(select(OutboxEvent).where(OutboxEvent.topic == "feishu.notification.send")).all()
-        assert len(events) == 1
-        assert set(events[0].payload) == {"organization_id", "recipient_user_id", "event_type", "email_delivery_id"}
-        assert events[0].payload["event_type"] == "email_delivery_failed"
+        assert len(events) == expected_feishu_events
+        if events:
+            assert set(events[0].payload) == {"organization_id", "recipient_user_id", "event_type", "email_delivery_id"}
+            assert events[0].payload["event_type"] == "email_delivery_failed"
+
+
+def test_automated_delivery_falls_back_to_deterministic_recruiting_admin(tmp_path):
+    from server.app.notifications.models import UserNotification
+
+    sessions, _, delivery_id, job = delivery_store(tmp_path, automated=True, feishu_state="absent")
+    with sessions.begin() as db:
+        older_admin = User(
+            organization_id=job.organization_id, email="fallback@example.test", normalized_email="fallback@example.test",
+            display_name="Fallback HR", password_hash="x", created_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        )
+        older_admin.roles.append(UserRole(role="recruiting_admin")); db.add(older_admin); db.flush()
+        expected_user_id = older_admin.id
+        email_delivery_terminal_callback(db, job, "smtp_timeout", QueueRepository(db).database_now())
+    with sessions() as db:
+        notification = db.scalar(select(UserNotification).where(UserNotification.resource_id == delivery_id))
+        assert notification.user_id == expected_user_id
+
+
+def test_automated_delivery_without_authorized_fallback_fails_explicitly(tmp_path):
+    from server.app.notifications.models import UserNotification
+
+    sessions, _, delivery_id, job = delivery_store(tmp_path, automated=True, admin_role=False, feishu_state="absent")
+    with pytest.raises(ValueError, match="email_notification_recipient_unavailable"):
+        with sessions.begin() as db:
+            email_delivery_terminal_callback(db, job, "smtp_timeout", QueueRepository(db).database_now())
+    with sessions() as db:
+        assert db.get(EmailDelivery, delivery_id).status == "queued"
+        assert db.scalar(select(UserNotification).where(UserNotification.resource_id == delivery_id)) is None
 
 
 def test_enqueue_delivery_is_transaction_friendly_and_business_idempotent(tmp_path):

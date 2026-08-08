@@ -79,9 +79,23 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_email_deliveries_history", "email_deliveries", ["organization_id", "created_at"])
+    op.create_table(
+        "user_notifications",
+        sa.Column("id", sa.Uuid(), nullable=False), sa.Column("organization_id", sa.Uuid(), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False), sa.Column("event_type", sa.String(64), nullable=False),
+        sa.Column("resource_type", sa.String(64), nullable=False), sa.Column("resource_id", sa.Uuid(), nullable=False),
+        sa.Column("recipient_masked", sa.String(320), nullable=False), sa.Column("safe_error_code", sa.String(64), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("read_at", sa.DateTime(timezone=True)), sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("organization_id", "user_id", "event_type", "resource_type", "resource_id", name="uq_user_notifications_event_resource"),
+        sa.ForeignKeyConstraint(["organization_id", "user_id"], ["users.organization_id", "users.id"], ondelete="CASCADE"),
+    )
+    op.create_index("ix_user_notifications_inbox", "user_notifications", ["organization_id", "user_id", "read_at", "created_at"])
 
 
 def downgrade() -> None:
+    op.drop_index("ix_user_notifications_inbox", table_name="user_notifications")
+    op.drop_table("user_notifications")
     op.drop_index("ix_email_deliveries_history", table_name="email_deliveries")
     op.drop_table("email_deliveries")
     op.drop_table("email_templates")
