@@ -191,15 +191,23 @@ def test_failed_email_notification_is_opaque_and_revalidated_for_durable_recipie
     _enable_feishu(app, seed)
     with app.state.identity_store.sync_session() as db:
         admin = db.get(User, seed["admin_id"])
-        provider_config = EmailProviderConfig(
-            organization_id=admin.organization_id, host="smtp.example.test", port=587,
-            tls_mode="starttls", username="mailer", encrypted_password=app.state.email_secret_cipher.encrypt_smtp_password("private"),
-            default_reply_to_email=admin.email, default_reply_to_name=admin.display_name,
-            enabled=True, version=1, created_by=admin.id, updated_by=admin.id,
+        provider_config = db.scalar(
+            select(EmailProviderConfig)
+            .where(EmailProviderConfig.organization_id == admin.organization_id)
+            .order_by(EmailProviderConfig.version.desc())
+            .limit(1)
         )
-        db.add(provider_config); db.flush()
+        if provider_config is None:
+            provider_config = EmailProviderConfig(
+                organization_id=admin.organization_id, host="smtp.example.test", port=587,
+                tls_mode="starttls", username="mailer", encrypted_password=app.state.email_secret_cipher.encrypt_smtp_password("private"),
+                default_reply_to_email=admin.email, default_reply_to_name=admin.display_name,
+                enabled=True, version=1, created_by=admin.id, updated_by=admin.id,
+            )
+            db.add(provider_config)
+            db.flush()
         delivery = EmailDelivery(
-            organization_id=admin.organization_id, provider_config_id=provider_config.id, provider_config_version=1,
+            organization_id=admin.organization_id, provider_config_id=provider_config.id, provider_config_version=provider_config.version,
             recipient_ciphertext=app.state.email_secret_cipher.encrypt_recipient("candidate@example.com"), recipient_masked="c*******e@example.com",
             sender_email="careers@beyondcandidate.com", sender_name="BeyondCandidate", reply_to_email=admin.email,
             reply_to_name=admin.display_name, rendered_subject="snapshot", rendered_body="snapshot", resource_type="email_test",

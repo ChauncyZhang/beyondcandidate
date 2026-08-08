@@ -2,6 +2,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 from email.message import EmailMessage
+from email.message import Message
 from email.utils import formataddr
 from typing import Protocol
 
@@ -78,15 +79,38 @@ class SmtpMailProvider:
                 raise ValueError("invalid attachment")
             filename = _header(message.attachment_filename, "attachment filename")
             content_type = _header(message.attachment_content_type, "attachment content type")
-            if "/" not in content_type:
+            parsed_content_type = Message()
+            parsed_content_type["Content-Type"] = content_type
+            normalized_content_type = parsed_content_type.get_content_type()
+            if "/" not in normalized_content_type:
                 raise ValueError("invalid attachment content type")
-            maintype, subtype = content_type.split("/", 1)
+            maintype, subtype = normalized_content_type.split("/", 1)
+            parameters = {
+                key.casefold(): value
+                for key, value in parsed_content_type.get_params(header="Content-Type")[1:]
+            }
+            if normalized_content_type == "text/calendar":
+                method = str(parameters.get("method", "")).upper()
+                charset = str(parameters.get("charset", "")).upper()
+                try:
+                    calendar_text = message.attachment_content.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise ValueError("invalid calendar attachment encoding") from None
+                calendar_method = next(
+                    (line.removeprefix("METHOD:").upper() for line in calendar_text.splitlines() if line.startswith("METHOD:")),
+                    None,
+                )
+                if method not in {"REQUEST", "CANCEL"} or method != calendar_method or charset != "UTF-8":
+                    raise ValueError("invalid calendar attachment metadata")
             mail.add_attachment(
                 message.attachment_content,
                 maintype=maintype,
                 subtype=subtype,
                 filename=filename,
             )
+            attachment = next(reversed(list(mail.iter_attachments())))
+            for key, value in parameters.items():
+                attachment.set_param(key, value, header="Content-Type")
         try:
             await aiosmtplib.send(
                 mail,

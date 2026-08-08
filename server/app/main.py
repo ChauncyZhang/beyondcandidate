@@ -22,6 +22,7 @@ from server.app.observability.http_metrics import (
     method_label,
     route_template,
 )
+from server.app.offers import models as offer_models  # noqa: F401 - registers identity FKs
 from server.app.identity.api import allowed_origin, problem, router as identity_router, session_token
 from server.app.identity.admin_api import router as identity_admin_router
 from server.app.identity.service import Clock, IdentityService, TokenSource

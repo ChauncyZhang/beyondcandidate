@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 
 from server.app.communications.models import EmailDelivery, EmailProviderConfig
-from server.app.communications.provider import PermanentMailError
+from server.app.communications.provider import PermanentMailError, ProviderReceipt
 from server.app.communications.worker import EmailDeliveryJobHandler
 from server.app.core.settings import Settings
 from server.app.identity.models import AuditLog, Job, JobCollaborator, Organization, User, UserRole, UserStatus
@@ -830,7 +830,7 @@ def test_create_interview_is_idempotent_checks_conflicts_and_scopes_interviewer_
         )
         interview = created.json()["data"]
         assert interview["status"] == "scheduled"
-        assert interview["notification_status"] == "queued"
+        assert interview["notification_status"] == "not_sent"
         assert interview["email_delivery"]["recipient"] == "c*******e@example.com"
         assert "candidate@example.com" not in created.text
         assert interview["candidate"]["display_name"] == "李嘉明"
@@ -873,7 +873,10 @@ def test_create_interview_is_idempotent_checks_conflicts_and_scopes_interviewer_
         jobs = database.scalars(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email")).all()
         assert len(deliveries) == len(jobs) == 1
         assert deliveries[0].resource_type == "interview_invitation"
-        calendar = deliveries[0].attachment_content.decode("utf-8")
+        assert b"candidate@example.com" not in deliveries[0].attachment_ciphertext
+        calendar = app.state.email_secret_cipher.decrypt_attachment(
+            deliveries[0].attachment_ciphertext
+        ).decode("utf-8")
         assert f"UID:{interview_id}@beyondcandidate\r\n" in calendar
         assert "METHOD:REQUEST\r\n" in calendar
         assert "SEQUENCE:0\r\n" in calendar
@@ -968,13 +971,261 @@ def test_reschedule_and_cancel_enqueue_one_versioned_calendar_message_each(tmp_p
         ]
         assert len(database.scalars(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email")).all()) == 3
         for sequence, delivery in enumerate(deliveries):
-            calendar = delivery.attachment_content.decode("utf-8")
+            assert b"candidate@example.com" not in delivery.attachment_ciphertext
+            calendar = app.state.email_secret_cipher.decrypt_attachment(
+                delivery.attachment_ciphertext
+            ).decode("utf-8")
             assert f"UID:{interview_id}@beyondcandidate\r\n" in calendar
             assert f"SEQUENCE:{sequence}\r\n" in calendar
-        assert "METHOD:REQUEST\r\n" in deliveries[1].attachment_content.decode("utf-8")
-        cancellation = deliveries[2].attachment_content.decode("utf-8")
+        reschedule_calendar = app.state.email_secret_cipher.decrypt_attachment(
+            deliveries[1].attachment_ciphertext
+        ).decode("utf-8")
+        assert "METHOD:REQUEST\r\n" in reschedule_calendar
+        cancellation = app.state.email_secret_cipher.decrypt_attachment(
+            deliveries[2].attachment_ciphertext
+        ).decode("utf-8")
         assert "METHOD:CANCEL\r\n" in cancellation
         assert "STATUS:CANCELLED\r\n" in cancellation
+
+
+def test_interview_resend_uses_current_confirmed_email_preserves_ics_and_enforces_job_scope(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    scoped_recruiter_id = seed_user(app, "recruiter", "scoped-resend@example.test")
+    seed_user(app, "recruiter", "unrelated-resend@example.test")
+    with app.state.identity_store.sync_session() as database:
+        database.add(
+            JobCollaborator(
+                organization_id=database.get(User, seed["admin_id"]).organization_id,
+                job_id=seed["job_id"],
+                user_id=scoped_recruiter_id,
+                access_role="job_recruiter",
+            )
+        )
+        other_organization = Organization(slug="resend-other", name="Resend Other", status="active")
+        cross_tenant_user = User(
+            organization=other_organization,
+            email="cross-resend@example.test",
+            normalized_email="cross-resend@example.test",
+            display_name="Cross tenant admin",
+            password_hash=PasswordService().hash("cross resend password"),
+        )
+        cross_tenant_user.roles.append(UserRole(role="recruiting_admin"))
+        database.add(cross_tenant_user)
+        database.commit()
+
+    with TestClient(app) as client:
+        created, admin_headers = create_interview(client, seed, key="resend-lifecycle-create")
+        interview_id = created.json()["data"]["id"]
+        new_start = datetime(2099, 7, 24, 9, 30, tzinfo=timezone.utc)
+        rescheduled = client.patch(
+            f"/api/v1/interviews/{interview_id}",
+            json={
+                "starts_at": new_start.isoformat(),
+                "ends_at": (new_start + timedelta(minutes=45)).isoformat(),
+            },
+            headers={**admin_headers, "If-Match": '"1"'},
+        )
+        assert rescheduled.status_code == 200
+        cancelled = client.post(
+            f"/api/v1/interviews/{interview_id}/transitions",
+            json={"target": "cancelled", "reason": "Resend coverage"},
+            headers={**admin_headers, "If-Match": '"2"', "Idempotency-Key": "resend-lifecycle-cancel"},
+        )
+        assert cancelled.status_code == 200
+
+        with app.state.identity_store.sync_session() as database:
+            original_deliveries = database.scalars(
+                select(EmailDelivery)
+                .where(
+                    EmailDelivery.resource_id == UUID(interview_id),
+                    EmailDelivery.parent_delivery_id.is_(None),
+                )
+                .order_by(EmailDelivery.created_at, EmailDelivery.id)
+            ).all()
+            old_contact = database.scalar(
+                select(CandidateContact).where(
+                    CandidateContact.candidate_id == seed["candidate_id"],
+                    CandidateContact.confirmation_status == "confirmed",
+                )
+            )
+            old_contact.confirmation_status = "unconfirmed"
+            old_contact.confirmed_by = None
+            old_contact.confirmed_at = None
+            corrected = app.state.contact_cipher.protect("email", "candidate.corrected@example.com")
+            database.add(
+                CandidateContact(
+                    organization_id=old_contact.organization_id,
+                    candidate_id=seed["candidate_id"],
+                    kind="email",
+                    ciphertext=corrected.ciphertext,
+                    lookup_hash=corrected.lookup_hash,
+                    masked_value=corrected.masked_value,
+                    source="manual",
+                    confirmation_status="confirmed",
+                    confirmed_by=seed["admin_id"],
+                    confirmed_at=datetime.now(timezone.utc),
+                    version=2,
+                )
+            )
+            original_ids = [item.id for item in original_deliveries]
+            database.commit()
+
+        scoped_headers = login(client, "scoped-resend@example.test")
+        first_resend = None
+        for index, original in enumerate(original_deliveries):
+            response = client.post(
+                f"/api/v1/email-deliveries/{original.id}/resend",
+                headers={
+                    **scoped_headers,
+                    "If-Match": '"1"',
+                    "Idempotency-Key": f"scoped-interview-resend-{index}",
+                },
+            )
+            assert response.status_code == 202, response.text
+            if index == 0:
+                first_resend = response
+                replay = client.post(
+                    f"/api/v1/email-deliveries/{original.id}/resend",
+                    headers={
+                        **scoped_headers,
+                        "If-Match": '"1"',
+                        "Idempotency-Key": "scoped-interview-resend-0",
+                    },
+                )
+                assert replay.status_code == 202
+                assert replay.json() == first_resend.json()
+
+        stale = client.post(
+            f"/api/v1/email-deliveries/{original_ids[0]}/resend",
+            headers={
+                **scoped_headers,
+                "If-Match": '"1"',
+                "Idempotency-Key": "scoped-interview-resend-stale",
+            },
+        )
+        assert (stale.status_code, stale.json()["code"]) == (
+            409,
+            "resource_version_conflict",
+        )
+
+        unrelated_headers = login(client, "unrelated-resend@example.test")
+        unrelated = client.post(
+            f"/api/v1/email-deliveries/{original_ids[0]}/resend",
+            headers={**unrelated_headers, "If-Match": '"2"', "Idempotency-Key": "unrelated-resend"},
+        )
+        interviewer_headers = login(client, "assigned@example.test")
+        interviewer = client.post(
+            f"/api/v1/email-deliveries/{original_ids[0]}/resend",
+            headers={**interviewer_headers, "If-Match": '"2"', "Idempotency-Key": "interviewer-resend"},
+        )
+        cross_login = client.post(
+            "/api/v1/auth/login",
+            json={
+                "organization_slug": "resend-other",
+                "email": "cross-resend@example.test",
+                "password": "cross resend password",
+            },
+            headers={"Origin": "https://hr.example.test"},
+        )
+        assert cross_login.status_code == 200
+        cross_tenant = client.post(
+            f"/api/v1/email-deliveries/{original_ids[0]}/resend",
+            headers={
+                "Origin": "https://hr.example.test",
+                "X-CSRF-Token": cross_login.headers["X-CSRF-Token"],
+                "If-Match": '"2"',
+                "Idempotency-Key": "cross-tenant-resend",
+            },
+        )
+
+    for response in (unrelated, interviewer, cross_tenant):
+        assert (response.status_code, response.json()["code"]) == (404, "resource_not_found")
+    with app.state.identity_store.sync_session() as database:
+        originals = {
+            item.id: item
+            for item in database.scalars(
+                select(EmailDelivery).where(EmailDelivery.id.in_(original_ids))
+            ).all()
+        }
+        resends = database.scalars(
+            select(EmailDelivery).where(EmailDelivery.parent_delivery_id.in_(original_ids))
+        ).all()
+        assert len(resends) == 3
+        assert {item.resource_type for item in resends} == {
+            "interview_invitation",
+            "interview_rescheduled",
+            "interview_cancelled",
+        }
+        for resend in resends:
+            original = originals[resend.parent_delivery_id]
+            assert app.state.email_secret_cipher.decrypt_recipient(
+                resend.recipient_ciphertext
+            ) == "candidate.corrected@example.com"
+            assert resend.attachment_ciphertext == original.attachment_ciphertext
+            assert (
+                resend.attachment_filename,
+                resend.attachment_content_type,
+                resend.reply_to_email,
+                resend.reply_to_name,
+                resend.rendered_subject,
+                resend.rendered_body,
+            ) == (
+                original.attachment_filename,
+                original.attachment_content_type,
+                original.reply_to_email,
+                original.reply_to_name,
+                original.rendered_subject,
+                original.rendered_body,
+            )
+            assert b"candidate@example.com" not in resend.attachment_ciphertext
+
+
+def test_interview_resend_without_current_confirmed_email_creates_no_delivery(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with TestClient(app) as client:
+        created, headers = create_interview(client, seed, key="resend-missing-email-create")
+        assert created.status_code == 201
+        interview_id = UUID(created.json()["data"]["id"])
+        with app.state.identity_store.sync_session() as database:
+            original = database.scalar(
+                select(EmailDelivery).where(
+                    EmailDelivery.resource_id == interview_id,
+                    EmailDelivery.parent_delivery_id.is_(None),
+                )
+            )
+            contact = database.scalar(
+                select(CandidateContact).where(
+                    CandidateContact.candidate_id == seed["candidate_id"],
+                    CandidateContact.confirmation_status == "confirmed",
+                )
+            )
+            contact.confirmation_status = "unconfirmed"
+            contact.confirmed_by = None
+            contact.confirmed_at = None
+            original_id = original.id
+            database.commit()
+
+        response = client.post(
+            f"/api/v1/email-deliveries/{original_id}/resend",
+            headers={
+                **headers,
+                "If-Match": '"1"',
+                "Idempotency-Key": "resend-missing-email",
+            },
+        )
+
+    assert (response.status_code, response.json()["code"]) == (
+        409,
+        "candidate_email_unconfirmed",
+    )
+    with app.state.identity_store.sync_session() as database:
+        original = database.get(EmailDelivery, original_id)
+        assert original.version == 1
+        assert database.scalar(
+            select(EmailDelivery).where(EmailDelivery.parent_delivery_id == original_id)
+        ) is None
 
 
 def test_reschedule_and_cancel_without_confirmed_email_leave_interview_unchanged(tmp_path) -> None:
@@ -1015,6 +1266,154 @@ def test_reschedule_and_cancel_without_confirmed_email_leave_interview_unchanged
         assert len(database.scalars(select(EmailDelivery).where(EmailDelivery.resource_id == interview.id)).all()) == 1
 
 
+def test_invalid_iana_timezone_is_rejected_without_interview_mutation(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with TestClient(app) as client:
+        headers = {
+            **login(client, "interview-admin@example.test"),
+            "Idempotency-Key": "invalid-timezone-create",
+        }
+        invalid_create = client.post(
+            "/api/v1/interviews",
+            json={**interview_payload(seed), "timezone": "Not/AZone"},
+            headers=headers,
+        )
+        assert invalid_create.status_code == 422
+        created, headers = create_interview(client, seed, key="valid-timezone-create")
+        interview_id = created.json()["data"]["id"]
+        invalid_patch = client.patch(
+            f"/api/v1/interviews/{interview_id}",
+            json={"timezone": "Not/AZone"},
+            headers={**headers, "If-Match": '"1"'},
+        )
+
+    assert invalid_patch.status_code == 422
+    with app.state.identity_store.sync_session() as database:
+        interviews = database.scalars(select(Interview)).all()
+        assert len(interviews) == 1
+        assert (interviews[0].timezone, interviews[0].version) == ("Asia/Shanghai", 1)
+        assert len(database.scalars(select(EmailDelivery)).all()) == 1
+
+
+def test_latest_disabled_email_provider_rejects_create_without_partial_mutation(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with app.state.identity_store.sync_session() as database:
+        current = database.scalar(select(EmailProviderConfig).where(EmailProviderConfig.version == 1))
+        database.add(
+            EmailProviderConfig(
+                organization_id=current.organization_id,
+                host=current.host,
+                port=current.port,
+                tls_mode=current.tls_mode,
+                username=current.username,
+                encrypted_password=current.encrypted_password,
+                default_reply_to_email=current.default_reply_to_email,
+                default_reply_to_name=current.default_reply_to_name,
+                enabled=False,
+                version=2,
+                created_by=current.created_by,
+                updated_by=current.updated_by,
+            )
+        )
+        database.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/interviews",
+            json=interview_payload(seed),
+            headers={**login(client, "interview-admin@example.test"), "Idempotency-Key": "disabled-provider-create"},
+        )
+
+    assert (response.status_code, response.json()["code"]) == (409, "email_not_configured")
+    with app.state.identity_store.sync_session() as database:
+        assert database.scalar(select(Interview)) is None
+        assert database.scalar(select(EmailDelivery)) is None
+
+
+def test_interview_delivery_snapshots_latest_enabled_provider_version(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with app.state.identity_store.sync_session() as database:
+        current = database.scalar(select(EmailProviderConfig).where(EmailProviderConfig.version == 1))
+        latest = EmailProviderConfig(
+            organization_id=current.organization_id,
+            host="smtp-v2.example.test",
+            port=465,
+            tls_mode="tls",
+            username="mailer-v2@example.test",
+            encrypted_password=app.state.email_secret_cipher.encrypt_smtp_password("smtp-v2"),
+            default_reply_to_email="provider-v2@example.com",
+            default_reply_to_name="Provider V2",
+            enabled=True,
+            version=2,
+            created_by=current.created_by,
+            updated_by=current.updated_by,
+        )
+        database.add(latest)
+        database.commit()
+        latest_id = latest.id
+
+    with TestClient(app) as client:
+        created, _ = create_interview(client, seed, key="latest-enabled-provider")
+    with app.state.identity_store.sync_session() as database:
+        delivery = database.scalar(
+            select(EmailDelivery).where(
+                EmailDelivery.resource_id == UUID(created.json()["data"]["id"])
+            )
+        )
+        assert (delivery.provider_config_id, delivery.provider_config_version) == (latest_id, 2)
+
+
+def test_latest_disabled_email_provider_rolls_back_reschedule_and_cancel(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with TestClient(app) as client:
+        created, headers = create_interview(client, seed, key="disabled-provider-lifecycle-create")
+        interview_id = created.json()["data"]["id"]
+        with app.state.identity_store.sync_session() as database:
+            current = database.scalar(select(EmailProviderConfig).where(EmailProviderConfig.version == 1))
+            database.add(
+                EmailProviderConfig(
+                    organization_id=current.organization_id,
+                    host=current.host,
+                    port=current.port,
+                    tls_mode=current.tls_mode,
+                    username=current.username,
+                    encrypted_password=current.encrypted_password,
+                    default_reply_to_email=current.default_reply_to_email,
+                    default_reply_to_name=current.default_reply_to_name,
+                    enabled=False,
+                    version=2,
+                    created_by=current.created_by,
+                    updated_by=current.updated_by,
+                )
+            )
+            database.commit()
+        new_start = datetime(2099, 7, 23, 9, 30, tzinfo=timezone.utc)
+        rescheduled = client.patch(
+            f"/api/v1/interviews/{interview_id}",
+            json={
+                "starts_at": new_start.isoformat(),
+                "ends_at": (new_start + timedelta(minutes=45)).isoformat(),
+            },
+            headers={**headers, "If-Match": '"1"'},
+        )
+        cancelled = client.post(
+            f"/api/v1/interviews/{interview_id}/transitions",
+            json={"target": "cancelled", "reason": "Provider disabled"},
+            headers={**headers, "If-Match": '"1"', "Idempotency-Key": "disabled-provider-cancel"},
+        )
+
+    assert (rescheduled.status_code, rescheduled.json()["code"]) == (409, "email_not_configured")
+    assert (cancelled.status_code, cancelled.json()["code"]) == (409, "email_not_configured")
+    with app.state.identity_store.sync_session() as database:
+        interview = database.get(Interview, UUID(interview_id))
+        assert (interview.status, interview.version, interview.calendar_sequence) == ("scheduled", 1, 0)
+        assert len(database.scalars(select(EmailDelivery).where(EmailDelivery.resource_id == interview.id)).all()) == 1
+
+
 def test_terminal_smtp_failure_does_not_rollback_saved_interview(tmp_path) -> None:
     class RejectingProvider:
         async def send(self, _message):
@@ -1038,6 +1437,42 @@ def test_terminal_smtp_failure_does_not_rollback_saved_interview(tmp_path) -> No
         assert database.get(Interview, interview_id).status == "scheduled"
         failed = database.get(EmailDelivery, delivery_id)
         assert (failed.status, failed.safe_error_code) == ("failed", "smtp_recipient_rejected")
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/v1/interviews/{interview_id}",
+            headers=login(client, "interview-admin@example.test"),
+        )
+    assert response.json()["data"]["notification_status"] == "not_sent"
+    assert response.json()["data"]["email_delivery"]["status"] == "failed"
+
+
+def test_successful_smtp_delivery_updates_only_email_delivery_projection(tmp_path) -> None:
+    class AcceptingProvider:
+        async def send(self, _message):
+            return ProviderReceipt("provider-receipt")
+
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with TestClient(app) as client:
+        created, _ = create_interview(client, seed, key="email-worker-success")
+    interview_id = UUID(created.json()["data"]["id"])
+    with app.state.identity_store.sync_session() as database:
+        job = database.scalar(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email"))
+    asyncio.run(
+        EmailDeliveryJobHandler(
+            app.state.identity_store.sync_session,
+            AcceptingProvider(),
+            app.state.email_secret_cipher,
+        )(job)
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/v1/interviews/{interview_id}",
+            headers=login(client, "interview-admin@example.test"),
+        )
+    assert response.json()["data"]["notification_status"] == "not_sent"
+    assert response.json()["data"]["email_delivery"]["status"] == "sent"
 
 
 def test_create_interview_rejects_an_application_that_has_not_completed_review(tmp_path) -> None:
@@ -1485,6 +1920,22 @@ def test_calendar_cancel_reuses_persisted_request_contacts_after_user_changes(tm
             interviewer.email = "renamed-interviewer@example.test"
             interviewer.normalized_email = interviewer.email
             interviewer.display_name = "Renamed interviewer"
+            database.add(
+                EmailProviderConfig(
+                    organization_id=admin.organization_id,
+                    host="smtp-v2.example.test",
+                    port=587,
+                    tls_mode="starttls",
+                    username="mailer-v2@example.test",
+                    encrypted_password=app.state.email_secret_cipher.encrypt_smtp_password("smtp-v2"),
+                    default_reply_to_email="changed-default@example.com",
+                    default_reply_to_name="Changed Default",
+                    enabled=True,
+                    version=2,
+                    created_by=admin.id,
+                    updated_by=admin.id,
+                )
+            )
             database.commit()
 
         cancelled = client.post(
@@ -1506,6 +1957,35 @@ def test_calendar_cancel_reuses_persisted_request_contacts_after_user_changes(tm
     assert contacts(invitation) == contacts(cancellation)
     assert b"METHOD:REQUEST\r\n" in invitation.content
     assert b"METHOD:CANCEL\r\n" in cancellation.content
+    with app.state.identity_store.sync_session() as database:
+        deliveries = database.scalars(
+            select(EmailDelivery)
+            .where(EmailDelivery.resource_id == UUID(interview_id))
+            .order_by(EmailDelivery.created_at, EmailDelivery.id)
+        ).all()
+        assert [item.resource_type for item in deliveries] == [
+            "interview_invitation",
+            "interview_cancelled",
+        ]
+        assert {
+            (item.reply_to_email, item.reply_to_name) for item in deliveries
+        } == {("interview-admin@example.com", "recruiting_admin")}
+        outbound_contacts = []
+        for delivery in deliveries:
+            calendar = app.state.email_secret_cipher.decrypt_attachment(
+                delivery.attachment_ciphertext
+            ).decode("utf-8")
+            outbound_contacts.append(
+                {
+                    line
+                    for line in calendar.split("\r\n")
+                    if line.startswith("ORGANIZER")
+                }
+            )
+        assert outbound_contacts[0] == outbound_contacts[1]
+        assert outbound_contacts[0] == {
+            line for line in contacts(invitation) if line.startswith("ORGANIZER")
+        }
 
 
 def feedback_payload(conclusion="recommend"):

@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from server.app.interviews.domain import validate_iana_timezone
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -29,7 +31,12 @@ class ScheduleInput(StrictModel):
 
     @model_validator(mode="after")
     def validate_schedule(self):
-        if self.starts_at.tzinfo is None or self.ends_at.tzinfo is None:
+        if (
+            self.starts_at.tzinfo is None
+            or self.starts_at.utcoffset() is None
+            or self.ends_at.tzinfo is None
+            or self.ends_at.utcoffset() is None
+        ):
             raise ValueError("schedule timestamps must include a timezone")
         if self.ends_at <= self.starts_at:
             raise ValueError("ends_at must be after starts_at")
@@ -52,9 +59,19 @@ class InterviewCreate(StrictModel):
     participants: list[ParticipantInput] = Field(min_length=1, max_length=20)
     allow_soft_conflict: bool = False
 
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        return validate_iana_timezone(value)
+
     @model_validator(mode="after")
     def validate_interview(self):
-        if self.starts_at.tzinfo is None or self.ends_at.tzinfo is None:
+        if (
+            self.starts_at.tzinfo is None
+            or self.starts_at.utcoffset() is None
+            or self.ends_at.tzinfo is None
+            or self.ends_at.utcoffset() is None
+        ):
             raise ValueError("schedule timestamps must include a timezone")
         if self.ends_at <= self.starts_at:
             raise ValueError("ends_at must be after starts_at")
@@ -78,10 +95,15 @@ class InterviewPatch(StrictModel):
     participants: list[ParticipantInput] | None = Field(default=None, min_length=1, max_length=20)
     allow_soft_conflict: bool = False
 
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str | None) -> str | None:
+        return validate_iana_timezone(value) if value is not None else None
+
     @model_validator(mode="after")
     def validate_patch(self):
         for value in (self.starts_at, self.ends_at):
-            if value is not None and value.tzinfo is None:
+            if value is not None and (value.tzinfo is None or value.utcoffset() is None):
                 raise ValueError("schedule timestamps must include a timezone")
         if self.starts_at is not None and self.ends_at is not None and self.ends_at <= self.starts_at:
             raise ValueError("ends_at must be after starts_at")

@@ -4,9 +4,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
 
-from server.app.communications.models import EmailDelivery, EmailProviderConfig
+from server.app.communications.models import EmailDelivery
 from server.app.communications.security import EmailSecretCipher
-from server.app.communications.service import DeliveryCommand, SenderPolicy, enqueue_delivery
+from server.app.communications.service import (
+    DeliveryCommand,
+    EmailConfigurationUnavailable,
+    SenderPolicy,
+    enqueue_delivery,
+    latest_email_provider_config,
+)
 from server.app.identity.models import Job, User, UserStatus
 from server.app.interviews.domain import CalendarContact, build_calendar_invitation
 from server.app.interviews.models import Interview
@@ -23,8 +29,8 @@ class CandidateEmailUnavailable(ValueError):
     safe_code = "candidate_email_unconfirmed"
 
 
-class EmailConfigurationUnavailable(ValueError):
-    safe_code = "email_not_configured"
+class InterviewMessageValidationError(ValueError):
+    safe_code = "interview_message_invalid"
 
 
 @dataclass(frozen=True)
@@ -61,6 +67,7 @@ def render_interview_message(
     candidate_email: str,
     job_title: str,
     organizer: CalendarContact,
+    reply_to_name: str,
     dtstamp: datetime,
 ) -> InterviewMessage:
     if kind not in INTERVIEW_MESSAGE_KINDS:
@@ -68,7 +75,7 @@ def render_interview_message(
     try:
         local_timezone = ZoneInfo(interview.timezone)
     except (ZoneInfoNotFoundError, ValueError):
-        raise ValueError("interview_timezone_invalid") from None
+        raise InterviewMessageValidationError("interview_timezone_invalid") from None
 
     labels = {
         "interview_invitation": ("面试邀请", "已为您安排面试"),
@@ -97,7 +104,7 @@ def render_interview_message(
             f"方式：{interview.method}",
             f"地点/链接：{location}",
             "",
-            f"如有问题，请直接回复此邮件联系 {organizer.name}。",
+            f"如有问题，请直接回复此邮件联系 {reply_to_name}。",
         ]
     )
     attendees = (
@@ -123,9 +130,44 @@ def render_interview_message(
         subject=subject,
         body=body,
         attachment_filename="interview.ics",
-        attachment_content_type="text/calendar",
+        attachment_content_type=(
+            "text/calendar; method=CANCEL; charset=UTF-8"
+            if kind == "interview_cancelled"
+            else "text/calendar; method=REQUEST; charset=UTF-8"
+        ),
         attachment_content=calendar,
     )
+
+
+def resolve_confirmed_candidate_email(
+    db,
+    *,
+    organization_id,
+    candidate_id,
+    contact_cipher: ContactCipher,
+) -> str:
+    contact = db.scalar(
+        select(CandidateContact)
+        .where(
+            CandidateContact.organization_id == organization_id,
+            CandidateContact.candidate_id == candidate_id,
+            CandidateContact.kind == "email",
+            CandidateContact.confirmation_status == "confirmed",
+        )
+        .order_by(
+            CandidateContact.confirmed_at.desc(),
+            CandidateContact.created_at.desc(),
+            CandidateContact.id.desc(),
+        )
+        .limit(1)
+        .with_for_update()
+    )
+    if contact is None:
+        raise CandidateEmailUnavailable
+    try:
+        return contact_cipher.decrypt(contact.ciphertext)
+    except ValueError:
+        raise CandidateEmailUnavailable from None
 
 
 def enqueue_interview_message(
@@ -160,64 +202,57 @@ def enqueue_interview_message(
     )
     if candidate is None or job is None:
         raise ValueError("interview_context_unavailable")
-    contact = db.scalar(
-        select(CandidateContact)
-        .where(
-            CandidateContact.organization_id == interview.organization_id,
-            CandidateContact.candidate_id == candidate.id,
-            CandidateContact.kind == "email",
-            CandidateContact.confirmation_status == "confirmed",
-        )
-        .order_by(
-            CandidateContact.confirmed_at.desc(),
-            CandidateContact.created_at.desc(),
-            CandidateContact.id.desc(),
-        )
-        .limit(1)
-        .with_for_update()
+    candidate_email = resolve_confirmed_candidate_email(
+        db,
+        organization_id=interview.organization_id,
+        candidate_id=candidate.id,
+        contact_cipher=contact_cipher,
     )
-    if contact is None:
-        raise CandidateEmailUnavailable
-    try:
-        candidate_email = contact_cipher.decrypt(contact.ciphertext)
-    except ValueError:
-        raise CandidateEmailUnavailable from None
 
-    provider_config = db.scalar(
-        select(EmailProviderConfig)
-        .where(
-            EmailProviderConfig.organization_id == interview.organization_id,
-            EmailProviderConfig.enabled.is_(True),
+    provider_config = latest_email_provider_config(db, interview.organization_id)
+    if provider_config is None or not provider_config.enabled:
+        raise EmailConfigurationUnavailable
+    try:
+        organizer = CalendarContact(
+            name=interview.calendar_organizer["name"],
+            email=interview.calendar_organizer["email"],
         )
-        .order_by(EmailProviderConfig.version.desc())
+    except (KeyError, TypeError, ValueError):
+        raise InterviewMessageValidationError("interview_organizer_invalid") from None
+    initial_delivery = db.scalar(
+        select(EmailDelivery)
+        .where(
+            EmailDelivery.organization_id == interview.organization_id,
+            EmailDelivery.resource_type == "interview_invitation",
+            EmailDelivery.resource_id == interview.id,
+        )
+        .order_by(EmailDelivery.created_at, EmailDelivery.id)
         .limit(1)
     )
-    if provider_config is None:
-        raise EmailConfigurationUnavailable
-    responsible_hr = db.scalar(
-        select(User).where(
-            User.organization_id == interview.organization_id,
-            User.id == interview.owner_id,
-            User.status == UserStatus.ACTIVE,
+    if initial_delivery is not None:
+        reply_to_email = initial_delivery.reply_to_email
+        reply_to_name = initial_delivery.reply_to_name
+    else:
+        responsible_hr = db.scalar(
+            select(User).where(
+                User.organization_id == interview.organization_id,
+                User.id == interview.owner_id,
+                User.status == UserStatus.ACTIVE,
+            )
         )
-    )
-    if responsible_hr is not None:
-        try:
-            responsible_email = email_cipher.normalize_email(responsible_hr.email)
-        except ValueError:
-            responsible_hr = None
+        if responsible_hr is not None:
+            try:
+                responsible_email = email_cipher.normalize_email(responsible_hr.email)
+            except ValueError:
+                responsible_hr = None
+                responsible_email = None
+        else:
             responsible_email = None
-    else:
-        responsible_email = None
-    reply_to_email = responsible_email
-    reply_to_name = responsible_hr.display_name if responsible_hr is not None else None
-    if responsible_hr is None:
-        organizer = CalendarContact(
-            name=provider_config.default_reply_to_name,
-            email=provider_config.default_reply_to_email,
-        )
-    else:
-        organizer = CalendarContact(name=reply_to_name, email=reply_to_email)
+        reply_to_email = responsible_email
+        reply_to_name = responsible_hr.display_name if responsible_hr is not None else None
+        if responsible_hr is None:
+            reply_to_email = provider_config.default_reply_to_email
+            reply_to_name = provider_config.default_reply_to_name
 
     message = render_interview_message(
         kind=kind,
@@ -226,6 +261,7 @@ def enqueue_interview_message(
         candidate_email=candidate_email,
         job_title=job.title,
         organizer=organizer,
+        reply_to_name=reply_to_name,
         dtstamp=datetime.now(timezone.utc),
     )
     return enqueue_delivery(

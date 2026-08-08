@@ -17,17 +17,17 @@ depends_on = None
 def upgrade() -> None:
     op.add_column("email_deliveries", sa.Column("attachment_filename", sa.String(255)))
     op.add_column("email_deliveries", sa.Column("attachment_content_type", sa.String(255)))
-    op.add_column("email_deliveries", sa.Column("attachment_content", sa.LargeBinary()))
+    op.add_column("email_deliveries", sa.Column("attachment_ciphertext", sa.LargeBinary()))
     op.create_check_constraint(
         "ck_email_deliveries_attachment_triplet",
         "email_deliveries",
-        "(attachment_filename is null and attachment_content_type is null and attachment_content is null) or "
-        "(attachment_filename is not null and attachment_content_type is not null and attachment_content is not null)",
+        "(attachment_filename is null and attachment_content_type is null and attachment_ciphertext is null) or "
+        "(attachment_filename is not null and attachment_content_type is not null and attachment_ciphertext is not null)",
     )
 
 
 def downgrade() -> None:
     op.drop_constraint("ck_email_deliveries_attachment_triplet", "email_deliveries", type_="check")
-    op.drop_column("email_deliveries", "attachment_content")
+    op.drop_column("email_deliveries", "attachment_ciphertext")
     op.drop_column("email_deliveries", "attachment_content_type")
     op.drop_column("email_deliveries", "attachment_filename")

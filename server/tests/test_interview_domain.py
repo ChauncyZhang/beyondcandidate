@@ -1,12 +1,23 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from uuid import UUID
+
+import pytest
 
 from server.app.interviews import domain as interview_domain
 from server.app.interviews.domain import ScheduleSlot, build_calendar_invitation, schedule_conflict
+from server.app.interviews.schemas import InterviewCreate, InterviewPatch, ScheduleInput
 
 
 INTERVIEWER_A = UUID("11111111-1111-4111-8111-111111111111")
 INTERVIEWER_B = UUID("22222222-2222-4222-8222-222222222222")
+
+
+class MissingOffsetTimezone(tzinfo):
+    def utcoffset(self, _value):
+        return None
+
+    def dst(self, _value):
+        return None
 
 
 def slot(hour: int, minute: int, duration: int, *participants: UUID, status: str = "scheduled") -> ScheduleSlot:
@@ -27,6 +38,30 @@ def test_schedule_conflict_distinguishes_overlap_buffer_and_unrelated_people() -
     assert schedule_conflict(slot(9, 15, 30, INTERVIEWER_A), existing, buffer_minutes=15) is None
     assert schedule_conflict(slot(8, 30, 30, INTERVIEWER_B), existing, buffer_minutes=15) is None
     assert schedule_conflict(slot(8, 30, 30, INTERVIEWER_A), slot(8, 0, 60, INTERVIEWER_A, status="cancelled"), buffer_minutes=15) is None
+
+
+def test_interview_schemas_reject_timezone_objects_without_an_offset() -> None:
+    starts_at = datetime(2099, 7, 15, 8, 0, tzinfo=MissingOffsetTimezone())
+    ends_at = starts_at + timedelta(minutes=45)
+    with pytest.raises(ValueError, match="timezone"):
+        ScheduleInput(
+            starts_at=starts_at,
+            ends_at=ends_at,
+            participant_ids=[INTERVIEWER_A],
+        )
+    with pytest.raises(ValueError, match="timezone"):
+        InterviewCreate(
+            application_id=UUID("33333333-3333-4333-8333-333333333333"),
+            round_name="一面",
+            method="video",
+            timezone="Asia/Shanghai",
+            starts_at=starts_at,
+            ends_at=ends_at,
+            meeting_url="https://meeting.example.test/room",
+            participants=[{"user_id": INTERVIEWER_A}],
+        )
+    with pytest.raises(ValueError, match="timezone"):
+        InterviewPatch(starts_at=starts_at)
 
 
 def test_calendar_invitation_is_rfc5545_shaped_and_escapes_user_text() -> None:

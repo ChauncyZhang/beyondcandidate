@@ -8,6 +8,7 @@ from sqlalchemy import select
 from server.app.communications.models import EmailDelivery, EmailProviderConfig, EmailTemplate
 from server.app.queue.models import BackgroundJob
 from server.app.recruiting.models import IdempotencyRecord
+from server.tests.test_recruiting_api import seed_user
 from server.tests.test_screening_api import app_and_seed, login
 
 
@@ -69,8 +70,9 @@ def test_templates_enforce_allowlist_missing_variables_and_header_safety(tmp_pat
         assert template.variable_allowlist == ["candidate_name", "job_title"]
 
 
-def test_test_send_history_and_resend_use_saved_config_and_opaque_jobs(tmp_path):
+def test_test_send_history_and_resend_use_saved_config_and_opaque_jobs(tmp_path, monkeypatch):
     app, _, _ = app_and_seed(tmp_path)
+    seed_user(app, "recruiter", "generic-resend-recruiter@example.test")
     with TestClient(app) as client:
         system = login(client, "system@example.test")
         saved = client.put("/api/v1/settings/email", json={"host": "smtp.example.test", "port": 465, "tls_mode": "tls", "username": "mailer", "password": "smtp-private", "default_reply_to_email": "saved-reply@example.com", "default_reply_to_name": "Saved Reply", "enabled": True}, headers={**system, "If-Match": '"0"', "Idempotency-Key": "config"})
@@ -91,6 +93,11 @@ def test_test_send_history_and_resend_use_saved_config_and_opaque_jobs(tmp_path)
         assert "responsible.hr@example.com" not in history.text
         missing_match = client.post(f"/api/v1/email-deliveries/{delivery_id}/resend", headers={**admin, "Idempotency-Key": "resend-missing-match"})
         assert missing_match.status_code == 428
+        monkeypatch.setattr(
+            app.state.email_secret_cipher,
+            "decrypt_recipient",
+            lambda *_: (_ for _ in ()).throw(AssertionError("API must not decrypt recipients")),
+        )
         resent = client.post(f"/api/v1/email-deliveries/{delivery_id}/resend", headers={**admin, "If-Match": '"1"', "Idempotency-Key": "resend-once"})
         replay = client.post(f"/api/v1/email-deliveries/{delivery_id}/resend", headers={**admin, "If-Match": '"1"', "Idempotency-Key": "resend-once"})
         assert resent.status_code == 202 and replay.json() == resent.json()
@@ -104,6 +111,32 @@ def test_test_send_history_and_resend_use_saved_config_and_opaque_jobs(tmp_path)
         assert second_page["meta"]["next_cursor"] is not None
         assert third_page["meta"]["next_cursor"] is None
         assert second_page["data"][0]["id"] != first_page["data"][0]["id"]
+        recruiter_login = client.post(
+            "/api/v1/auth/login",
+            json={
+                "organization_slug": "acme",
+                "email": "generic-resend-recruiter@example.test",
+                "password": "correct horse",
+            },
+            headers={"Origin": "https://hr.example.test"},
+        )
+        assert recruiter_login.status_code == 200
+        recruiter = {
+            "Origin": "https://hr.example.test",
+            "X-CSRF-Token": recruiter_login.headers["X-CSRF-Token"],
+        }
+        denied_generic_resend = client.post(
+            f"/api/v1/email-deliveries/{delivery_id}/resend",
+            headers={
+                **recruiter,
+                "If-Match": '"2"',
+                "Idempotency-Key": "generic-recruiter-resend-denied",
+            },
+        )
+        assert (denied_generic_resend.status_code, denied_generic_resend.json()["code"]) == (
+            404,
+            "resource_not_found",
+        )
     with app.state.identity_store.sync_session() as db:
         original = db.get(EmailDelivery, delivery_id)
         explicit_delivery = db.get(EmailDelivery, uuid.UUID(explicit.json()["data"]["id"]))

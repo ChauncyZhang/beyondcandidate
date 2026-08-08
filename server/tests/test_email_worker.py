@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import uuid
+from email import policy
+from email.parser import BytesParser
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -16,6 +18,7 @@ from server.app.communications.worker import EmailDeliveryJobHandler
 from server.app.identity.models import AuditLog, Base, Organization, User, UserRole
 from server.app.integrations.feishu.models import FeishuOrganizationConfig
 from server.app.interviews.models import Interview  # noqa: F401 - registers Feishu FK metadata
+from server.app.offers import models as offer_models  # noqa: F401 - registers identity FKs
 from server.app.queue.models import BackgroundJob, JobAttempt, OutboxEvent
 from server.app.queue.repository import QueueRepository
 from server.app.queue.service import PermanentJobError, RetryableJobError
@@ -66,11 +69,16 @@ def test_email_cipher_separates_smtp_recipient_and_idempotency_purposes():
     cipher = EmailSecretCipher(b"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
     password_token = cipher.encrypt_smtp_password("same-value")
     recipient_token = cipher.encrypt_recipient("same-value")
+    attachment_token = cipher.encrypt_attachment(b"same-value")
     assert password_token != recipient_token
+    assert attachment_token not in {password_token, recipient_token}
     assert cipher.decrypt_smtp_password(password_token) == "same-value"
     assert cipher.decrypt_recipient(recipient_token) == "same-value"
+    assert cipher.decrypt_attachment(attachment_token) == b"same-value"
     with pytest.raises(ValueError):
         cipher.decrypt_recipient(password_token)
+    with pytest.raises(ValueError):
+        cipher.decrypt_attachment(recipient_token)
     first = cipher.fingerprint("email.config.test", {"recipient": "candidate@example.com"})
     assert first == cipher.fingerprint("email.config.test", {"recipient": "candidate@example.com"})
     assert first != cipher.fingerprint("email.delivery.request", {"recipient": "candidate@example.com"})
@@ -93,15 +101,20 @@ def test_worker_uses_fixed_sender_hr_reply_to_and_immutable_snapshots(tmp_path):
     with sessions.begin() as db:
         stored = db.get(EmailDelivery, delivery_id)
         stored.attachment_filename = "interview.ics"
-        stored.attachment_content_type = "text/calendar"
-        stored.attachment_content = b"BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n"
+        stored.attachment_content_type = "text/calendar; method=REQUEST; charset=UTF-8"
+        stored.attachment_ciphertext = cipher.encrypt_attachment(
+            b"BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n"
+        )
     provider = FakeMailProvider()
     asyncio.run(EmailDeliveryJobHandler(sessions, provider, cipher)(job))
     message = provider.messages[0]
     assert (message.sender_email, message.sender_name) == ("careers@example.com", "BeyondCandidate")
     assert (message.reply_to_email, message.reply_to_name) == ("hr@example.com", "Responsible HR")
     assert (message.recipient, message.subject, message.body) == ("candidate@example.com", "Interview invitation", "Hello Candidate")
-    assert (message.attachment_filename, message.attachment_content_type) == ("interview.ics", "text/calendar")
+    assert (message.attachment_filename, message.attachment_content_type) == (
+        "interview.ics",
+        "text/calendar; method=REQUEST; charset=UTF-8",
+    )
     assert message.attachment_content.startswith(b"BEGIN:VCALENDAR\r\n")
     assert message.message_id == f"<email-{delivery_id}@beyondcandidate.internal>"
     with sessions() as db:
@@ -271,11 +284,13 @@ def test_enqueue_delivery_rejects_same_business_key_with_changed_fingerprint(tmp
             ), cipher=cipher, sender_policy=SenderPolicy(original.sender_email, original.sender_name))
 
 
-def test_smtp_provider_keeps_certificate_verification_and_receipt_opaque(monkeypatch):
+@pytest.mark.parametrize("calendar_method", ["REQUEST", "CANCEL"])
+def test_smtp_provider_keeps_certificate_verification_and_receipt_opaque(monkeypatch, calendar_method):
     captured = {}
     async def smtp_send(message, **kwargs):
         captured.update(kwargs)
         captured["message_id"] = message["Message-ID"]
+        captured["serialized"] = message.as_bytes()
         captured["attachments"] = [
             (part.get_content_type(), part.get_filename()) for part in message.iter_attachments()
         ]
@@ -285,15 +300,68 @@ def test_smtp_provider_keeps_certificate_verification_and_receipt_opaque(monkeyp
     receipt = asyncio.run(provider.send(MailMessage(
         "candidate@example.com", "careers@example.com", "BeyondCandidate",
         "hr@example.com", "HR", "Subject", "Body",
-        "<email-test@beyondcandidate.internal>", "interview.ics", "text/calendar",
-        b"BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n",
+        "<email-test@beyondcandidate.internal>", "interview.ics",
+        f"text/calendar; method={calendar_method}; charset=UTF-8",
+        f"BEGIN:VCALENDAR\r\nMETHOD:{calendar_method}\r\nSUMMARY:候选人面试\r\nEND:VCALENDAR\r\n".encode(),
     )))
     assert captured["start_tls"] is True and captured["use_tls"] is False
     assert captured.get("validate_certs", True) is True
     assert captured["message_id"] == "<email-test@beyondcandidate.internal>"
     assert captured["attachments"] == [("text/calendar", "interview.ics")]
+    serialized = BytesParser(policy=policy.default).parsebytes(captured["serialized"])
+    calendar_part = next(serialized.iter_attachments())
+    assert calendar_part.get_param("method") == calendar_method
+    assert calendar_part.get_content_charset() == "utf-8"
+    assert "候选人面试" in calendar_part.get_payload(decode=True).decode("utf-8")
     assert "candidate@example.com" not in receipt.receipt_id
     assert "private-provider-detail" not in receipt.receipt_id
+
+
+@pytest.mark.parametrize(
+    "content_type,calendar_method",
+    [
+        ("text/calendar; charset=UTF-8", "REQUEST"),
+        ("text/calendar; method=REQUEST", "REQUEST"),
+        ("text/calendar; method=CANCEL; charset=UTF-8", "REQUEST"),
+    ],
+)
+def test_smtp_provider_rejects_invalid_calendar_mime_metadata(
+    monkeypatch, content_type, calendar_method
+):
+    called = False
+
+    async def smtp_send(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("server.app.communications.provider.aiosmtplib.send", smtp_send)
+    provider = SmtpMailProvider(
+        host="smtp.example.com",
+        port=587,
+        tls_mode="starttls",
+        username="mailer",
+        password="private",
+    )
+
+    with pytest.raises(ValueError, match="invalid calendar attachment metadata"):
+        asyncio.run(
+            provider.send(
+                MailMessage(
+                    "candidate@example.com",
+                    "careers@example.com",
+                    "BeyondCandidate",
+                    "hr@example.com",
+                    "HR",
+                    "Subject",
+                    "Body",
+                    "<email-test@beyondcandidate.internal>",
+                    "interview.ics",
+                    content_type,
+                    f"BEGIN:VCALENDAR\r\nMETHOD:{calendar_method}\r\nSUMMARY:候选人面试\r\nEND:VCALENDAR\r\n".encode(),
+                )
+            )
+        )
+    assert called is False
 
 
 def test_render_template_rejects_missing_unknown_and_injected_header_variables():

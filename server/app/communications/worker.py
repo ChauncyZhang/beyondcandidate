@@ -51,6 +51,11 @@ class EmailDeliveryJobHandler:
                 try:
                     recipient = self._cipher.decrypt_recipient(delivery.recipient_ciphertext)
                     password = self._cipher.decrypt_smtp_password(config.encrypted_password)
+                    attachment_content = (
+                        self._cipher.decrypt_attachment(delivery.attachment_ciphertext)
+                        if delivery.attachment_ciphertext is not None
+                        else None
+                    )
                 except ValueError:
                     mark_delivery_failed(db, delivery, "email_secret_unavailable")
                     setup_error = "email_secret_unavailable"
@@ -68,7 +73,7 @@ class EmailDeliveryJobHandler:
                         f"<email-{delivery.id}@beyondcandidate.internal>",
                         delivery.attachment_filename,
                         delivery.attachment_content_type,
-                        delivery.attachment_content,
+                        attachment_content,
                     )
                     provider = self._provider or SmtpMailProvider(host=config.host, port=config.port, tls_mode=config.tls_mode, username=config.username, password=password, timeout_seconds=self._timeout)
 

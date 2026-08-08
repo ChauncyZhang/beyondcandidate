@@ -36,7 +36,7 @@ def test_email_delivery_schema_has_versioned_provider_and_dedupe_guards() -> Non
         "version",
         "attachment_filename",
         "attachment_content_type",
-        "attachment_content",
+        "attachment_ciphertext",
     } <= set(EmailDelivery.__table__.columns.keys())
     check_names = {
         constraint.name

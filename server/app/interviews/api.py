@@ -13,6 +13,7 @@ from server.app.communications.interview_messages import (
     INTERVIEW_MESSAGE_KINDS,
     CandidateEmailUnavailable,
     EmailConfigurationUnavailable,
+    InterviewMessageValidationError,
     enqueue_interview_message,
 )
 from server.app.communications.models import EmailDelivery
@@ -505,7 +506,7 @@ def _interview_data(db, interview: Interview) -> dict:
         "location": interview.location,
         "meeting_url": interview.meeting_url,
         "status": interview.status,
-        "notification_status": delivery.status if delivery is not None else interview.notification_status,
+        "notification_status": interview.notification_status,
         "invitation_status": interview.invitation_status,
         "email_delivery": delivery_data,
         "participants": [
@@ -1142,7 +1143,6 @@ def create_interview(payload: InterviewCreate, request: Request, idempotency_key
                     interview,
                     "interview_invitation",
                 )
-                interview.notification_status = "queued"
                 recalculate_candidate_retention(
                     db, principal.organization_id, candidate_id
                 )
@@ -1181,6 +1181,9 @@ def create_interview(payload: InterviewCreate, request: Request, idempotency_key
         except EmailConfigurationUnavailable:
             db.rollback()
             return problem(request, 409, "email_not_configured", "Configure transactional email before scheduling the interview.")
+        except InterviewMessageValidationError as error:
+            db.rollback()
+            return problem(request, 409, str(error), "The interview email could not be prepared.")
         except ScheduleConflict as error:
             db.rollback()
             return problem(
@@ -1374,7 +1377,6 @@ def patch_interview(interview_id: UUID, payload: InterviewPatch, request: Reques
                 interview,
                 "interview_rescheduled",
             )
-            interview.notification_status = "queued"
             recalculate_candidate_retention(
                 db, principal.organization_id, candidate_id
             )
@@ -1411,6 +1413,9 @@ def patch_interview(interview_id: UUID, payload: InterviewPatch, request: Reques
         except EmailConfigurationUnavailable:
             db.rollback()
             return problem(request, 409, "email_not_configured", "Configure transactional email before rescheduling the interview.")
+        except InterviewMessageValidationError as error:
+            db.rollback()
+            return problem(request, 409, str(error), "The interview email could not be prepared.")
         except Exception:
             db.rollback()
             raise
@@ -1618,7 +1623,6 @@ def transition_interview(
                         locked,
                         "interview_cancelled",
                     )
-                    locked.notification_status = "queued"
                     schedule_interview_sync(db, locked, "cancel")
                     schedule_feishu_notification(
                         db,
@@ -1673,6 +1677,9 @@ def transition_interview(
         except EmailConfigurationUnavailable:
             db.rollback()
             return problem(request, 409, "email_not_configured", "Configure transactional email before cancelling the interview.")
+        except InterviewMessageValidationError as error:
+            db.rollback()
+            return problem(request, 409, str(error), "The interview email could not be prepared.")
         except ResourceVersionConflict:
             db.rollback()
             return problem(request, 409, "resource_version_conflict", "The interview changed. Refresh and retry.")

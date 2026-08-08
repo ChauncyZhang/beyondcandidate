@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class DeliveryCommand:
     organization_id: uuid.UUID
-    recipient: str
+    recipient: str | None
     subject: str
     body: str
     resource_type: str
@@ -43,6 +43,9 @@ class DeliveryCommand:
     attachment_filename: str | None = None
     attachment_content_type: str | None = None
     attachment_content: bytes | None = None
+    attachment_ciphertext: bytes | None = None
+    recipient_ciphertext: bytes | None = None
+    recipient_masked: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,10 +58,23 @@ class DeliveryIdempotencyConflict(ValueError):
     pass
 
 
+class EmailConfigurationUnavailable(ValueError):
+    safe_code = "email_not_configured"
+
+
 def _safe_header(value: str) -> str:
     if not value or "\r" in value or "\n" in value:
         raise ValueError("header_injection")
     return value
+
+
+def latest_email_provider_config(db, organization_id: uuid.UUID) -> EmailProviderConfig | None:
+    return db.scalar(
+        select(EmailProviderConfig)
+        .where(EmailProviderConfig.organization_id == organization_id)
+        .order_by(EmailProviderConfig.version.desc())
+        .limit(1)
+    )
 
 
 def validate_template(subject: str, body: str, allowed_variables: list[str]) -> None:
@@ -92,10 +108,18 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
         db.execute(text("select pg_advisory_xact_lock(hashtextextended(:scope, 0))"), {"scope": f"email-delivery:{command.organization_id}:{business_dedupe_key}"})
     if (command.reply_to_email is None) != (command.reply_to_name is None):
         raise ValueError("reply_to_pair_required")
+    if command.attachment_content is not None and command.attachment_ciphertext is not None:
+        raise ValueError("attachment_content_ambiguous")
+    if command.recipient is None:
+        if command.recipient_ciphertext is None or command.recipient_masked is None:
+            raise ValueError("recipient_snapshot_required")
+    elif command.recipient_ciphertext is not None or command.recipient_masked is not None:
+        raise ValueError("recipient_snapshot_ambiguous")
+    attachment_snapshot = command.attachment_ciphertext or command.attachment_content
     attachment_values = (
         command.attachment_filename,
         command.attachment_content_type,
-        command.attachment_content,
+        attachment_snapshot,
     )
     if any(value is not None for value in attachment_values) and not all(
         value is not None for value in attachment_values
@@ -104,7 +128,10 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
 
     def fingerprint(reply_to_email: str, reply_to_name: str) -> str:
         return cipher.fingerprint("delivery-request", {
-            "recipient": command.recipient, "reply_to_email": reply_to_email,
+            "recipient": command.recipient,
+            "recipient_ciphertext": command.recipient_ciphertext.hex() if command.recipient_ciphertext else None,
+            "recipient_masked": command.recipient_masked,
+            "reply_to_email": reply_to_email,
             "reply_to_name": reply_to_name, "subject": command.subject, "body": command.body,
             "resource_type": command.resource_type, "resource_id": str(command.resource_id),
             "template_id": str(command.template_id) if command.template_id else None,
@@ -112,7 +139,7 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
             "sender_email": sender_policy.email, "sender_name": sender_policy.name,
             "attachment_filename": command.attachment_filename,
             "attachment_content_type": command.attachment_content_type,
-            "attachment_content": command.attachment_content.hex() if command.attachment_content is not None else None,
+            "attachment_snapshot": attachment_snapshot.hex() if attachment_snapshot is not None else None,
         })
 
     existing = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == command.organization_id, EmailDelivery.business_dedupe_key == business_dedupe_key))
@@ -121,25 +148,40 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
         if not hmac.compare_digest(existing.request_fingerprint, request_fingerprint):
             raise DeliveryIdempotencyConflict("idempotency_conflict")
         return existing
-    config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.organization_id == command.organization_id).order_by(EmailProviderConfig.version.desc()).limit(1))
+    config = latest_email_provider_config(db, command.organization_id)
     if config is None or not config.enabled:
-        raise ValueError("email_not_configured")
+        raise EmailConfigurationUnavailable("email_not_configured")
     reply_to_email = command.reply_to_email or config.default_reply_to_email
     reply_to_name = command.reply_to_name or config.default_reply_to_name
     request_fingerprint = fingerprint(reply_to_email, reply_to_name)
-    recipient = cipher.normalize_email(command.recipient)
+    recipient = cipher.normalize_email(command.recipient) if command.recipient is not None else None
     sender = cipher.normalize_email(_safe_header(sender_policy.email))
     reply_to = cipher.normalize_email(_safe_header(reply_to_email))
     delivery = EmailDelivery(
         organization_id=command.organization_id, provider_config_id=config.id, provider_config_version=config.version,
         template_id=command.template_id, template_version=command.template_version,
-        recipient_ciphertext=cipher.encrypt_recipient(recipient), recipient_masked=cipher.mask_email(recipient),
+        recipient_ciphertext=(
+            cipher.encrypt_recipient(recipient)
+            if recipient is not None
+            else command.recipient_ciphertext
+        ),
+        recipient_masked=(
+            cipher.mask_email(recipient)
+            if recipient is not None
+            else command.recipient_masked
+        ),
         sender_email=sender, sender_name=_safe_header(sender_policy.name), reply_to_email=reply_to,
         reply_to_name=_safe_header(reply_to_name), rendered_subject=_safe_header(command.subject),
         rendered_body=command.body, resource_type=command.resource_type, resource_id=command.resource_id,
         attachment_filename=_safe_header(command.attachment_filename) if command.attachment_filename else None,
         attachment_content_type=_safe_header(command.attachment_content_type) if command.attachment_content_type else None,
-        attachment_content=command.attachment_content,
+        attachment_ciphertext=(
+            command.attachment_ciphertext
+            if command.attachment_ciphertext is not None
+            else cipher.encrypt_attachment(command.attachment_content)
+            if command.attachment_content is not None
+            else None
+        ),
         business_dedupe_key=business_dedupe_key, request_fingerprint=request_fingerprint,
         parent_delivery_id=command.parent_delivery_id, created_by=command.created_by, status="queued", version=1,
     )

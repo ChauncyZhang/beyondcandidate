@@ -4,17 +4,26 @@ from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import or_, select, text
 
+from server.app.communications.interview_messages import (
+    INTERVIEW_MESSAGE_KINDS,
+    CandidateEmailUnavailable,
+    resolve_confirmed_candidate_email,
+)
 from server.app.communications.models import EmailDelivery, EmailProviderConfig, EmailTemplate
 from server.app.communications.schemas import EmailConfigUpdate, EmailTemplateUpdate, EmailTestSend
 from server.app.communications.service import DeliveryCommand, DeliveryIdempotencyConflict, SenderPolicy, enqueue_delivery, validate_template
 from server.app.identity.api import problem
-from server.app.identity.models import AuditLog
+from server.app.identity.models import AuditLog, Job
 from server.app.identity.policy import Permission, require_permission
 from server.app.recruiting.api import _idempotency, _principal
+from server.app.recruiting.authorization import RecruitingAction, RecruitingAuthorizationService
+from server.app.recruiting.models import Application
 from server.app.recruiting.service import IdempotencyConflict, persisted_idempotent
+from server.app.interviews.models import Interview
 
 
 router = APIRouter()
+AUTH = RecruitingAuthorizationService()
 
 
 def _response(data, status=200, *, meta=None):
@@ -186,7 +195,6 @@ def delivery_history(request: Request, limit: int=Query(50,ge=1,le=100), status:
 def resend_delivery(delivery_id: uuid.UUID,request:Request,if_match:str|None=Header(None),idempotency_key:str|None=Header(None)):
     principal,key,expected=_principal(request),_idempotency(request,idempotency_key),_version(request,if_match)
     if isinstance(principal,JSONResponse): return principal
-    if not _recruiting_admin(principal): return _error(request,404,"resource_not_found")
     if isinstance(key,JSONResponse): return key
     if isinstance(expected,JSONResponse): return expected
     with request.app.state.identity_store.sync_session() as db:
@@ -195,13 +203,47 @@ def resend_delivery(delivery_id: uuid.UUID,request:Request,if_match:str|None=Hea
                 original=db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id==principal.organization_id,EmailDelivery.id==delivery_id).with_for_update())
                 if original is None: raise LookupError
                 if original.version != expected: raise RuntimeError("version")
-                recipient=request.app.state.email_secret_cipher.decrypt_recipient(original.recipient_ciphertext)
-                delivery=enqueue_delivery(db,DeliveryCommand(organization_id=principal.organization_id,recipient=recipient,reply_to_email=original.reply_to_email,reply_to_name=original.reply_to_name,subject=original.rendered_subject,body=original.rendered_body,resource_type=original.resource_type,resource_id=original.resource_id,idempotency_key=key,operation=f"email.delivery.resend:{delivery_id}",created_by=principal.user_id,template_id=original.template_id,template_version=original.template_version,parent_delivery_id=original.id,trace_id=request.state.trace_id),cipher=request.app.state.email_secret_cipher,sender_policy=_sender_policy(request))
+                if original.resource_type in INTERVIEW_MESSAGE_KINDS:
+                    candidate_id = db.scalar(
+                        select(Application.candidate_id)
+                        .join(
+                            Interview,
+                            (Interview.organization_id == Application.organization_id)
+                            & (Interview.application_id == Application.id),
+                        )
+                        .join(
+                            Job,
+                            (Job.organization_id == Application.organization_id)
+                            & (Job.id == Application.job_id),
+                        )
+                        .where(
+                            Interview.organization_id == principal.organization_id,
+                            Interview.id == original.resource_id,
+                            AUTH.job_predicate(principal, RecruitingAction.TRANSITION, Job),
+                        )
+                    )
+                    if candidate_id is None:
+                        raise PermissionError
+                    recipient = resolve_confirmed_candidate_email(
+                        db,
+                        organization_id=principal.organization_id,
+                        candidate_id=candidate_id,
+                        contact_cipher=request.app.state.contact_cipher,
+                    )
+                else:
+                    if not _recruiting_admin(principal):
+                        raise PermissionError
+                    recipient=None
+                delivery=enqueue_delivery(db,DeliveryCommand(organization_id=principal.organization_id,recipient=recipient,recipient_ciphertext=original.recipient_ciphertext if recipient is None else None,recipient_masked=original.recipient_masked if recipient is None else None,reply_to_email=original.reply_to_email,reply_to_name=original.reply_to_name,subject=original.rendered_subject,body=original.rendered_body,resource_type=original.resource_type,resource_id=original.resource_id,idempotency_key=key,operation=f"email.delivery.resend:{delivery_id}",created_by=principal.user_id,template_id=original.template_id,template_version=original.template_version,parent_delivery_id=original.id,trace_id=request.state.trace_id,attachment_filename=original.attachment_filename,attachment_content_type=original.attachment_content_type,attachment_ciphertext=original.attachment_ciphertext),cipher=request.app.state.email_secret_cipher,sender_policy=SenderPolicy(original.sender_email,original.sender_name))
                 original.version += 1
                 return 202,{"data":_delivery_view(delivery)}
             semantic={"delivery_id":str(delivery_id),"expected_version":expected}
             status,body=persisted_idempotent(db,principal.organization_id,principal.user_id,f"email.delivery.resend:{delivery_id}",key,_email_idempotency_body(request,"email.delivery.resend",semantic),action); db.commit()
         except (IdempotencyConflict,DeliveryIdempotencyConflict): db.rollback(); return _error(request,409,"idempotency_conflict")
+        except CandidateEmailUnavailable: db.rollback(); return _error(request,409,"candidate_email_unconfirmed")
         except RuntimeError: db.rollback(); return _error(request,409,"resource_version_conflict")
-        except (LookupError,ValueError): db.rollback(); return _error(request,404,"resource_not_found")
+        except (LookupError,PermissionError): db.rollback(); return _error(request,404,"resource_not_found")
+        except ValueError as error:
+            db.rollback()
+            return _error(request,409,"email_not_configured" if str(error)=="email_not_configured" else "email_delivery_unavailable")
     response=JSONResponse(body,status_code=status); response.headers["Cache-Control"]="no-store"; return response

@@ -2,9 +2,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 ConflictKind = Literal["hard", "soft"]
+
+
+def validate_iana_timezone(value: str) -> str:
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError("timezone must be a valid IANA timezone") from None
+    return value
 
 
 @dataclass(frozen=True)

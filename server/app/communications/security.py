@@ -23,6 +23,7 @@ class EmailSecretCipher:
 
         self._smtp_cipher = Fernet(base64.urlsafe_b64encode(derive(b"smtp-password")))
         self._recipient_cipher = Fernet(base64.urlsafe_b64encode(derive(b"recipient")))
+        self._attachment_cipher = Fernet(base64.urlsafe_b64encode(derive(b"attachment-snapshot")))
         self._idempotency_key = derive(b"idempotency-hmac")
 
     @staticmethod
@@ -49,6 +50,17 @@ class EmailSecretCipher:
 
     def decrypt_recipient(self, value: bytes) -> str:
         return self._decrypt(self._recipient_cipher, value)
+
+    def encrypt_attachment(self, value: bytes) -> bytes:
+        if not value or len(value) > 1024 * 1024:
+            raise ValueError("invalid attachment snapshot")
+        return self._attachment_cipher.encrypt(value)
+
+    def decrypt_attachment(self, value: bytes) -> bytes:
+        try:
+            return self._attachment_cipher.decrypt(value)
+        except InvalidToken:
+            raise ValueError("attachment snapshot cannot be decrypted") from None
 
     def fingerprint(self, purpose: str, payload: object) -> str:
         if not purpose or len(purpose) > 100:
