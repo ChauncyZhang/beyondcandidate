@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
-from tempfile import SpooledTemporaryFile
 from typing import Mapping, Protocol
 
 from pypdf import PdfReader
@@ -346,30 +345,27 @@ class MinioOfferPdfStorage:
         normalized = {str(key).casefold().removeprefix("x-amz-meta-"): str(value) for key, value in metadata.items()}
         return normalized.get("sha256")
 
+    @staticmethod
+    def _is_precondition_failure(error: Exception) -> bool:
+        response = getattr(error, "response", None)
+        return getattr(error, "code", None) == "PreconditionFailed" or getattr(response, "status", None) == 412
+
     def write_immutable(self, storage_key: str, content: bytes, sha256: str) -> None:
+        headers = {
+            "Content-Type": "application/pdf",
+            "If-None-Match": "*",
+            "X-Amz-Meta-Sha256": sha256,
+            "X-Amz-Meta-Immutable": "true",
+        }
         try:
-            existing = self.client.stat_object(self.private_bucket, storage_key)
+            self.client._put_object(self.private_bucket, storage_key, content, headers)
         except Exception as error:
-            if getattr(error, "code", None) not in {"NoSuchKey", "NoSuchObject"}:
-                raise OfferPdfStorageError("private offer PDF storage is unavailable") from error
-        else:
+            if not self._is_precondition_failure(error):
+                raise OfferPdfStorageError("private offer PDF storage is unavailable") from None
+            try:
+                existing = self.client.stat_object(self.private_bucket, storage_key)
+            except Exception:
+                raise OfferPdfStorageError("private offer PDF storage is unavailable") from None
             if getattr(existing, "size", None) == len(content) and self._metadata_digest(existing) == sha256:
                 return
-            raise OfferPdfStorageConflict("immutable offer PDF object already exists with different content")
-
-        stream = SpooledTemporaryFile(max_size=min(len(content), 1024 * 1024), mode="w+b")
-        try:
-            stream.write(content)
-            stream.seek(0)
-            self.client.put_object(
-                self.private_bucket,
-                storage_key,
-                stream,
-                len(content),
-                content_type="application/pdf",
-                metadata={"sha256": sha256, "immutable": "true"},
-            )
-        except Exception as error:
-            raise OfferPdfStorageError("private offer PDF storage is unavailable") from error
-        finally:
-            stream.close()
+            raise OfferPdfStorageConflict("immutable offer PDF object already exists with different content") from None

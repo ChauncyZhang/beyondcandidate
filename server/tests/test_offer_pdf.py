@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from importlib.metadata import version as installed_version
 from io import BytesIO
 from pathlib import Path
+from threading import Barrier, Lock
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from minio import Minio
 from pypdf import PdfReader
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -19,6 +24,7 @@ from server.app.offers.pdf import (
     MAX_TEMPLATE_BYTES,
     MinioOfferPdfStorage,
     OfferPdfError,
+    OfferPdfStorageError,
     OfferPdfStorageConflict,
     REQUIRED_PLACEHOLDERS,
     render_offer_pdf,
@@ -135,43 +141,161 @@ def test_template_page_and_output_bounds_are_enforced(monkeypatch) -> None:
         render_offer_pdf("x" * (MAX_TEMPLATE_BYTES + 1), VARIABLES)
 
 
-class MissingObject(Exception):
-    code = "NoSuchKey"
+class FakeStorageFailure(Exception):
+    def __init__(self, code: str, status: int, message: str = "provider detail") -> None:
+        super().__init__(message)
+        self.code = code
+        self.response = SimpleNamespace(status=status)
 
 
-class FakeMinio:
-    def __init__(self) -> None:
+class AtomicFakeMinio:
+    def __init__(self, concurrent_writers: int | None = None) -> None:
         self.objects: dict[tuple[str, str], tuple[bytes, dict[str, str], str]] = {}
-        self.put_count = 0
+        self.put_calls: list[tuple[str, str, bytes, dict[str, str]]] = []
+        self.stat_count = 0
+        self._barrier = Barrier(concurrent_writers) if concurrent_writers else None
+        self._lock = Lock()
+
+    def _put_object(self, bucket: str, key: str, content: bytes, headers: dict[str, str]):
+        with self._lock:
+            self.put_calls.append((bucket, key, content, dict(headers)))
+        if self._barrier is not None:
+            self._barrier.wait(timeout=10)
+        with self._lock:
+            if (bucket, key) in self.objects:
+                raise FakeStorageFailure("PreconditionFailed", 412)
+            metadata = {name: value for name, value in headers.items() if name.casefold().startswith("x-amz-meta-")}
+            self.objects[(bucket, key)] = (content, metadata, headers["Content-Type"])
+        return SimpleNamespace()
 
     def stat_object(self, bucket: str, key: str):
-        try:
+        with self._lock:
+            self.stat_count += 1
             content, metadata, content_type = self.objects[(bucket, key)]
-        except KeyError as error:
-            raise MissingObject from error
-        return SimpleNamespace(size=len(content), metadata={f"x-amz-meta-{k}": v for k, v in metadata.items()}, content_type=content_type)
+            return SimpleNamespace(size=len(content), metadata=dict(metadata), content_type=content_type)
 
-    def put_object(self, bucket, key, stream, length, *, content_type, metadata):
-        content = stream.read(length)
-        assert len(content) == length
+
+class FailingMinio:
+    def __init__(self, failure: Exception) -> None:
+        self.failure = failure
+        self.stat_count = 0
+
+    def _put_object(self, bucket: str, key: str, content: bytes, headers: dict[str, str]):
+        raise self.failure
+
+    def stat_object(self, bucket: str, key: str):
+        self.stat_count += 1
+        raise RuntimeError("sensitive stat detail")
+
+
+def _assert_atomic_headers(client: AtomicFakeMinio, digest_by_content: dict[bytes, str]) -> None:
+    assert client.put_calls
+    for bucket, _, content, headers in client.put_calls:
         assert bucket == "private-offers"
-        assert content_type == "application/pdf"
-        self.put_count += 1
-        self.objects[(bucket, key)] = (content, dict(metadata), content_type)
+        assert headers == {
+            "Content-Type": "application/pdf",
+            "If-None-Match": "*",
+            "X-Amz-Meta-Sha256": digest_by_content[content],
+            "X-Amz-Meta-Immutable": "true",
+        }
+
+
+def test_minio_7_2_15_private_single_put_compatibility_contract() -> None:
+    requirements = Path("server/requirements.txt").read_text(encoding="utf-8").splitlines()
+    parameters = tuple(inspect.signature(Minio._put_object).parameters)
+
+    assert "minio==7.2.15" in requirements
+    assert installed_version("minio") == "7.2.15"
+    assert parameters == ("self", "bucket_name", "object_name", "data", "headers", "query_params")
+    assert 'self._execute(\n            "PUT"' in inspect.getsource(Minio._put_object)
 
 
 def test_minio_offer_storage_is_private_immutable_and_idempotent() -> None:
-    client = FakeMinio()
+    client = AtomicFakeMinio()
     storage = MinioOfferPdfStorage(client, "private-offers")
     content = b"private-pdf"
     digest = hashlib.sha256(content).hexdigest()
+    key = "offers/tenant/offers/offer/versions/version.pdf"
 
-    storage.write_immutable("offers/tenant/offers/offer/versions/version.pdf", content, digest)
-    storage.write_immutable("offers/tenant/offers/offer/versions/version.pdf", content, digest)
-    assert client.put_count == 1
+    storage.write_immutable(key, content, digest)
+    storage.write_immutable(key, content, digest)
 
+    assert len(client.put_calls) == 2
+    assert client.stat_count == 1
+    _assert_atomic_headers(client, {content: digest})
     with pytest.raises(OfferPdfStorageConflict):
-        storage.write_immutable("offers/tenant/offers/offer/versions/version.pdf", b"changed", hashlib.sha256(b"changed").hexdigest())
+        storage.write_immutable(key, b"changed", hashlib.sha256(b"changed").hexdigest())
+
+
+def test_atomic_different_payload_writers_persist_one_and_conflict_the_loser() -> None:
+    client = AtomicFakeMinio(concurrent_writers=2)
+    storage = MinioOfferPdfStorage(client, "private-offers")
+    key = "offers/tenant/offers/offer/versions/version.pdf"
+    payloads = (b"first-pdf", b"second-pdf")
+    digests = {payload: hashlib.sha256(payload).hexdigest() for payload in payloads}
+
+    def write(payload: bytes):
+        try:
+            storage.write_immutable(key, payload, digests[payload])
+            return "created"
+        except OfferPdfStorageConflict:
+            return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(write, payloads))
+
+    assert sorted(outcomes) == ["conflict", "created"]
+    persisted, metadata, content_type = client.objects[("private-offers", key)]
+    assert persisted in payloads
+    assert metadata["X-Amz-Meta-Sha256"] == digests[persisted]
+    assert content_type == "application/pdf"
+    _assert_atomic_headers(client, digests)
+
+
+def test_atomic_same_payload_writers_are_both_idempotent_successes() -> None:
+    client = AtomicFakeMinio(concurrent_writers=2)
+    storage = MinioOfferPdfStorage(client, "private-offers")
+    key = "offers/tenant/offers/offer/versions/version.pdf"
+    content = b"same-private-pdf"
+    digest = hashlib.sha256(content).hexdigest()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _: storage.write_immutable(key, content, digest), range(2)))
+
+    assert outcomes == [None, None]
+    assert client.objects[("private-offers", key)][0] == content
+    assert client.stat_count == 1
+    _assert_atomic_headers(client, {content: digest})
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        FakeStorageFailure("AccessDenied", 403, "sensitive access detail"),
+        FakeStorageFailure("NoSuchBucket", 404, "sensitive bucket detail"),
+        RuntimeError("sensitive transport detail"),
+    ],
+)
+def test_non_precondition_storage_failures_are_safe_and_never_stat(failure: Exception) -> None:
+    client = FailingMinio(failure)
+    storage = MinioOfferPdfStorage(client, "private-offers")
+
+    with pytest.raises(OfferPdfStorageError) as raised:
+        storage.write_immutable("offers/tenant/version.pdf", b"pdf", hashlib.sha256(b"pdf").hexdigest())
+
+    assert str(raised.value) == "private offer PDF storage is unavailable"
+    assert "sensitive" not in str(raised.value)
+    assert client.stat_count == 0
+
+
+def test_precondition_collision_stat_failure_is_safe() -> None:
+    client = FailingMinio(FakeStorageFailure("PreconditionFailed", 412))
+    storage = MinioOfferPdfStorage(client, "private-offers")
+
+    with pytest.raises(OfferPdfStorageError, match="private offer PDF storage is unavailable"):
+        storage.write_immutable("offers/tenant/version.pdf", b"pdf", hashlib.sha256(b"pdf").hexdigest())
+
+    assert client.stat_count == 1
 
 
 class RecordingStorage:
