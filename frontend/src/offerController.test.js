@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ApiError } from "./apiClient.js";
-import offerController, { createOfferController, filterEligibleSpecialApprovers } from "./offerController.js";
+import offerController, { createOfferController, createProxyResponsePayload, filterEligibleSpecialApprovers } from "./offerController.js";
 
 const APPLICATION_ID = "11111111-1111-4111-8111-111111111111";
 const OFFER_ID = "22222222-2222-4222-8222-222222222222";
@@ -28,7 +28,7 @@ function apiOffer(changes = {}) {
     content: { body: "欢迎加入", compensation: { salary: "30k" } },
     can_view_sensitive_content: true,
     pdf_ready: true,
-    allowed_actions: { update: true, submit: true, withdraw: true, send: false, decide: false },
+    allowed_actions: { update: true, submit: true, withdraw: true, send: false, decide: false, proxy_response: false },
     ...changes,
   };
 }
@@ -52,7 +52,7 @@ test("exports the stable Offer controller interface and singleton", () => {
   for (const name of [
     "getApplicationOffer", "listOffers", "getOffer", "createOffer", "updateDraft", "submitApproval", "approve",
     "requestChanges", "send", "withdraw", "listHistory", "listPendingApprovals", "listTemplates", "createTemplate",
-    "updateTemplate", "getSpecialApprovers", "updateSpecialApprovers",
+    "updateTemplate", "getSpecialApprovers", "updateSpecialApprovers", "proxyResponse",
   ]) {
     assert.equal(typeof offerController[name], "function", name);
   }
@@ -212,6 +212,65 @@ test("Offer version conflict refreshes once, attaches safe latest state, and nev
   assert.deepEqual(calls.map(({ path }) => path), [`/api/v1/offers/${OFFER_ID}/approvals`, `/api/v1/offers/${OFFER_ID}`]);
 });
 
+test("proxy response sends the exact audited payload with mutation headers", async () => {
+  const { client, calls } = queuedClient([{ data: apiOffer({
+    status: "accepted",
+    version: 4,
+    allowed_actions: { proxy_response: false },
+    response: { status: "accepted", source: "hr_proxy", expected_start_date: "2026-09-15", communication_channel: "wechat", communicated_at: "2026-08-09T03:04:00Z", note: "已确认", actor_user_id: APPROVER_ID, actor_name: "招聘 HR" },
+  }) }]);
+  const controller = createOfferController({ client, idempotencyKey: () => "proxy-key" });
+
+  const saved = await controller.proxyResponse({ id: OFFER_ID, version: 3 }, {
+    decision: "accepted",
+    expectedStartDate: "2026-09-15",
+    channel: "wechat",
+    communicatedAt: "2026-08-09T11:04",
+    note: "  已确认  ",
+  });
+
+  assert.equal(saved.response.source, "hr_proxy");
+  assert.equal(saved.response.channel, "wechat");
+  assert.equal(saved.response.actorId, APPROVER_ID);
+  assert.equal(saved.response.actorName, "招聘 HR");
+  assert.deepEqual(calls, [{
+    path: `/api/v1/offers/${OFFER_ID}/proxy-responses`,
+    options: {
+      method: "POST",
+      body: { decision: "accepted", expected_start_date: "2026-09-15", channel: "wechat", communicated_at: new Date("2026-08-09T11:04").toISOString(), note: "已确认" },
+      ifMatch: '"3"',
+      idempotencyKey: "proxy-key",
+    },
+  }]);
+});
+
+test("proxy response validates decision, start date, channel, and communication time before I/O", async () => {
+  const { client, calls } = queuedClient([]);
+  const controller = createOfferController({ client });
+  const base = { decision: "accepted", expectedStartDate: "2026-09-15", channel: "phone", communicatedAt: "2026-08-09T11:04" };
+
+  await assert.rejects(() => controller.proxyResponse({ id: OFFER_ID, version: 3 }, { ...base, decision: "" }), { code: "OFFER_PROXY_DECISION_REQUIRED" });
+  await assert.rejects(() => controller.proxyResponse({ id: OFFER_ID, version: 3 }, { ...base, expectedStartDate: "" }), { code: "OFFER_PROXY_START_DATE_REQUIRED" });
+  await assert.rejects(() => controller.proxyResponse({ id: OFFER_ID, version: 3 }, { ...base, channel: "" }), { code: "OFFER_PROXY_CHANNEL_REQUIRED" });
+  await assert.rejects(() => controller.proxyResponse({ id: OFFER_ID, version: 3 }, { ...base, communicatedAt: "" }), { code: "OFFER_PROXY_COMMUNICATED_AT_REQUIRED" });
+  assert.equal(calls.length, 0);
+  assert.deepEqual(createProxyResponsePayload({ ...base, decision: "declined", note: "" }), {
+    decision: "declined", expected_start_date: null, channel: "phone", communicated_at: new Date("2026-08-09T11:04").toISOString(), note: null,
+  });
+});
+
+test("proxy response conflict refreshes the final result and never retries the POST", async () => {
+  const conflict = new ApiError({ status: 409, code: "resource_version_conflict" });
+  const { client, calls } = queuedClient([conflict, { data: apiOffer({ status: "declined", version: 4, response: { status: "declined", source: "candidate" } }) }]);
+  const controller = createOfferController({ client, idempotencyKey: () => "proxy-conflict" });
+
+  await assert.rejects(
+    () => controller.proxyResponse({ id: OFFER_ID, version: 3 }, { decision: "declined", channel: "email", communicatedAt: "2026-08-09T11:04" }),
+    (error) => error === conflict && error.latestOffer?.status === "declined" && error.latestOffer?.response?.source === "candidate",
+  );
+  assert.deepEqual(calls.map(({ path }) => path), [`/api/v1/offers/${OFFER_ID}/proxy-responses`, `/api/v1/offers/${OFFER_ID}`]);
+});
+
 test("server redaction is enforced locally even if sensitive fields are present", async () => {
   const { client } = queuedClient([{ data: apiOffer({
     can_view_sensitive_content: false,
@@ -223,13 +282,13 @@ test("server redaction is enforced locally even if sensitive fields are present"
   assert.deepEqual(offer.content, { redacted: true });
   assert.equal(offer.specialReason, "");
   assert.equal(offer.canViewSensitiveContent, false);
-  assert.deepEqual(offer.allowedActions, { update: true, submit: true, withdraw: true, send: false, decide: false });
+  assert.deepEqual(offer.allowedActions, { update: true, submit: true, withdraw: true, send: false, decide: false, proxy_response: false });
 });
 
 test("history and pending workbench tasks use independent exact GET contracts", async () => {
   const signal = new AbortController().signal;
   const { client, calls } = queuedClient([
-    { data: { versions: [{ id: "v1", version_number: 1, content: { redacted: true }, pdf_ready: false }], approvals: [], events: [] } },
+    { data: { versions: [{ id: "v1", version_number: 1, content: { redacted: true }, pdf_ready: false }], approvals: [], events: [], responses: [{ id: "r1", status: "accepted", source: "hr_proxy", actor_name: "招聘 HR" }] } },
     { data: [{ id: APPROVAL_ID, offer_id: OFFER_ID, application_id: APPLICATION_ID, candidate_name: "林夕", job_title: "工程师", offer_version: 4 }] },
   ]);
   const controller = createOfferController({ client });
@@ -238,6 +297,7 @@ test("history and pending workbench tasks use independent exact GET contracts", 
   const tasks = await controller.listPendingApprovals({ signal });
 
   assert.deepEqual(history.versions[0].content, { redacted: true });
+  assert.deepEqual({ source: history.responses[0].source, actorName: history.responses[0].actorName }, { source: "hr_proxy", actorName: "招聘 HR" });
   assert.deepEqual({ id: tasks[0].id, offerId: tasks[0].offerId, applicationId: tasks[0].applicationId }, { id: APPROVAL_ID, offerId: OFFER_ID, applicationId: APPLICATION_ID });
   assert.deepEqual(calls, [
     { path: `/api/v1/offers/${OFFER_ID}/history`, options: { signal } },

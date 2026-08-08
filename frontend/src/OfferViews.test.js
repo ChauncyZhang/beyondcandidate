@@ -17,9 +17,10 @@ test("candidate detail exposes a routed Offer tab backed by the dedicated contro
 test("approved Offer remains explicitly unsent until HR acts", () => {
   assert.match(source, /审批已完成，但尚未发送/);
   assert.match(source, /系统不会自动发送/);
+  assert.match(source, /发送功能已开放/);
   assert.match(source, /offer\.status === "ready_to_send" && !canRenderOfferAction\(role, offer, "send"\)/);
-  assert.match(source, /发送功能暂未开放/);
-  assert.match(source, /Task 9 安全令牌流程接入后开放/);
+  assert.match(source, /已加入发送队列/);
+  assert.doesNotMatch(source, /发送功能暂未开放|Task 9 安全令牌流程接入后开放|Offer 已发送/);
 });
 
 test("special Offer requires an explicit explanation", () => {
@@ -37,6 +38,45 @@ test("server redaction prevents compensation and body rendering", () => {
 test("Offer actions require both local capability and server allowed actions", () => {
   assert.match(source, /Boolean\(offer\?\.allowedActions\?\.\[action\] \?\? offer\?\.allowed_actions\?\.\[action\]\)/);
   assert.match(source, /canPerformAction\(role, localCapability\)/);
+});
+
+test("HR proxy response is gated by sent status, server permission, and local Offer capability", () => {
+  assert.match(source, /offer\.status === "sent" && canRenderOfferAction\(role, offer, "proxy_response"\)/);
+  assert.match(source, /const localCapability = action === "decide" \? "审批 Offer" : "管理 Offer"/);
+  assert.match(source, />代候选人确认</);
+});
+
+test("proxy response dialog validates audited fields and requires an explicit second confirmation", () => {
+  assert.match(source, /createProxyResponsePayload\(values\)/);
+  assert.match(source, /预计入职日期<span className="required-label">必填/);
+  assert.match(source, /沟通渠道<span className="required-label">必填/);
+  assert.match(source, /沟通时间<span className="required-label">必填/);
+  assert.match(source, /备注（可选）/);
+  assert.match(source, /请再次确认/);
+  assert.match(source, /确认并登记/);
+});
+
+test("proxy response locks duplicate submission and refreshes a concurrent final result", () => {
+  assert.match(source, /if \(submittingRef\.current\) return/);
+  assert.match(source, /submittingRef\.current = true/);
+  assert.match(source, /disabled=\{busy\}/);
+  assert.match(source, /requestError\?\.code === "resource_version_conflict"/);
+  assert.match(source, /\["accepted", "declined"\]\.includes\(latest\?\.status\)/);
+  assert.match(source, /await onResolved\(latest, true\)/);
+  assert.match(source, /已刷新最终结果/);
+  assert.match(source, /proxyButtonRef\.current\?\.focus\(\)/);
+  assert.match(source, /event\.key !== "Tab"/);
+  assert.match(source, /document\.activeElement === last/);
+});
+
+test("accepted and declined results show immutable source and audit details", () => {
+  assert.match(source, /accepted: "已接受"/);
+  assert.match(source, /declined: "已拒绝"/);
+  assert.match(source, /候选人自行确认/);
+  assert.match(source, /HR 代为登记/);
+  for (const label of ["操作人", "沟通渠道", "沟通时间", "到岗日期", "备注"]) assert.match(source, new RegExp(label));
+  assert.match(source, /确认结果历史（不可编辑）/);
+  assert.match(source, /history\.responses\.map/);
 });
 
 test("approval workbench loads independently and navigates to candidate Offer", () => {

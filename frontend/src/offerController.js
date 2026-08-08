@@ -44,7 +44,24 @@ function randomKey() {
 
 function normalizeAllowedActions(value) {
   const source = safeObject(value);
-  return Object.fromEntries(["update", "submit", "withdraw", "send", "decide"].map((action) => [action, source[action] === true]));
+  return Object.fromEntries(["update", "submit", "withdraw", "send", "decide", "proxy_response"].map((action) => [action, source[action] === true]));
+}
+
+function normalizeResponse(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    id: safeString(value.id),
+    status: safeString(value.status || value.decision),
+    source: safeString(value.source),
+    expectedStartDate: safeString(value.expected_start_date),
+    reasonText: safeString(value.reason_text),
+    channel: safeString(value.channel || value.communication_channel),
+    communicatedAt: safeString(value.communicated_at),
+    note: safeString(value.note),
+    actorId: safeString(value.actor_id || value.actor_user_id || value.responded_by),
+    actorName: safeString(value.actor_name || value.responded_by_name),
+    respondedAt: safeString(value.responded_at || value.created_at),
+  };
 }
 
 function normalizeOffer(value) {
@@ -67,6 +84,7 @@ function normalizeOffer(value) {
     canViewSensitiveContent,
     pdfReady: value?.pdf_ready === true,
     allowedActions: normalizeAllowedActions(value?.allowed_actions),
+    response: normalizeResponse(value?.response),
   };
 }
 
@@ -134,6 +152,34 @@ function normalizeHistory(value) {
       createdAt: safeString(item?.created_at),
       payload: safeObject(item?.payload),
     })),
+    responses: safeArray(source.responses).map(normalizeResponse).filter(Boolean),
+  };
+}
+
+export function createProxyResponsePayload(values) {
+  const decision = safeString(values?.decision);
+  if (!["accepted", "declined"].includes(decision)) {
+    throw codedError("OFFER_PROXY_DECISION_REQUIRED", "proxy response decision required");
+  }
+  const expectedStartDate = safeString(values?.expectedStartDate ?? values?.expected_start_date);
+  if (decision === "accepted" && !expectedStartDate) {
+    throw codedError("OFFER_PROXY_START_DATE_REQUIRED", "accepted proxy response requires expected start date");
+  }
+  const channel = safeString(values?.channel);
+  if (!["phone", "wechat", "email", "other"].includes(channel)) {
+    throw codedError("OFFER_PROXY_CHANNEL_REQUIRED", "proxy response channel required");
+  }
+  const communicatedAt = safeString(values?.communicatedAt ?? values?.communicated_at);
+  const communicatedDate = new Date(communicatedAt);
+  if (!communicatedAt || Number.isNaN(communicatedDate.getTime())) {
+    throw codedError("OFFER_PROXY_COMMUNICATED_AT_REQUIRED", "proxy response communication time required");
+  }
+  return {
+    decision,
+    expected_start_date: decision === "accepted" ? expectedStartDate : null,
+    channel,
+    communicated_at: communicatedDate.toISOString(),
+    note: safeString(values?.note) || null,
   };
 }
 
@@ -250,6 +296,13 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
     return offerMutation((id) => `/api/v1/offers/${encodeURIComponent(id)}/withdrawals`, offer, { method: "POST" }, signal);
   }
 
+  async function proxyResponse(offer, payload, { signal } = {}) {
+    return offerMutation((id) => `/api/v1/offers/${encodeURIComponent(id)}/proxy-responses`, offer, {
+      method: "POST",
+      body: createProxyResponsePayload(payload),
+    }, signal);
+  }
+
   async function listHistory(offerId, { signal } = {}) {
     const id = requireId(offerId);
     const response = await client.request(`/api/v1/offers/${encodeURIComponent(id)}/history`, requestOptions(signal));
@@ -338,6 +391,7 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
     requestChanges,
     send,
     withdraw,
+    proxyResponse,
     listHistory,
     listPendingApprovals,
     listTemplates,

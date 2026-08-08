@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { apiClient } from "./apiClient.js";
 import { canPerformAction } from "./roleCapabilities.js";
-import { filterEligibleSpecialApprovers } from "./offerController.js";
+import { createProxyResponsePayload, filterEligibleSpecialApprovers } from "./offerController.js";
 
 const STATUS_LABELS = Object.freeze({
   draft: "草稿",
@@ -27,6 +27,8 @@ const STATUS_LABELS = Object.freeze({
   changes_requested: "需修改",
   ready_to_send: "待发送",
   sent: "已发送",
+  accepted: "已接受",
+  declined: "已拒绝",
   withdrawn: "已撤回",
   expired: "已过期",
 });
@@ -47,7 +49,46 @@ export function offerErrorMessage(error, action = "操作") {
   if (error?.code === "offer_send_unavailable") return "当前版本暂不可发送，请稍后重试。";
   if (error?.code === "invalid_offer_state") return "Offer 状态已变化，请刷新后重试。";
   if (error?.code === "OFFER_SPECIAL_REASON_REQUIRED") return "特殊 Offer 必须填写说明。";
+  if (error?.code === "OFFER_PROXY_START_DATE_REQUIRED") return "登记接受时必须填写预计入职日期。";
+  if (error?.code === "OFFER_PROXY_CHANNEL_REQUIRED") return "请选择实际沟通渠道。";
+  if (error?.code === "OFFER_PROXY_COMMUNICATED_AT_REQUIRED") return "请填写实际沟通时间。";
   return `${action}未完成，请稍后重试。`;
+}
+
+const CHANNEL_LABELS = Object.freeze({ phone: "电话", wechat: "微信", email: "邮件", other: "其他" });
+
+export function offerResponseSourceLabel(source) {
+  if (source === "hr_proxy") return "HR 代为登记";
+  if (["candidate", "candidate_self", "candidate_self_service"].includes(source)) return "候选人自行确认";
+  return "结果来源未记录";
+}
+
+function displayDate(value, dateOnly = false) {
+  if (!value) return "未记录";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return dateOnly ? date.toLocaleDateString("zh-CN") : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function OfferResponseRecord({ response, current = false }) {
+  if (!response) return null;
+  const status = response.status || response.decision;
+  const source = response.source;
+  const actor = response.actorName || response.actor_name || response.respondedByName || response.responded_by_name || response.actorId || response.actor_user_id;
+  const channel = response.channel;
+  const communicatedAt = response.communicatedAt || response.communicated_at;
+  const startDate = response.expectedStartDate || response.expected_start_date;
+  const note = response.note || response.reasonText || response.reason_text;
+  return <article className={`offer-response-record${current ? " current" : ""}`}>
+    <header><div><strong>{status === "accepted" ? "已接受 Offer" : status === "declined" ? "已拒绝 Offer" : "Offer 确认结果"}</strong><span>{offerResponseSourceLabel(source)}</span></div><small>{displayDate(response.respondedAt || response.responded_at || response.created_at)}</small></header>
+    <dl>
+      <div><dt>操作人</dt><dd>{source === "hr_proxy" ? actor || "HR（姓名未记录）" : "候选人"}</dd></div>
+      <div><dt>沟通渠道</dt><dd>{CHANNEL_LABELS[channel] || (source === "hr_proxy" ? "未记录" : "候选人确认页")}</dd></div>
+      <div><dt>沟通时间</dt><dd>{source === "hr_proxy" ? displayDate(communicatedAt) : displayDate(response.respondedAt || response.responded_at)}</dd></div>
+      <div><dt>到岗日期</dt><dd>{startDate ? displayDate(startDate, true) : "不适用"}</dd></div>
+      <div className="offer-response-note"><dt>备注</dt><dd>{note || "无"}</dd></div>
+    </dl>
+  </article>;
 }
 
 function deadlineInputValue(value) {
@@ -101,7 +142,98 @@ function OfferHistory({ history }) {
     {(history.approvals || []).length > 0 && <ol className="offer-approval-history">
       {history.approvals.map((approval) => <li key={approval.id}><span>第 {approval.sequence} 步</span><strong>{approval.status === "approved" ? "已批准" : approval.status === "rejected" ? "要求修改" : "待审批"}</strong>{approval.reason && <p>{approval.reason}</p>}</li>)}
     </ol>}
+    {(history.responses || []).length > 0 && <div className="offer-response-history" aria-label="候选人确认历史">
+      <h5>确认结果历史（不可编辑）</h5>
+      {history.responses.map((response, index) => <OfferResponseRecord key={response.id || `${response.source}-${response.respondedAt || index}`} response={response} />)}
+    </div>}
   </section>;
+}
+
+function ProxyResponseDialog({ offer, controller, onClose, onResolved, onNotify }) {
+  const [values, setValues] = useState({ decision: "accepted", expectedStartDate: "", channel: "", communicatedAt: deadlineInputValue(new Date().toISOString()), note: "" });
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const titleRef = useRef(null);
+  const dialogRef = useRef(null);
+  const submittingRef = useRef(false);
+
+  useEffect(() => {
+    titleRef.current?.focus();
+    function handleDialogKeydown(event) {
+      if (event.key === "Escape" && !submittingRef.current) { onClose(); return; }
+      if (event.key !== "Tab") return;
+      const focusable = [...(dialogRef.current?.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+    document.addEventListener("keydown", handleDialogKeydown);
+    return () => document.removeEventListener("keydown", handleDialogKeydown);
+  }, [onClose]);
+
+  function change(field, value) {
+    setValues((current) => ({ ...current, [field]: value }));
+    setError("");
+    setConfirming(false);
+  }
+
+  function continueToConfirmation(event) {
+    event.preventDefault();
+    try {
+      createProxyResponsePayload(values);
+      setConfirming(true);
+    } catch (validationError) {
+      setError(offerErrorMessage(validationError, "校验"));
+    }
+  }
+
+  async function submit() {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      const saved = await controller.proxyResponse(offer, values);
+      await onResolved(saved, false);
+      onNotify("候选人确认结果已登记");
+      onClose();
+    } catch (requestError) {
+      const latest = requestError?.latestOffer;
+      if (requestError?.code === "resource_version_conflict" && ["accepted", "declined"].includes(latest?.status)) {
+        await onResolved(latest, true);
+        onNotify("Offer 已由其他操作确认，已刷新最终结果");
+        onClose();
+      } else {
+        setError(offerErrorMessage(requestError, "代候选人确认"));
+      }
+    } finally {
+      submittingRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  return <div className="offer-proxy-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+    <section ref={dialogRef} className="offer-proxy-dialog" role="dialog" aria-modal="true" aria-labelledby="offer-proxy-title" aria-describedby="offer-proxy-description">
+      <header><div><h2 id="offer-proxy-title" ref={titleRef} tabIndex="-1">代候选人确认</h2><p id="offer-proxy-description">仅登记已通过线下沟通确认的最终结果，提交后不可编辑。</p></div><button type="button" aria-label="关闭代候选人确认对话框" disabled={busy} onClick={onClose}>×</button></header>
+      {!confirming ? <form className="offer-proxy-body" onSubmit={continueToConfirmation}>
+        <fieldset disabled={busy}><legend>候选人决定</legend><label><input type="radio" name="proxy-decision" checked={values.decision === "accepted"} onChange={() => change("decision", "accepted")} />接受</label><label><input type="radio" name="proxy-decision" checked={values.decision === "declined"} onChange={() => change("decision", "declined")} />拒绝</label></fieldset>
+        {values.decision === "accepted" && <label>预计入职日期<span className="required-label">必填</span><input aria-label="预计入职日期" type="date" required disabled={busy} value={values.expectedStartDate} onChange={(event) => change("expectedStartDate", event.target.value)} /></label>}
+        <label>沟通渠道<span className="required-label">必填</span><select aria-label="沟通渠道" required disabled={busy} value={values.channel} onChange={(event) => change("channel", event.target.value)}><option value="">请选择</option><option value="phone">电话</option><option value="wechat">微信</option><option value="email">邮件</option><option value="other">其他</option></select></label>
+        <label>沟通时间<span className="required-label">必填</span><input aria-label="沟通时间" type="datetime-local" required disabled={busy} value={values.communicatedAt} onChange={(event) => change("communicatedAt", event.target.value)} /></label>
+        <label>备注（可选）<textarea aria-label="备注" rows="4" maxLength="2000" disabled={busy} value={values.note} onChange={(event) => change("note", event.target.value)} /></label>
+        {error && <p className="offer-error" role="alert"><AlertTriangle size={16} />{error}</p>}
+        <footer><button className="button secondary" type="button" disabled={busy} onClick={onClose}>取消</button><button className="button primary" type="submit" disabled={busy}>下一步：确认登记</button></footer>
+      </form> : <div className="offer-proxy-confirmation">
+        <div role="status"><AlertTriangle size={20} /><span><strong>请再次确认</strong><small>该操作立即生效，并作为不可编辑的审计历史保存。</small></span></div>
+        <dl><div><dt>决定</dt><dd>{values.decision === "accepted" ? "接受 Offer" : "拒绝 Offer"}</dd></div>{values.decision === "accepted" && <div><dt>预计入职日期</dt><dd>{displayDate(values.expectedStartDate, true)}</dd></div>}<div><dt>沟通渠道</dt><dd>{CHANNEL_LABELS[values.channel]}</dd></div><div><dt>沟通时间</dt><dd>{displayDate(values.communicatedAt)}</dd></div><div><dt>备注</dt><dd>{values.note.trim() || "无"}</dd></div></dl>
+        {error && <p className="offer-error" role="alert"><AlertTriangle size={16} />{error}</p>}
+        <footer><button className="button secondary" type="button" disabled={busy} onClick={() => setConfirming(false)}>返回修改</button><button className="button primary" type="button" disabled={busy} onClick={() => void submit()}>{busy ? "登记中…" : "确认并登记"}</button></footer>
+      </div>}
+    </section>
+  </div>;
 }
 
 function OfferDraftForm({ offer, templates, applicationId, controller, role, onSaved, onNotify }) {
@@ -196,6 +328,13 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
   const applicationId = candidate?.application?.id || candidate?.applicationId;
   const [state, setState] = useState({ status: "loading", offer: null, templates: [], history: null, error: "" });
   const [action, setAction] = useState("");
+  const [proxyOpen, setProxyOpen] = useState(false);
+  const proxyButtonRef = useRef(null);
+
+  function closeProxyDialog() {
+    setProxyOpen(false);
+    queueMicrotask(() => proxyButtonRef.current?.focus());
+  }
 
   async function load() {
     if (!offerId && !applicationId) { setState({ status: "error", offer: null, templates: [], history: null, error: "当前页面没有可用 Offer 或申请标识。" }); return; }
@@ -235,8 +374,9 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
       <span><Clock3 size={18} /><span><small>回复截止</small><strong>{new Date(offer.candidateResponseDeadline || offer.candidate_response_deadline).toLocaleString("zh-CN", { hour12: false })}</strong></span></span>
       <span><FileText size={18} /><span><small>PDF</small><strong>{offer.pdfReady ?? offer.pdf_ready ? "已生成，可预览" : "生成中"}</strong></span></span>
     </div>
-    {offer.status === "ready_to_send" && <div className="offer-ready-notice" role="status"><CheckCircle2 size={20} /><span><strong>审批已完成，但尚未发送</strong><small>{canRenderOfferAction(role, offer, "send") ? "系统不会自动发送。请 HR 核对 PDF 和候选人邮箱后明确点击发送。" : "发送能力将在 Task 9 安全令牌流程接入后开放，当前不会向候选人发送。"}</small></span></div>}
+    {offer.status === "ready_to_send" && <div className="offer-ready-notice" role="status"><CheckCircle2 size={20} /><span><strong>审批已完成，但尚未发送</strong><small>{canRenderOfferAction(role, offer, "send") ? "发送功能已开放。系统不会自动发送，请 HR 核对 PDF 和候选人邮箱后明确点击发送。" : "发送功能已开放；当前账号无发送权限，请联系负责 HR 操作。"}</small></span></div>}
     {offer.status === "changes_requested" && <div className="offer-changes-notice"><Undo2 size={20} /><span><strong>审批人要求修改</strong><small>{state.history?.approvals?.slice().reverse().find((item) => item.status === "rejected")?.reason || "请查看下方审批历史。"}</small></span></div>}
+    {["accepted", "declined"].includes(offer.status) && <section className="offer-result" aria-labelledby="offer-result-title"><h4 id="offer-result-title">最终确认结果</h4><OfferResponseRecord response={offer.response || state.history?.responses?.at(-1)} current /></section>}
     {!sensitive ? <div className="offer-redacted" role="status"><ShieldCheck size={22} /><strong>敏感内容已由服务端隐藏</strong><span>当前账号只能查看 Offer 状态，薪酬和正文不会在浏览器中展示。</span></div> : <>
       {["draft", "changes_requested"].includes(offer.status) && canRenderOfferAction(role, offer, "update") && <OfferDraftForm offer={offer} templates={state.templates} applicationId={applicationId} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} />}
       {!(["draft", "changes_requested"].includes(offer.status) && canRenderOfferAction(role, offer, "update")) && <section className="offer-preview" aria-labelledby="offer-preview-title"><header><h4 id="offer-preview-title">Offer 预览</h4>{offer.isSpecial ?? offer.is_special ? <span>特殊 Offer</span> : null}</header><h5>{offer.content?.title || "正式录用通知"}</h5><p className="offer-body-copy">{offer.content?.body || "正文未填写"}</p><dl><div><dt>薪酬方案</dt><dd>{offer.content?.compensation || "未填写"}</dd></div><div><dt>福利与补充说明</dt><dd>{offer.content?.benefits || "未填写"}</dd></div>{(offer.specialReason || offer.special_reason) && <div><dt>特殊说明</dt><dd>{offer.specialReason || offer.special_reason}</dd></div>}</dl></section>}
@@ -244,10 +384,12 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
     {canRenderOfferAction(role, offer, "decide") && decisionApprovalId && <ApprovalDecision offer={offer} approvalId={decisionApprovalId} controller={controller} onSaved={(saved) => setState((current) => ({ ...current, offer: saved }))} onNotify={onNotify} />}
     <div className="offer-actions">
       {canRenderOfferAction(role, offer, "withdraw") && <button className="button secondary" type="button" disabled={Boolean(action)} onClick={() => void run("withdraw", () => controller.withdraw(offer), "Offer 已撤回")}><XCircle size={16} />{action === "withdraw" ? "撤回中…" : "撤回 Offer"}</button>}
-      {canRenderOfferAction(role, offer, "send") && <button className="button primary" type="button" disabled={Boolean(action) || !(offer.pdfReady ?? offer.pdf_ready)} onClick={() => void run("send", () => controller.send(offer), "Offer 已发送")}><Send size={16} />{action === "send" ? "发送中…" : "确认并发送 Offer"}</button>}
-      {offer.status === "ready_to_send" && !canRenderOfferAction(role, offer, "send") && <button className="button secondary" type="button" disabled aria-disabled="true"><Send size={16} />发送功能暂未开放</button>}
+      {canRenderOfferAction(role, offer, "send") && <button className="button primary" type="button" disabled={Boolean(action) || !(offer.pdfReady ?? offer.pdf_ready)} onClick={() => void run("send", () => controller.send(offer), "已加入发送队列")}><Send size={16} />{action === "send" ? "提交中…" : "确认并发送 Offer"}</button>}
+      {offer.status === "sent" && canRenderOfferAction(role, offer, "proxy_response") && <button ref={proxyButtonRef} className="button primary" type="button" disabled={Boolean(action)} onClick={() => setProxyOpen(true)}><CheckCircle2 size={16} />代候选人确认</button>}
+      {offer.status === "ready_to_send" && !canRenderOfferAction(role, offer, "send") && <button className="button secondary" type="button" disabled aria-disabled="true"><Send size={16} />当前账号无发送权限</button>}
     </div>
     <OfferHistory history={state.history} />
+    {proxyOpen && <ProxyResponseDialog offer={offer} controller={controller} onClose={closeProxyDialog} onResolved={async (saved) => { setState((current) => ({ ...current, offer: saved, error: "" })); await load(); }} onNotify={onNotify} />}
   </div>;
 }
 
