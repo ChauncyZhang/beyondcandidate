@@ -210,7 +210,9 @@ def build_communications_handler(settings: Settings):
     if key == "change-me":
         key = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
     sessions = sessionmaker(create_engine(_sync_database_url(settings.database_url), pool_pre_ping=True), expire_on_commit=False)
-    return EmailDeliveryJobHandler(sessions, None, EmailSecretCipher(key.encode()), timeout_seconds=settings.email_smtp_timeout_seconds)
+    from server.app.offers.service import OfferTokenCodec
+    public_base = settings.offer_public_base_url or settings.cors_origins[0]
+    return EmailDeliveryJobHandler(sessions, None, EmailSecretCipher(key.encode()), offer_token_codec=OfferTokenCodec(key.encode()), offer_public_base_url=public_base, timeout_seconds=settings.email_smtp_timeout_seconds)
 
 
 def build_terminal_callbacks():

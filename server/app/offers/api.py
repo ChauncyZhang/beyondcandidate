@@ -1,15 +1,16 @@
 import hashlib
 import re
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Header, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import exists, or_, select
 
 from server.app.identity.api import problem
 from server.app.identity.models import AuditLog, Job
-from server.app.offers.models import Offer, OfferApproval, OfferEvent, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
-from server.app.offers.schemas import OfferApprovalDecision, OfferCommand, OfferTemplateCommand, OfferVersionCommand, SpecialOfferApproversCommand
+from server.app.offers.models import Offer, OfferAccessToken, OfferApproval, OfferEvent, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
+from server.app.offers.schemas import OfferApprovalDecision, OfferCommand, OfferTemplateCommand, OfferVersionCommand, PublicOfferResponse, SpecialOfferApproversCommand
 from server.app.offers.service import (
     OfferApprovalError,
     OfferNotFound,
@@ -19,6 +20,9 @@ from server.app.offers.service import (
     submit_offer,
     update_offer_version,
     withdraw_offer,
+    issue_offer_access_token,
+    public_offer_access,
+    record_public_offer_response,
 )
 from server.app.recruiting.api import _idempotency, _principal
 from server.app.recruiting.authorization import RecruitingAction, RecruitingAuthorizationService
@@ -26,6 +30,7 @@ from server.app.recruiting.models import Application, Candidate
 from server.app.recruiting.service import IdempotencyConflict, persisted_idempotent
 from server.app.recruiting.service import is_eligible_offer_approver
 from server.app.communications.interview_messages import CandidateEmailUnavailable, resolve_confirmed_candidate_email
+from server.app.communications.service import DeliveryCommand, SenderPolicy, enqueue_delivery
 
 
 router = APIRouter()
@@ -323,21 +328,91 @@ def pending_approvals(request: Request):
 
 @router.post("/api/v1/offers/{offer_id}/send")
 def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(None, alias="If-Match"), idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
-    """Task 9 owns token issuance; never change state until that capability exists."""
     principal, expected, key = _principal(request), _version(request, if_match), _idempotency(request, idempotency_key)
     if any(isinstance(item, JSONResponse) for item in (principal, expected, key)): return next(item for item in (principal, expected, key) if isinstance(item, JSONResponse))
     with request.app.state.identity_store.sync_session() as db:
-        offer = _offer(db, principal, offer_id)
-        if offer is None or not _can_manage(db, principal, offer): return _error(request, 404, "resource_not_found")
-        if offer.version != expected: return _error(request, 409, "resource_version_conflict")
-        current = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == offer.organization_id, OfferVersion.id == offer.current_version_id))
-        if offer.status != "ready_to_send" or current is None or not current.pdf_object_key: return _error(request, 409, "offer_not_ready_to_send")
-        application = db.scalar(select(Application).where(Application.organization_id == offer.organization_id, Application.id == offer.application_id))
         try:
-            resolve_confirmed_candidate_email(db, organization_id=offer.organization_id, candidate_id=application.candidate_id, contact_cipher=request.app.state.contact_cipher)
+            def action():
+                offer = _offer(db, principal, offer_id)
+                if offer is None or not _can_manage(db, principal, offer): raise OfferNotFound
+                if offer.version != expected: raise OfferVersionConflict
+                current = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == offer.organization_id, OfferVersion.id == offer.current_version_id).with_for_update())
+                now = datetime.now(timezone.utc)
+                if offer.status != "ready_to_send" or current is None or any(getattr(current, field) is None for field in ("pdf_object_key", "pdf_sha256", "pdf_size_bytes", "pdf_rendered_at")) or current.candidate_response_deadline <= now:
+                    raise OfferApprovalError
+                application = db.scalar(select(Application).where(Application.organization_id == offer.organization_id, Application.id == offer.application_id).with_for_update())
+                recipient = resolve_confirmed_candidate_email(db, organization_id=offer.organization_id, candidate_id=application.candidate_id, contact_cipher=request.app.state.contact_cipher)
+                token, _ = issue_offer_access_token(db, offer.organization_id, offer, current, codec=request.app.state.offer_token_codec, now=now)
+                # The worker reconstructs the capability from token row ID.  Delivery storage holds no link or raw token.
+                enqueue_delivery(db, DeliveryCommand(organization_id=offer.organization_id, recipient=recipient, subject="Your offer is ready", body="Your secure offer link: {{offer_public_link}}", resource_type="offer_access_token", resource_id=token.id, idempotency_key=key, operation=f"offer.send:{offer.id}", created_by=principal.user_id, trace_id=request.state.trace_id), cipher=request.app.state.email_secret_cipher, sender_policy=SenderPolicy(request.app.state.settings.email_from_address, request.app.state.settings.email_from_name))
+                _audit(db, offer, principal.user_id, "offer.send_queued", request.state.trace_id, {"version_number": current.version_number})
+                return 202, {"data": _offer_view(db, offer, principal)}
+            status, body = persisted_idempotent(db, principal.organization_id, principal.user_id, f"offer.send:{offer_id}", key, {"expected_version": expected}, action)
+            db.commit()
         except CandidateEmailUnavailable:
-            return _error(request, 409, "candidate_email_unconfirmed")
-    return _error(request, 409, "offer_send_unavailable")
+            db.rollback(); return _error(request, 409, "candidate_email_unconfirmed")
+        except OfferNotFound:
+            db.rollback(); return _error(request, 404, "resource_not_found")
+        except OfferVersionConflict:
+            db.rollback(); return _error(request, 409, "resource_version_conflict")
+        except OfferApprovalError:
+            db.rollback(); return _error(request, 409, "offer_not_ready_to_send")
+        except IdempotencyConflict:
+            db.rollback(); return _error(request, 409, "idempotency_conflict")
+    return _response(body["data"], status, etag=body["data"]["version"])
+
+
+def _public_response(data, status=200):
+    response = JSONResponse({"data": data}, status_code=status)
+    response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"})
+    return response
+
+
+def _public_error(request):
+    response = problem(request, 404, "offer_link_invalid", "The offer link is invalid or unavailable.")
+    response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"})
+    return response
+
+
+@router.get("/api/public/v1/offers/{token}")
+def get_public_offer(token: str, request: Request):
+    with request.app.state.identity_store.sync_session() as db:
+        try:
+            _, offer, version, _ = public_offer_access(db, token, codec=request.app.state.offer_token_codec, now=datetime.now(timezone.utc))
+        except (OfferNotFound, ValueError):
+            return _public_error(request)
+        return _public_response({"status": offer.status, "content": version.content, "candidate_response_deadline": version.candidate_response_deadline.isoformat(), "pdf_available": True})
+
+
+@router.get("/api/public/v1/offers/{token}/pdf")
+def get_public_offer_pdf(token: str, request: Request):
+    with request.app.state.identity_store.sync_session() as db:
+        try:
+            _, _, version, _ = public_offer_access(db, token, codec=request.app.state.offer_token_codec, now=datetime.now(timezone.utc))
+            expected_key = f"offers/{version.organization_id}/offers/{version.offer_id}/versions/{version.id}.pdf"
+            if version.pdf_object_key != expected_key or not version.pdf_sha256 or request.app.state.offer_pdf_storage is None:
+                raise OfferNotFound
+            content = request.app.state.offer_pdf_storage.read_verified(version.pdf_object_key, version.pdf_sha256)
+        except Exception:
+            return _public_error(request)
+    response = Response(content, media_type="application/pdf")
+    response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'", "Content-Disposition": "inline; filename=offer.pdf"})
+    return response
+
+
+@router.post("/api/public/v1/offers/{token}/responses")
+def respond_public_offer(token: str, payload: PublicOfferResponse, request: Request):
+    if request.headers.get("origin") not in request.app.state.settings.cors_origins:
+        return _public_error(request)
+    with request.app.state.identity_store.sync_session() as db:
+        try:
+            response, duplicate = record_public_offer_response(db, token, payload, codec=request.app.state.offer_token_codec, now=datetime.now(timezone.utc), trace_id=request.state.trace_id)
+            db.commit()
+        except OfferVersionConflict:
+            db.rollback(); return _public_response({"code": "offer_response_conflict"}, 409)
+        except (OfferNotFound, ValueError):
+            db.rollback(); return _public_error(request)
+    return _public_response({"status": response.status, "duplicate": duplicate})
 
 
 @router.get("/api/v1/offer-templates")

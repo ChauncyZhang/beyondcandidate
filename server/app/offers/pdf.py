@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import html
 import multiprocessing
 import os
@@ -321,6 +322,7 @@ def render_offer_pdf(template_html: str, variables: Mapping[str, str]) -> bytes:
 
 class PrivateOfferPdfStorage(Protocol):
     def write_immutable(self, storage_key: str, content: bytes, sha256: str) -> None: ...
+    def read_verified(self, storage_key: str, sha256: str) -> bytes: ...
 
 
 @dataclass(frozen=True)
@@ -369,3 +371,16 @@ class MinioOfferPdfStorage:
             if getattr(existing, "size", None) == len(content) and self._metadata_digest(existing) == sha256:
                 return
             raise OfferPdfStorageConflict("immutable offer PDF object already exists with different content") from None
+
+    def read_verified(self, storage_key: str, sha256: str) -> bytes:
+        if not storage_key.startswith("offers/") or len(sha256) != 64:
+            raise OfferPdfStorageError("private offer PDF storage is unavailable")
+        try:
+            response = self.client.get_object(self.private_bucket, storage_key)
+            content = response.read()
+            response.close(); response.release_conn()
+        except Exception:
+            raise OfferPdfStorageError("private offer PDF storage is unavailable") from None
+        if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), sha256):
+            raise OfferPdfStorageError("private offer PDF storage is unavailable")
+        return content

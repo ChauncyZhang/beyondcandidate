@@ -58,7 +58,7 @@ class Offer(OfferRecord, Base):
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     __table_args__ = (
         UniqueConstraint("organization_id", "id"),
-        CheckConstraint("status in ('draft','pending_approval','changes_requested','ready_to_send','sent','withdrawn','expired')", name="ck_offers_status"),
+        CheckConstraint("status in ('draft','pending_approval','changes_requested','ready_to_send','sent','accepted','declined','withdrawn','expired')", name="ck_offers_status"),
         CheckConstraint("version >= 1", name="ck_offers_version"),
         CheckConstraint("(is_special and special_reason is not null and length(trim(special_reason)) > 0) or (not is_special and special_reason is null)", name="ck_offers_special_reason"),
         ForeignKeyConstraint(["organization_id", "application_id", "job_id"], ["applications.organization_id", "applications.id", "applications.job_id"]),
@@ -136,13 +136,39 @@ class OfferApproval(OfferRecord, Base):
 class OfferResponse(OfferRecord, Base):
     __tablename__ = "offer_responses"
     offer_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # Nullable only for pre-0035 history; the public response service always writes it.
+    offer_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
+    expected_start_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reason_text: Mapped[str | None] = mapped_column(Text)
+    request_hash: Mapped[str | None] = mapped_column(String(64))
     responded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     __table_args__ = (
         UniqueConstraint("organization_id", "id"),
         UniqueConstraint("organization_id", "offer_id"),
         CheckConstraint("status in ('accepted','declined')", name="ck_offer_responses_status"),
+        CheckConstraint("(status = 'accepted' and expected_start_date is not null and reason_text is null) or (status = 'declined' and expected_start_date is null)", name="ck_offer_responses_payload"),
         ForeignKeyConstraint(["organization_id", "offer_id"], ["offers.organization_id", "offers.id"], ondelete="CASCADE"),
+        ForeignKeyConstraint(["organization_id", "offer_version_id", "offer_id"], ["offer_versions.organization_id", "offer_versions.id", "offer_versions.offer_id"]),
+    )
+
+
+class OfferAccessToken(OfferRecord, Base):
+    __tablename__ = "offer_access_tokens"
+    offer_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    offer_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id"),
+        UniqueConstraint("token_hash"),
+        CheckConstraint("length(token_hash) = 64 and token_hash = lower(token_hash) and token_hash not like '%[^0-9a-f]%'", name="ck_offer_access_tokens_hash"),
+        ForeignKeyConstraint(["organization_id", "offer_id"], ["offers.organization_id", "offers.id"], ondelete="CASCADE"),
+        ForeignKeyConstraint(["organization_id", "offer_version_id", "offer_id"], ["offer_versions.organization_id", "offer_versions.id", "offer_versions.offer_id"]),
+        Index("ix_offer_access_tokens_lookup", "token_hash"),
+        Index("ix_offer_access_tokens_offer_current", "organization_id", "offer_id", "revoked_at"),
     )
 
 

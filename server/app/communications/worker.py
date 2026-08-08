@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 
 
 class EmailDeliveryJobHandler:
-    def __init__(self, sessions, provider, cipher: EmailSecretCipher, *, timeout_seconds: float = 10) -> None:
+    def __init__(self, sessions, provider, cipher: EmailSecretCipher, *, offer_token_codec=None, offer_public_base_url: str | None = None, timeout_seconds: float = 10) -> None:
         self._sessions, self._provider, self._cipher = sessions, provider, cipher
+        self._offer_token_codec, self._offer_public_base_url = offer_token_codec, offer_public_base_url
         self._timeout = timeout_seconds
 
     async def __call__(self, job) -> None:
@@ -62,6 +63,15 @@ class EmailDeliveryJobHandler:
                 else:
                     delivery.attempts += 1
                     delivery.version += 1
+                    body = delivery.rendered_body
+                    if delivery.resource_type == "offer_access_token":
+                        from server.app.offers.models import OfferAccessToken
+                        token = db.scalar(select(OfferAccessToken).where(OfferAccessToken.organization_id == organization_id, OfferAccessToken.id == delivery.resource_id))
+                        if token is None or self._offer_token_codec is None or not self._offer_public_base_url:
+                            mark_delivery_failed(db, delivery, "offer_link_unavailable"); setup_error = "offer_link_unavailable"
+                        else:
+                            raw = self._offer_token_codec.raw_token(token.id)
+                            body = body.replace("{{offer_public_link}}", f"{self._offer_public_base_url.rstrip('/')}/api/public/v1/offers/{raw}")
                     message = MailMessage(
                         recipient,
                         delivery.sender_email,
@@ -69,7 +79,7 @@ class EmailDeliveryJobHandler:
                         delivery.reply_to_email,
                         delivery.reply_to_name,
                         delivery.rendered_subject,
-                        delivery.rendered_body,
+                        body,
                         f"<email-{delivery.id}@beyondcandidate.internal>",
                         delivery.attachment_filename,
                         delivery.attachment_content_type,
@@ -104,6 +114,9 @@ class EmailDeliveryJobHandler:
             delivery = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == organization_id, EmailDelivery.id == delivery_id).with_for_update())
             if delivery is None or delivery.status != "queued":
                 raise PermanentJobError("email_delivery_state_conflict")
+            if delivery.resource_type == "offer_access_token":
+                from server.app.offers.service import mark_offer_delivery_sent
+                mark_offer_delivery_sent(db, delivery, now=datetime.now(timezone.utc))
             delivery.status = "sent"; delivery.safe_error_code = None
             delivery.provider_receipt_id = receipt.receipt_id[:255]; delivery.sent_at = datetime.now(timezone.utc); delivery.version += 1
 

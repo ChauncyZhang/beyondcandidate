@@ -44,6 +44,7 @@ class Settings(BaseModel):
     email_from_address: str = "careers@beyondcandidate.com"
     email_from_name: str = "BeyondCandidate"
     email_smtp_timeout_seconds: float = Field(default=10, gt=0, le=60)
+    offer_public_base_url: str | None = None
     llm_provider_allowlist: dict[str, dict[str, object]] = Field(default_factory=dict)
     default_organization_slug: str | None = Field(default=None, min_length=1, max_length=100)
     default_organization_name: str | None = Field(default=None, min_length=1, max_length=200)
@@ -178,6 +179,7 @@ class Settings(BaseModel):
             "EMAIL_FROM_ADDRESS": "email_from_address",
             "EMAIL_FROM_NAME": "email_from_name",
             "EMAIL_SMTP_TIMEOUT_SECONDS": "email_smtp_timeout_seconds",
+            "OFFER_PUBLIC_BASE_URL": "offer_public_base_url",
             "DEFAULT_ORGANIZATION_SLUG": "default_organization_slug",
             "DEFAULT_ORGANIZATION_NAME": "default_organization_name",
             "OBJECT_STORAGE_SECURE": "object_storage_secure",

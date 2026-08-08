@@ -232,6 +232,9 @@ def mark_delivery_failed(db, delivery: EmailDelivery, safe_code: str, now: datet
     delivery.status = "failed"
     delivery.safe_error_code = effective_safe_code
     delivery.failed_at = now or datetime.now(timezone.utc)
+    if delivery.resource_type == "offer_access_token":
+        from server.app.offers.service import revoke_offer_delivery_token
+        revoke_offer_delivery_token(db, delivery, now=delivery.failed_at)
     delivery.version += 1
     if responsible_user_id is not None:
         create_user_notification(

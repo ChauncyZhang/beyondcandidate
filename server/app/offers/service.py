@@ -1,4 +1,6 @@
+import base64
 import hashlib
+import hmac
 import uuid
 from datetime import datetime, timezone
 
@@ -7,7 +9,7 @@ from sqlalchemy import exists, func, select
 from server.app.identity.models import AuditLog, Job
 from server.app.recruiting.models import Application
 from server.app.recruiting.service import ResourceVersionConflict
-from server.app.offers.models import Offer, OfferApproval, OfferEvent, OfferResponse, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
+from server.app.offers.models import Offer, OfferAccessToken, OfferApproval, OfferEvent, OfferResponse, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
 from server.app.offers.pdf import offer_pdf_storage_key, render_offer_pdf
 
 
@@ -27,6 +29,96 @@ FINAL_OFFER_STATUSES = {"withdrawn", "expired"}
 ACTIVE_OFFER_STATUSES = {"draft", "pending_approval", "changes_requested", "ready_to_send", "sent"}
 REVISION_SOURCE_STATUSES = {"draft", "changes_requested", "ready_to_send", "sent"}
 PDF_RECEIPT_FIELDS = ("pdf_object_key", "pdf_sha256", "pdf_size_bytes", "pdf_rendered_at")
+
+
+class OfferTokenCodec:
+    """A purpose-separated deterministic 256-bit public capability codec."""
+    def __init__(self, secret: bytes):
+        self._key = hmac.new(secret, b"beyondcandidate:offer-access-token:v1", hashlib.sha256).digest()
+
+    def raw_token(self, token_id: uuid.UUID) -> str:
+        value = hmac.new(self._key, token_id.bytes, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+    def issue(self, *, organization_id, offer_id, offer_version_id, expires_at):
+        row = OfferAccessToken(
+            id=uuid.uuid4(),
+            organization_id=uuid.UUID(str(organization_id)), offer_id=uuid.UUID(str(offer_id)),
+            offer_version_id=uuid.UUID(str(offer_version_id)), expires_at=expires_at,
+            token_hash="0" * 64,
+        )
+        raw = self.raw_token(row.id)
+        row.token_hash = hashlib.sha256(raw.encode("ascii")).hexdigest()
+        return row, raw
+
+    def matches(self, row: OfferAccessToken, raw: str) -> bool:
+        return hmac.compare_digest(row.token_hash, hashlib.sha256(raw.encode("ascii")).hexdigest()) and hmac.compare_digest(raw, self.raw_token(row.id))
+
+
+def issue_offer_access_token(db, organization_id, offer, version, *, codec: OfferTokenCodec, now: datetime):
+    """Replace every capability for an offer; the raw capability never leaves this call."""
+    for previous in db.scalars(select(OfferAccessToken).where(OfferAccessToken.organization_id == organization_id, OfferAccessToken.offer_id == offer.id, OfferAccessToken.revoked_at.is_(None)).with_for_update()):
+        previous.revoked_at = now
+    token, raw = codec.issue(organization_id=organization_id, offer_id=offer.id, offer_version_id=version.id, expires_at=version.candidate_response_deadline)
+    db.add(token)
+    db.flush()
+    return token, raw
+
+
+def public_offer_access(db, raw_token: str, *, codec: OfferTokenCodec, now: datetime, lock: bool = False, allow_revoked: bool = False):
+    digest = hashlib.sha256(raw_token.encode("ascii")).hexdigest()
+    query = select(OfferAccessToken).where(OfferAccessToken.token_hash == digest)
+    token = db.scalar(query.with_for_update() if lock else query)
+    if token is None or not codec.matches(token, raw_token) or (token.revoked_at is not None and not allow_revoked) or token.expires_at <= now:
+        raise OfferNotFound
+    offer = db.scalar(select(Offer).where(Offer.organization_id == token.organization_id, Offer.id == token.offer_id).with_for_update())
+    version = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == token.organization_id, OfferVersion.id == token.offer_version_id, OfferVersion.offer_id == token.offer_id).with_for_update())
+    if offer is None or version is None or offer.current_version_id != version.id or (offer.status != "sent" and not allow_revoked):
+        raise OfferNotFound
+    application = db.scalar(select(Application).where(Application.organization_id == token.organization_id, Application.id == offer.application_id).with_for_update())
+    if application is None:
+        raise OfferNotFound
+    return token, offer, version, application
+
+
+def record_public_offer_response(db, raw_token, payload, *, codec: OfferTokenCodec, now: datetime, trace_id: str):
+    token, offer, version, application = public_offer_access(db, raw_token, codec=codec, now=now, lock=True, allow_revoked=True)
+    canonical = f"{payload.decision}|{payload.expected_start_date.isoformat() if payload.expected_start_date else ''}|{payload.reason_text or ''}"
+    request_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    existing = db.scalar(select(OfferResponse).where(OfferResponse.organization_id == offer.organization_id, OfferResponse.offer_id == offer.id).with_for_update())
+    if existing is not None:
+        if existing.request_hash and hmac.compare_digest(existing.request_hash, request_hash):
+            return existing, True
+        raise OfferVersionConflict("conflicting response")
+    if token.revoked_at is not None:
+        raise OfferNotFound
+    from server.app.recruiting.service import apply_application_workflow_action_record
+    action = "offer_accepted" if payload.decision == "accepted" else "offer_declined"
+    apply_application_workflow_action_record(db, offer.organization_id, application.id, action, expected_version=application.version, actor_user_id=None, trace_id=trace_id, reason_text=payload.reason_text)
+    response = OfferResponse(organization_id=offer.organization_id, offer_id=offer.id, offer_version_id=version.id, status="accepted" if action == "offer_accepted" else "declined", expected_start_date=payload.expected_start_date, reason_text=payload.reason_text, request_hash=request_hash, responded_at=now)
+    db.add(response)
+    offer.status = response.status; offer.version += 1; token.revoked_at = now
+    _audit(db, offer, None, f"offer.{response.status}", trace_id, {"version_number": version.version_number})
+    db.flush()
+    return response, False
+
+
+def mark_offer_delivery_sent(db, delivery, *, now: datetime):
+    token = db.scalar(select(OfferAccessToken).where(OfferAccessToken.organization_id == delivery.organization_id, OfferAccessToken.id == delivery.resource_id).with_for_update())
+    if token is None or token.revoked_at is not None:
+        raise OfferApprovalError("offer delivery is unavailable")
+    offer = db.scalar(select(Offer).where(Offer.organization_id == token.organization_id, Offer.id == token.offer_id).with_for_update())
+    if offer is None or offer.status != "ready_to_send" or offer.current_version_id != token.offer_version_id:
+        raise OfferApprovalError("offer delivery is unavailable")
+    token.delivered_at = now
+    offer.status = "sent"; offer.version += 1
+    _audit(db, offer, None, "offer.sent", f"email-{str(delivery.id)[:8]}", {})
+
+
+def revoke_offer_delivery_token(db, delivery, *, now: datetime):
+    token = db.scalar(select(OfferAccessToken).where(OfferAccessToken.organization_id == delivery.organization_id, OfferAccessToken.id == delivery.resource_id).with_for_update())
+    if token is not None and token.revoked_at is None:
+        token.revoked_at = now
 
 
 def _audit(db, offer, actor_user_id, event_type, trace_id, payload):

@@ -48,7 +48,7 @@ def _is_governance_path(path: str) -> bool:
 
 
 def _requires_no_store(path: str) -> bool:
-    return _is_governance_path(path) or path.startswith("/api/v1/offers") or path.startswith("/api/v1/offer-approvals") or path.startswith("/api/v1/offer-templates") or path.startswith("/api/v1/email-deliveries") or path.startswith("/api/v1/email-templates") or path.startswith("/api/v1/notifications/") or path.startswith("/api/v1/auth/feishu") or path == "/api/v1/settings" or path.startswith(
+    return path.startswith("/api/public/v1/offers/") or _is_governance_path(path) or path.startswith("/api/v1/offers") or path.startswith("/api/v1/offer-approvals") or path.startswith("/api/v1/offer-templates") or path.startswith("/api/v1/email-deliveries") or path.startswith("/api/v1/email-templates") or path.startswith("/api/v1/notifications/") or path.startswith("/api/v1/auth/feishu") or path == "/api/v1/settings" or path.startswith(
         "/api/v1/settings/"
     )
 
@@ -143,6 +143,8 @@ def create_app(
         b"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", b"fedcba9876543210fedcba9876543210"
     )
     app.state.resume_storage = resume_storage
+    from server.app.offers.pdf import MinioOfferPdfStorage
+    app.state.offer_pdf_storage = MinioOfferPdfStorage(storage_client, settings.object_storage_bucket) if 'storage_client' in locals() else None
     app.state.quarantine_storage = quarantine_storage
     app.state.export_storage = export_storage
     from server.app.llm.gateway import OpenAiCompatibleGateway
@@ -177,6 +179,8 @@ def create_app(
     if email_key == "change-me":
         email_key = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
     app.state.email_secret_cipher = EmailSecretCipher(email_key.encode())
+    from server.app.offers.service import OfferTokenCodec
+    app.state.offer_token_codec = OfferTokenCodec(email_key.encode())
     app.include_router(identity_router)
     app.include_router(identity_admin_router)
     app.include_router(recruiting_router)
@@ -205,6 +209,9 @@ def create_app(
         response = problem(request, 422, "validation_failed", "The request is invalid.")
         if _requires_no_store(request.url.path):
             response.headers["Cache-Control"] = "no-store"
+        if request.url.path.startswith("/api/public/v1/offers/"):
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         return response
     app.add_middleware(
         CORSMiddleware,

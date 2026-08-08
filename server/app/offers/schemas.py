@@ -88,6 +88,25 @@ class OfferApprovalDecision(OfferSchema):
         return self
 
 
+class PublicOfferResponse(OfferSchema):
+    decision: str
+    expected_start_date: datetime | None = None
+    reason_text: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_response(self):
+        if self.decision == "accepted":
+            if self.expected_start_date is None or self.reason_text is not None:
+                raise ValueError("accepted offers require expected_start_date only")
+        elif self.decision == "declined":
+            if self.expected_start_date is not None:
+                raise ValueError("declined offers do not accept expected_start_date")
+            self.reason_text = self.reason_text.strip() if self.reason_text else None
+        else:
+            raise ValueError("decision must be accepted or declined")
+        return self
+
+
 class OfferTemplateCommand(OfferSchema):
     name: str = Field(min_length=1, max_length=200)
     content: dict[str, Any] = Field(default_factory=dict)
