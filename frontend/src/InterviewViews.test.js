@@ -6,6 +6,7 @@ import vm from "node:vm";
 const source = readFileSync(new URL("./InterviewViews.jsx", import.meta.url), "utf8");
 const appSource = readFileSync(new URL("./App.jsx", import.meta.url), "utf8");
 const stylesSource = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+const themeSource = readFileSync(new URL("./product-theme-interviews.css", import.meta.url), "utf8");
 const helpersSource = source.match(/\/\* feedback-draft-helpers:start \*\/([\s\S]*?)\/\* feedback-draft-helpers:end \*\//)?.[1];
 assert.ok(helpersSource, "InterviewViews.jsx must expose the feedback draft helper block");
 const {
@@ -129,4 +130,28 @@ test("assigned participants can submit feedback before a scheduled or confirmed 
   assert.match(source, /const \[editing, setEditing\] = useState\(ownsFeedback\)/);
   assert.match(source, /disabled=\{submitting \|\| loading \|\| !ownsFeedback\}/);
   assert.doesNotMatch(source, /submitEligibilityTime|feedback-submit-gate|面试开始后可提交/);
+});
+
+test("candidate delivery status remains distinct from calendar notification and shows only masked recipient", () => {
+  assert.match(source, /候选人邮件/);
+  assert.match(source, /日历通知/);
+  assert.match(source, /delivery\?\.recipient/);
+  assert.match(source, /title=\{delivery\?\.errorText\}/);
+  assert.match(themeSource, /\.interview-delivery-recipient\s*\{[^}]*text-overflow:\s*ellipsis[^}]*white-space:\s*nowrap/s);
+});
+
+test("unconfirmed candidate email keeps the schedule workspace mounted and reuses the focused confirmation dialog", () => {
+  assert.match(source, /requiresCandidateEmailCorrection\(error\)/);
+  assert.match(source, /当前排期内容已保留/);
+  assert.match(source, />修正邮箱<\/button>/);
+  assert.match(source, /<CandidateEmailDialog/);
+  assert.match(source, /<ScheduleWorkspace key=\{selectedInterview\?\.id \|\| scheduleCandidateId \|\| "new-interview"\}/);
+});
+
+test("failed delivery resend is role-gated and does not add reminder or candidate-account controls", () => {
+  assert.match(source, /emailActions\.resend && <button/);
+  assert.match(source, /"重新发送"/);
+  assert.match(appSource, /canResendCandidateEmail=\{\["招聘管理员", "recruiting_admin"\]\.includes\(currentRole\)\}/);
+  assert.match(appSource, /candidateEmailController=\{candidateController\}/);
+  assert.doesNotMatch(source, /候选人提醒|发送提醒|候选人账号/);
 });

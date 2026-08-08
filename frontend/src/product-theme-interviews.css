@@ -143,8 +143,8 @@
 .interview-table { border-top-color: var(--line); }
 .interview-table-head,
 .interview-table-row {
-  min-width: 1150px;
-  grid-template-columns: minmax(150px, 1.05fr) minmax(135px, .9fr) minmax(170px, 1.12fr) minmax(145px, .95fr) 142px 168px 118px;
+  min-width: 1210px;
+  grid-template-columns: minmax(150px, 1.05fr) minmax(135px, .9fr) minmax(170px, 1.12fr) minmax(145px, .95fr) 112px 228px 124px;
   gap: 12px;
 }
 
@@ -200,6 +200,54 @@
 .interview-status.danger { color: var(--red); background: var(--red-soft); }
 .interview-state-stack,
 .interview-row-actions { gap: 6px; }
+
+.interview-email-delivery,
+.interview-secondary-state {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 7px;
+}
+
+.interview-email-delivery > small:first-child,
+.interview-secondary-state > small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.interview-delivery-recipient {
+  grid-column: 1 / -1;
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.interview-action-error {
+  max-width: 120px;
+  color: var(--red) !important;
+  line-height: 1.35;
+}
+
+.interview-email-correction {
+  margin: 0 18px 12px;
+  padding: 12px 14px;
+  border: 1px solid #f0c36a;
+  border-radius: var(--radius);
+  background: var(--orange-soft);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.interview-email-correction > svg { flex: 0 0 auto; color: var(--orange); }
+.interview-email-correction > div { min-width: 0; flex: 1; }
+.interview-email-correction strong { display: block; }
+.interview-email-correction p { margin: 3px 0 0; color: var(--ink-secondary); line-height: 1.45; }
+.interview-email-correction .button { flex: 0 0 auto; }
 
 .interview-row-actions button,
 .interview-calendar-action,
@@ -588,6 +636,12 @@
   .interview-table-row > span:nth-of-type(6) { grid-area: action; }
   .interview-row-actions { width: 100%; padding-top: 8px; border-top: 1px solid var(--line); flex-direction: row; flex-wrap: wrap; gap: 8px 16px; }
   .interview-row-actions button { min-height: 34px; }
+  .interview-email-delivery,
+  .interview-secondary-state { justify-items: end; grid-template-columns: auto auto; }
+  .interview-delivery-recipient { max-width: 180px; }
+  .interview-action-error { max-width: 100%; }
+  .interview-email-correction { margin: 8px; align-items: flex-start; flex-wrap: wrap; }
+  .interview-email-correction .button { width: 100%; }
 
   .calendar-navigation > strong { order: -1; width: 100%; margin: 0; }
   .calendar-navigation label { margin-left: auto; font-size: 0; }

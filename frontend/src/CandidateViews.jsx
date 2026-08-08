@@ -337,7 +337,7 @@ function ResumePreview({ candidate, file, status, error, downloading, onClose, o
 const candidateEmailSourceLabels = { legacy: "历史数据", manual: "人工录入", native: "简历原文", ocr: "OCR 识别" };
 const candidateEmailRoles = new Set(["招聘管理员", "recruiting_admin", "HR 招聘专员", "recruiter", "HR"]);
 
-function CandidateEmailDialog({ candidate, controller, onClose, onConfirmed }) {
+export function CandidateEmailDialog({ candidate, controller, onClose, onConfirmed }) {
   const dialogRef = useRef(null);
   const restoreRef = useRef(typeof document === "undefined" ? null : document.activeElement);
   const [state, setState] = useState({ status: "loading", email: null, error: "", recovery: "" });

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createInterviewController, deriveCandidateInterviews, selectSchedulableCandidates } from "./interviewController.js";
+import { createInterviewController, deriveCandidateInterviews, getInterviewEmailActions, requiresCandidateEmailCorrection, selectSchedulableCandidates } from "./interviewController.js";
 
 const INTERVIEW_ID = "11111111-1111-4111-8111-111111111111";
 const APPLICATION_ID = "22222222-2222-4222-8222-222222222222";
@@ -89,6 +89,8 @@ test("lists interviews from the server envelope and maps display fields", async 
     location: "https://meeting.example.com/one",
     status: "已完成",
     notification: "已发送",
+    feishuNotification: "已发送",
+    emailDelivery: null,
     feedbackStatus: "待反馈",
     owner: "张小北",
     version: 7,
@@ -101,6 +103,60 @@ test("lists interviews from the server envelope and maps display fields", async 
   });
   assert.equal(result.count, 1);
   assert.equal(result.nextCursor, "CURSOR-2");
+});
+
+test("normalizes masked candidate email delivery separately from Feishu notification state", async () => {
+  const { client } = queuedClient([{ data: [apiInterview({
+    notification_status: "failed",
+    email_delivery: {
+      id: "77777777-7777-4777-8777-777777777777",
+      recipient: "c*******e@example.com",
+      status: "sent",
+      version: 4,
+      safe_error_code: null,
+    },
+  })] }]);
+
+  const record = (await createInterviewController({ client }).list()).records[0];
+
+  assert.equal(record.feishuNotification, "发送失败");
+  assert.equal(record.notification, "发送失败");
+  assert.deepEqual(record.emailDelivery, {
+    id: "77777777-7777-4777-8777-777777777777",
+    recipient: "c*******e@example.com",
+    status: "sent",
+    statusLabel: "已发送",
+    version: 4,
+    errorText: "",
+  });
+});
+
+test("never projects an unmasked recipient or raw delivery error text", async () => {
+  const { client } = queuedClient([{ data: [apiInterview({
+    email_delivery: {
+      id: "77777777-7777-4777-8777-777777777777",
+      recipient: "candidate@example.com",
+      status: "failed",
+      version: 2,
+      safe_error_code: "raw-provider-secret-detail",
+    },
+  })] }]);
+
+  const delivery = (await createInterviewController({ client }).list()).records[0].emailDelivery;
+
+  assert.equal(delivery.recipient, "收件人已隐藏");
+  assert.equal(delivery.errorText, "邮件发送失败，请联系系统管理员后重试。");
+  assert.doesNotMatch(JSON.stringify(delivery), /candidate@example\.com|raw-provider-secret-detail/);
+});
+
+test("candidate email correction and resend actions require explicit authorization", () => {
+  const record = { candidateId: CANDIDATE_ID, emailDelivery: { id: "delivery", status: "failed" } };
+
+  assert.deepEqual(getInterviewEmailActions(record, { correctionRequired: true }), { correct: false, resend: false });
+  assert.deepEqual(getInterviewEmailActions(record, { canCorrect: true, correctionRequired: true }), { correct: true, resend: false });
+  assert.deepEqual(getInterviewEmailActions(record, { canResend: true }), { correct: false, resend: true });
+  assert.equal(requiresCandidateEmailCorrection({ code: "candidate_email_unconfirmed" }), true);
+  assert.equal(requiresCandidateEmailCorrection({ code: "email_not_configured" }), false);
 });
 
 test("loads every interview page in a requested calendar range", async () => {
@@ -155,6 +211,58 @@ test("gets one interview and propagates abort errors unchanged", async () => {
     () => createInterviewController({ client: queuedClient([abortError]).client }).get(INTERVIEW_ID),
     (error) => error === abortError,
   );
+});
+
+test("resends a failed candidate email with quoted delivery version and idempotency", async () => {
+  const deliveryId = "77777777-7777-4777-8777-777777777777";
+  const { client, calls } = queuedClient([{ data: {
+    id: "88888888-8888-4888-8888-888888888888",
+    recipient: "c*******e@example.com",
+    status: "queued",
+    version: 1,
+    safe_error_code: null,
+  } }]);
+  const controller = createInterviewController({ client, idempotencyKey: () => "resend-key" });
+  const signal = new AbortController().signal;
+
+  const resent = await controller.resendEmail({ id: INTERVIEW_ID, emailDelivery: { id: deliveryId, status: "failed", version: 5 } }, { signal });
+
+  assert.equal(resent.statusLabel, "待发送");
+  assert.deepEqual(calls, [{
+    kind: "request",
+    path: `/api/v1/email-deliveries/${deliveryId}/resend`,
+    options: { method: "POST", ifMatch: '"5"', idempotencyKey: "resend-key", signal },
+  }]);
+});
+
+test("resend failure remains a single request without an implicit retry", async () => {
+  const unavailable = Object.assign(new Error("unavailable"), { code: "service_unavailable", status: 503 });
+  const { client, calls } = queuedClient([unavailable]);
+  const controller = createInterviewController({ client, idempotencyKey: () => "resend-failure" });
+
+  await assert.rejects(
+    () => controller.resendEmail({ id: INTERVIEW_ID, emailDelivery: { id: "delivery", status: "failed", version: 2 } }),
+    unavailable,
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("resend version conflict refreshes the interview exactly once and never retries resend", async () => {
+  const conflict = Object.assign(new Error("stale"), { code: "resource_version_conflict", status: 409 });
+  const { client, calls } = queuedClient([
+    conflict,
+    { data: apiInterview({ email_delivery: { id: "latest-delivery", recipient: "c*******e@example.com", status: "sent", version: 7, safe_error_code: null } }) },
+  ]);
+  const controller = createInterviewController({ client, idempotencyKey: () => "stale-resend" });
+
+  await assert.rejects(
+    () => controller.resendEmail({ id: INTERVIEW_ID, emailDelivery: { id: "stale-delivery", status: "failed", version: 2 } }),
+    (error) => error === conflict && error.latestInterview?.emailDelivery?.status === "sent",
+  );
+  assert.deepEqual(calls.map((call) => call.path), [
+    "/api/v1/email-deliveries/stale-delivery/resend",
+    `/api/v1/interviews/${INTERVIEW_ID}`,
+  ]);
 });
 
 test("creates and reschedules interviews with idempotency and quoted versions", async () => {

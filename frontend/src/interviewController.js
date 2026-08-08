@@ -13,7 +13,16 @@ const API_TO_UI_STATUS = {
   cancelled: "已取消",
   no_show: "未到场",
 };
-const API_TO_UI_NOTIFICATION = { sent: "已发送", failed: "发送失败", not_sent: "待发送" };
+const API_TO_UI_NOTIFICATION = { sent: "已发送", failed: "发送失败", queued: "待发送", not_sent: "待发送" };
+const API_TO_UI_EMAIL_DELIVERY = { queued: "待发送", sending: "待发送", sent: "已发送", failed: "发送失败" };
+const EMAIL_DELIVERY_ERROR_TEXT = {
+  email_configuration_unavailable: "邮件服务配置不可用，请联系系统管理员。",
+  smtp_authentication_failed: "邮件服务认证失败，请联系系统管理员。",
+  smtp_recipient_rejected: "收件地址被邮件服务拒收，请先核对候选人邮箱。",
+  smtp_rejected: "邮件服务拒绝发送，请联系系统管理员。",
+  smtp_timeout: "邮件服务响应超时，可以稍后重新发送。",
+  smtp_unavailable: "邮件服务暂时不可用，可以稍后重新发送。",
+};
 const UI_TO_API_RATING = { "需提升": 1, "一般": 2, "良好": 3, "优秀": 4 };
 const API_TO_UI_RATING = { 1: "需提升", 2: "一般", 3: "良好", 4: "优秀" };
 const UI_TO_API_CONCLUSION = { "强烈推荐": "strong_recommend", "推荐": "recommend", "保留": "hold", "待补充评估": "hold", "不推荐": "no_hire" };
@@ -105,6 +114,39 @@ function normalizeParticipant(participant) {
   };
 }
 
+function maskedRecipient(value) {
+  const recipient = safeString(value).trim();
+  return recipient.length <= 254 && recipient.includes("@") && recipient.includes("*") && !/\s/.test(recipient)
+    ? recipient
+    : "收件人已隐藏";
+}
+
+export function normalizeEmailDelivery(value) {
+  const id = safeString(value?.id);
+  if (!id) return null;
+  const status = safeString(value?.status);
+  const safeErrorCode = safeString(value?.safe_error_code) || null;
+  return {
+    id,
+    recipient: maskedRecipient(value?.recipient),
+    status,
+    statusLabel: API_TO_UI_EMAIL_DELIVERY[status] || "待发送",
+    version: Number.isInteger(value?.version) ? value.version : null,
+    errorText: safeErrorCode ? EMAIL_DELIVERY_ERROR_TEXT[safeErrorCode] || "邮件发送失败，请联系系统管理员后重试。" : "",
+  };
+}
+
+export function getInterviewEmailActions(record, { canCorrect = false, canResend = false, correctionRequired = false } = {}) {
+  return {
+    correct: Boolean(canCorrect && correctionRequired && safeString(record?.candidateId)),
+    resend: Boolean(canResend && record?.emailDelivery?.status === "failed" && safeString(record.emailDelivery.id)),
+  };
+}
+
+export function requiresCandidateEmailCorrection(error) {
+  return error?.code === "candidate_email_unconfirmed";
+}
+
 export function normalizeInterview(value) {
   const id = safeString(value?.id);
   if (!id) return null;
@@ -112,6 +154,7 @@ export function normalizeInterview(value) {
   const timezone = safeString(value?.timezone, "Asia/Shanghai");
   const { date, time } = dateParts(value?.starts_at, timezone);
   const candidateTitle = safeString(value?.candidate?.current_title);
+  const feishuNotification = API_TO_UI_NOTIFICATION[value?.notification_status] || "待发送";
   return {
     id,
     serverBacked: true,
@@ -135,7 +178,9 @@ export function normalizeInterview(value) {
     participants,
     location: safeString(value?.meeting_url) || safeString(value?.location, "未填写"),
     status: API_TO_UI_STATUS[value?.status] || "未知状态",
-    notification: API_TO_UI_NOTIFICATION[value?.notification_status] || "待发送",
+    notification: feishuNotification,
+    feishuNotification,
+    emailDelivery: normalizeEmailDelivery(value?.email_delivery),
     feedbackStatus: feedbackStatus(value?.status),
     owner: participants[0]?.name || "未分配",
     version: Number.isInteger(value?.version) ? value.version : null,
@@ -426,6 +471,23 @@ export function createInterviewController({ client = apiClient, idempotencyKey =
     return normalizeInterview(response?.data);
   }
 
+  async function resendEmail(record, { signal } = {}) {
+    const interviewId = requireId(record?.id, "INTERVIEW_ID_REQUIRED");
+    const deliveryId = requireId(record?.emailDelivery?.id, "EMAIL_DELIVERY_ID_REQUIRED");
+    const version = requireVersion(record?.emailDelivery?.version, "EMAIL_DELIVERY_VERSION_REQUIRED");
+    try {
+      const response = await client.request(`/api/v1/email-deliveries/${deliveryId}/resend`, {
+        method: "POST", ifMatch: quotedVersion(version), idempotencyKey: idempotencyKey(), ...signalOption(signal),
+      });
+      return normalizeEmailDelivery(response?.data);
+    } catch (error) {
+      if (error?.code === "resource_version_conflict") {
+        error.latestInterview = await get(interviewId, { signal });
+      }
+      throw error;
+    }
+  }
+
   async function downloadCalendar(interviewId, { signal } = {}) {
     const id = requireId(interviewId, "INTERVIEW_ID_REQUIRED");
     return client.download(`/api/v1/interviews/${id}/calendar-file`, signalOption(signal));
@@ -507,7 +569,7 @@ export function createInterviewController({ client = apiClient, idempotencyKey =
     return normalizeMaterials(response?.data);
   }
 
-  return { list, listRange, availability, get, save, checkConflicts, transition, downloadCalendar, getResumeFile, downloadResumeFile, getMyFeedback, saveMyFeedback, submitMyFeedback, amendFeedback, listMyTasks, listParticipantOptions, listFeedbacks, getMaterials };
+  return { list, listRange, availability, get, save, checkConflicts, transition, resendEmail, downloadCalendar, getResumeFile, downloadResumeFile, getMyFeedback, saveMyFeedback, submitMyFeedback, amendFeedback, listMyTasks, listParticipantOptions, listFeedbacks, getMaterials };
 }
 
 export const interviewController = createInterviewController();
