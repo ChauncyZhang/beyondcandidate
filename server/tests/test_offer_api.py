@@ -82,19 +82,47 @@ def test_offer_lifecycle_is_idempotent_versioned_and_never_auto_sends(tmp_path) 
         with app.state.identity_store.sync_session() as db:
             approval_id = str(db.scalar(select(OfferApproval.id).where(OfferApproval.offer_id == UUID(offer_id))))
         denied = client.post(f"/api/v1/offer-approvals/{approval_id}/decisions", json={"decision": "approved"}, headers={**login(client, seed["viewer"]), "Idempotency-Key": "not-assignee", "If-Match": '"2"'})
+        approver_offer = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["approver"]))
+        pending = client.get("/api/v1/offer-approvals/pending", headers=login(client, seed["approver"]))
         approved = client.post(f"/api/v1/offer-approvals/{approval_id}/decisions", json={"decision": "approved"}, headers={**login(client, seed["approver"]), "Idempotency-Key": "approve", "If-Match": '"2"'})
+        history = client.get(f"/api/v1/offers/{offer_id}/history", headers=login(client, seed["approver"]))
         redacted = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["viewer"]))
         send = client.post(f"/api/v1/offers/{offer_id}/send", headers={**login(client, seed["admin"]), "Idempotency-Key": "send", "If-Match": '"3"'})
 
     assert missing.status_code == 428
     assert submitted.status_code == 200
     assert denied.status_code == 404
+    assert approver_offer.status_code == 200
+    assert approver_offer.json()["data"]["content"] == {"compensation": "100000"}
+    assert approver_offer.json()["data"]["can_view_sensitive_content"] is True
+    pending_item = pending.json()["data"][0]
+    assert pending_item["candidate_response_deadline"].startswith("2099-08-20T00:00:00")
+    assert [{key: value for key, value in item.items() if key != "candidate_response_deadline"} for item in pending.json()["data"]] == [{
+        "id": approval_id,
+        "offer_id": offer_id,
+        "application_id": seed["application_id"],
+        "candidate_id": pending.json()["data"][0]["candidate_id"],
+        "candidate_name": "Candidate",
+        "job_id": pending.json()["data"][0]["job_id"],
+        "job_title": "Offer role",
+        "offer_status": "pending_approval",
+        "offer_version": 2,
+        "sequence": 1,
+        "round_number": 1,
+        "version_number": 1,
+    }]
     assert approved.status_code == 200
     assert approved.json()["data"]["status"] == "ready_to_send"
+    assert len(history.json()["data"]["versions"]) == 1
+    assert history.json()["data"]["versions"][0]["content"] == {"compensation": "100000"}
+    assert history.json()["data"]["approvals"][0]["status"] == "approved"
+    assert [event["event_type"] for event in history.json()["data"]["events"]] == [
+        "offer.created", "offer.submitted", "offer.approval_approved"
+    ]
     assert redacted.json()["data"]["content"] == {"redacted": True}
     assert send.status_code == 409
     assert send.json()["code"] == "offer_not_ready_to_send"
-    for response in (created, replay, missing, submitted, denied, approved, redacted, send):
+    for response in (created, replay, missing, submitted, denied, approver_offer, pending, approved, history, redacted, send):
         assert response.headers["Cache-Control"] == "no-store"
 
 

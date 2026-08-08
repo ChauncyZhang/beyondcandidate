@@ -1,9 +1,10 @@
+import hashlib
 import re
 from uuid import UUID
 
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 
 from server.app.identity.api import problem
 from server.app.identity.models import AuditLog, Job
@@ -21,7 +22,7 @@ from server.app.offers.service import (
 )
 from server.app.recruiting.api import _idempotency, _principal
 from server.app.recruiting.authorization import RecruitingAction, RecruitingAuthorizationService
-from server.app.recruiting.models import Application
+from server.app.recruiting.models import Application, Candidate
 from server.app.recruiting.service import IdempotencyConflict, persisted_idempotent
 from server.app.recruiting.service import is_eligible_offer_approver
 from server.app.communications.interview_messages import CandidateEmailUnavailable, resolve_confirmed_candidate_email
@@ -69,9 +70,17 @@ def _application(db, principal, application_id, action=RecruitingAction.READ):
 
 
 def _offer(db, principal, offer_id, action=RecruitingAction.READ):
+    job_scope = AUTH.job_predicate(principal, action, Job)
+    if action == RecruitingAction.READ:
+        approval_scope = exists().where(
+            OfferApproval.organization_id == Offer.organization_id,
+            OfferApproval.offer_id == Offer.id,
+            OfferApproval.assignee_id == principal.user_id,
+        )
+        job_scope = or_(job_scope, approval_scope)
     return db.scalar(select(Offer).join(Job, (Job.organization_id == Offer.organization_id) & (Job.id == Offer.job_id)).where(
         Offer.organization_id == principal.organization_id, Offer.id == offer_id,
-        AUTH.job_predicate(principal, action, Job),
+        job_scope,
     ))
 
 
@@ -88,17 +97,27 @@ def _can_manage(db, principal, offer):
     )) is not None
 
 
+def _is_approval_participant(db, principal, offer):
+    return db.scalar(select(OfferApproval.id).where(
+        OfferApproval.organization_id == offer.organization_id,
+        OfferApproval.offer_id == offer.id,
+        OfferApproval.assignee_id == principal.user_id,
+    ).limit(1)) is not None
+
+
 def _offer_view(db, offer, principal):
     current = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == offer.organization_id, OfferVersion.id == offer.current_version_id))
     can_manage = _can_manage(db, principal, offer)
+    can_view_sensitive = can_manage or _is_approval_participant(db, principal, offer)
     is_assignee = db.scalar(select(OfferApproval.id).where(OfferApproval.organization_id == offer.organization_id, OfferApproval.offer_id == offer.id, OfferApproval.assignee_id == principal.user_id, OfferApproval.status == "pending")) is not None
-    content = current.content if can_manage else {"redacted": True}
+    content = current.content if current and can_view_sensitive else {"redacted": True}
     return {
         "id": str(offer.id), "application_id": str(offer.application_id), "job_id": str(offer.job_id),
         "status": offer.status, "version": offer.version, "current_version_id": str(offer.current_version_id),
         "current_version_number": current.version_number if current else None,
         "candidate_response_deadline": offer.candidate_response_deadline.isoformat(), "is_special": offer.is_special,
-        "special_reason": offer.special_reason if can_manage else None, "content": content,
+        "special_reason": offer.special_reason if can_view_sensitive else None, "content": content,
+        "can_view_sensitive_content": can_view_sensitive,
         "pdf_ready": bool(current and current.pdf_object_key),
         "allowed_actions": {
             "update": can_manage and offer.status in {"draft", "changes_requested", "ready_to_send", "sent"},
@@ -131,9 +150,8 @@ def _template_view(template):
 
 
 def _special_version(rows):
-    if not rows:
-        return 0
-    return max(int(row.updated_at.timestamp() * 1_000_000) for row in rows)
+    canonical = ",".join(str(row.approver_id) for row in sorted(rows, key=lambda item: item.position))
+    return int(hashlib.sha256(canonical.encode("ascii")).hexdigest()[:15], 16) if canonical else 0
 
 
 def _audit_setting(db, principal, request, event_type, resource_type, resource_id, metadata):
@@ -221,9 +239,40 @@ def offer_history(offer_id: UUID, request: Request):
     with request.app.state.identity_store.sync_session() as db:
         offer = _offer(db, principal, offer_id)
         if offer is None: return _error(request, 404, "resource_not_found")
+        versions = db.scalars(select(OfferVersion).where(OfferVersion.organization_id == principal.organization_id, OfferVersion.offer_id == offer_id).order_by(OfferVersion.version_number)).all()
+        approvals = db.scalars(select(OfferApproval).where(OfferApproval.organization_id == principal.organization_id, OfferApproval.offer_id == offer_id).order_by(OfferApproval.round_number, OfferApproval.sequence)).all()
         events = db.scalars(select(OfferEvent).where(OfferEvent.organization_id == principal.organization_id, OfferEvent.offer_id == offer_id).order_by(OfferEvent.created_at, OfferEvent.id)).all()
-        can_manage = _can_manage(db, principal, offer)
-        return _response([{"id": str(event.id), "event_type": event.event_type, "created_at": event.created_at.isoformat(), "payload": event.payload if can_manage else {}} for event in events])
+        can_view_sensitive = _can_manage(db, principal, offer) or _is_approval_participant(db, principal, offer)
+        return _response({
+            "versions": [{
+                "id": str(version.id),
+                "version_number": version.version_number,
+                "content": version.content if can_view_sensitive else {"redacted": True},
+                "template_id": str(version.template_id) if version.template_id else None,
+                "candidate_response_deadline": version.candidate_response_deadline.isoformat(),
+                "is_special": version.is_special,
+                "special_reason": version.special_reason if can_view_sensitive else None,
+                "submitted_at": version.submitted_at.isoformat() if version.submitted_at else None,
+                "pdf_ready": bool(version.pdf_object_key),
+                "created_at": version.created_at.isoformat(),
+            } for version in versions],
+            "approvals": [{
+                "id": str(approval.id),
+                "version_number": approval.version_number,
+                "round_number": approval.round_number,
+                "sequence": approval.sequence,
+                "assignee_id": str(approval.assignee_id),
+                "status": approval.status,
+                "reason": approval.reason if can_view_sensitive else None,
+                "decided_at": approval.decided_at.isoformat() if approval.decided_at else None,
+            } for approval in approvals] if can_view_sensitive else [],
+            "events": [{
+                "id": str(event.id),
+                "event_type": event.event_type,
+                "created_at": event.created_at.isoformat(),
+                "payload": event.payload if can_view_sensitive else {},
+            } for event in events],
+        })
 
 
 @router.get("/api/v1/offer-approvals/pending")
@@ -231,8 +280,34 @@ def pending_approvals(request: Request):
     principal = _principal(request)
     if isinstance(principal, JSONResponse): return principal
     with request.app.state.identity_store.sync_session() as db:
-        rows = db.scalars(select(OfferApproval).where(OfferApproval.organization_id == principal.organization_id, OfferApproval.assignee_id == principal.user_id, OfferApproval.status == "pending").order_by(OfferApproval.created_at)).all()
-        return _response([{"id": str(row.id), "offer_id": str(row.offer_id), "sequence": row.sequence, "round_number": row.round_number, "version_number": row.version_number} for row in rows])
+        rows = db.execute(
+            select(OfferApproval, Offer, Application, Job, Candidate)
+            .join(Offer, (Offer.organization_id == OfferApproval.organization_id) & (Offer.id == OfferApproval.offer_id))
+            .join(Application, (Application.organization_id == Offer.organization_id) & (Application.id == Offer.application_id))
+            .join(Job, (Job.organization_id == Offer.organization_id) & (Job.id == Offer.job_id))
+            .join(Candidate, (Candidate.organization_id == Application.organization_id) & (Candidate.id == Application.candidate_id))
+            .where(
+                OfferApproval.organization_id == principal.organization_id,
+                OfferApproval.assignee_id == principal.user_id,
+                OfferApproval.status == "pending",
+            )
+            .order_by(OfferApproval.created_at)
+        ).all()
+        return _response([{
+            "id": str(approval.id),
+            "offer_id": str(offer.id),
+            "application_id": str(application.id),
+            "candidate_id": str(candidate.id),
+            "candidate_name": candidate.display_name,
+            "job_id": str(job.id),
+            "job_title": job.title,
+            "offer_status": offer.status,
+            "offer_version": offer.version,
+            "candidate_response_deadline": offer.candidate_response_deadline.isoformat(),
+            "sequence": approval.sequence,
+            "round_number": approval.round_number,
+            "version_number": approval.version_number,
+        } for approval, offer, application, job, candidate in rows])
 
 
 @router.post("/api/v1/offers/{offer_id}/send")
