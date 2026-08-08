@@ -147,7 +147,7 @@ class OfferResponse(OfferRecord, Base):
         UniqueConstraint("organization_id", "id"),
         UniqueConstraint("organization_id", "offer_id"),
         CheckConstraint("status in ('accepted','declined')", name="ck_offer_responses_status"),
-        CheckConstraint("(status = 'accepted' and expected_start_date is not null and reason_text is null) or (status = 'declined' and expected_start_date is null)", name="ck_offer_responses_payload"),
+        CheckConstraint("(offer_version_id is null and expected_start_date is null and reason_text is null and request_hash is null) or (status = 'accepted' and offer_version_id is not null and expected_start_date is not null and reason_text is null and request_hash is not null) or (status = 'declined' and offer_version_id is not null and expected_start_date is null and request_hash is not null)", name="ck_offer_responses_payload"),
         ForeignKeyConstraint(["organization_id", "offer_id"], ["offers.organization_id", "offers.id"], ondelete="CASCADE"),
         ForeignKeyConstraint(["organization_id", "offer_version_id", "offer_id"], ["offer_versions.organization_id", "offer_versions.id", "offer_versions.offer_id"]),
     )

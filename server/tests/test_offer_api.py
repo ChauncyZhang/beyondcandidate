@@ -50,6 +50,21 @@ def test_offer_api_registers_internal_routes_and_marks_responses_no_store(tmp_pa
     assert template_response.headers["Cache-Control"] == "no-store"
 
 
+def test_public_offer_routes_are_unauthenticated_but_generic_and_non_cacheable(tmp_path) -> None:
+    app = make_app(tmp_path)
+    token = "x" * 43
+    with TestClient(app) as client:
+        get_response = client.get(f"/api/public/v1/offers/{token}")
+        pdf_response = client.get(f"/api/public/v1/offers/{token}/pdf")
+        response_post = client.post(f"/api/public/v1/offers/{token}/responses", json={"decision": "declined"}, headers={"Origin": "https://evil.example.test"})
+    for response in (get_response, pdf_response, response_post):
+        assert response.status_code == 404
+        assert response.json()["code"] == "offer_link_invalid"
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Referrer-Policy"] == "no-referrer"
+        assert "default-src 'none'" in response.headers["Content-Security-Policy"]
+
+
 def seed_offer_application(app):
     admin_id = seed_user(app, "recruiting_admin", "offer-admin@example.test")
     approver_id = seed_user(app, "hiring_manager", "offer-approver@example.test")

@@ -31,6 +31,10 @@ REVISION_SOURCE_STATUSES = {"draft", "changes_requested", "ready_to_send", "sent
 PDF_RECEIPT_FIELDS = ("pdf_object_key", "pdf_sha256", "pdf_size_bytes", "pdf_rendered_at")
 
 
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
 class OfferTokenCodec:
     """A purpose-separated deterministic 256-bit public capability codec."""
     def __init__(self, secret: bytes):
@@ -69,7 +73,7 @@ def public_offer_access(db, raw_token: str, *, codec: OfferTokenCodec, now: date
     digest = hashlib.sha256(raw_token.encode("ascii")).hexdigest()
     query = select(OfferAccessToken).where(OfferAccessToken.token_hash == digest)
     token = db.scalar(query.with_for_update() if lock else query)
-    if token is None or not codec.matches(token, raw_token) or (token.revoked_at is not None and not allow_revoked) or token.expires_at <= now:
+    if token is None or not codec.matches(token, raw_token) or (token.revoked_at is not None and not allow_revoked) or _utc(token.expires_at) <= _utc(now):
         raise OfferNotFound
     offer = db.scalar(select(Offer).where(Offer.organization_id == token.organization_id, Offer.id == token.offer_id).with_for_update())
     version = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == token.organization_id, OfferVersion.id == token.offer_version_id, OfferVersion.offer_id == token.offer_id).with_for_update())

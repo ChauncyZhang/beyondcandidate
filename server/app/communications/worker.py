@@ -15,6 +15,11 @@ from server.app.queue.service import PermanentJobError, RetryableJobError
 logger = logging.getLogger(__name__)
 
 
+def _render_offer_link(body: str, token_id: uuid.UUID, codec, public_base_url: str) -> str:
+    """Materialize a capability only in the transient provider message."""
+    return body.replace("{{offer_public_link}}", f"{public_base_url.rstrip('/')}/api/public/v1/offers/{codec.raw_token(token_id)}")
+
+
 class EmailDeliveryJobHandler:
     def __init__(self, sessions, provider, cipher: EmailSecretCipher, *, offer_token_codec=None, offer_public_base_url: str | None = None, timeout_seconds: float = 10) -> None:
         self._sessions, self._provider, self._cipher = sessions, provider, cipher
@@ -70,8 +75,7 @@ class EmailDeliveryJobHandler:
                         if token is None or self._offer_token_codec is None or not self._offer_public_base_url:
                             mark_delivery_failed(db, delivery, "offer_link_unavailable"); setup_error = "offer_link_unavailable"
                         else:
-                            raw = self._offer_token_codec.raw_token(token.id)
-                            body = body.replace("{{offer_public_link}}", f"{self._offer_public_base_url.rstrip('/')}/api/public/v1/offers/{raw}")
+                            body = _render_offer_link(body, token.id, self._offer_token_codec, self._offer_public_base_url)
                     message = MailMessage(
                         recipient,
                         delivery.sender_email,

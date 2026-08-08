@@ -46,7 +46,7 @@ def upgrade() -> None:
     )
     op.execute("ALTER TABLE offers DROP CONSTRAINT ck_offers_status")
     op.create_check_constraint("ck_offers_status", "offers", "status in ('draft','pending_approval','changes_requested','ready_to_send','sent','accepted','declined','withdrawn','expired')")
-    op.create_check_constraint("ck_offer_responses_payload", "offer_responses", "(status = 'accepted' and expected_start_date is not null and reason_text is null) or (status = 'declined' and expected_start_date is null)")
+    op.create_check_constraint("ck_offer_responses_payload", "offer_responses", "(offer_version_id is null and expected_start_date is null and reason_text is null and request_hash is null) or (status = 'accepted' and offer_version_id is not null and expected_start_date is not null and reason_text is null and request_hash is not null) or (status = 'declined' and offer_version_id is not null and expected_start_date is null and request_hash is not null)")
     # Existing rows predate public response capabilities and remain readable; new rows are complete.
 
 

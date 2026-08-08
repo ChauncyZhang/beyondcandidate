@@ -15,6 +15,8 @@ from server.app.communications.provider import MailMessage, PermanentMailError, 
 from server.app.communications.security import EmailSecretCipher
 from server.app.communications.service import DeliveryCommand, DeliveryIdempotencyConflict, SenderPolicy, email_delivery_terminal_callback, enqueue_delivery, render_template
 from server.app.communications.worker import EmailDeliveryJobHandler
+from server.app.communications.worker import _render_offer_link
+from server.app.offers.service import OfferTokenCodec
 from server.app.identity.models import AuditLog, Base, Organization, User, UserRole
 from server.app.integrations.feishu.models import FeishuOrganizationConfig
 from server.app.interviews.models import Interview  # noqa: F401 - registers Feishu FK metadata
@@ -83,6 +85,16 @@ def test_email_cipher_separates_smtp_recipient_and_idempotency_purposes():
     assert first == cipher.fingerprint("email.config.test", {"recipient": "candidate@example.com"})
     assert first != cipher.fingerprint("email.delivery.request", {"recipient": "candidate@example.com"})
     assert "candidate" not in first
+
+
+def test_offer_capability_is_materialized_only_for_the_transient_worker_message():
+    token_id = uuid.uuid4()
+    codec = OfferTokenCodec(b"o" * 32)
+    stored_body = "Your secure offer link: {{offer_public_link}}"
+    transient_body = _render_offer_link(stored_body, token_id, codec, "https://careers.example.test")
+    raw = codec.raw_token(token_id)
+    assert raw not in stored_body
+    assert transient_body == f"Your secure offer link: https://careers.example.test/api/public/v1/offers/{raw}"
 
 
 def test_worker_retries_temporary_smtp_failure_without_marking_sent(tmp_path):
