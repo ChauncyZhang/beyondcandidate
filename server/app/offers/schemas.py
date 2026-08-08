@@ -67,3 +67,54 @@ class OfferVersionCommand(OfferSchema):
         if is_special is False:
             raise ValueError("special_reason is only allowed for special offers")
         return value
+
+
+class OfferApprovalDecision(OfferSchema):
+    decision: str
+    reason: str | None = None
+
+    @field_validator("decision")
+    @classmethod
+    def validate_decision(cls, value: str) -> str:
+        if value not in {"approved", "rejected"}:
+            raise ValueError("decision must be approved or rejected")
+        return value
+
+    @model_validator(mode="after")
+    def validate_reason(self):
+        if self.decision == "rejected" and not (self.reason and self.reason.strip()):
+            raise ValueError("reason is required when requesting changes")
+        self.reason = self.reason.strip() if self.reason else None
+        return self
+
+
+class OfferTemplateCommand(OfferSchema):
+    name: str = Field(min_length=1, max_length=200)
+    content: dict[str, Any] = Field(default_factory=dict)
+    status: str = "active"
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("name must not be blank")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        if value not in {"active", "inactive"}:
+            raise ValueError("status must be active or inactive")
+        return value
+
+
+class SpecialOfferApproversCommand(OfferSchema):
+    approver_ids: list[UUID] = Field(default_factory=list, max_length=50)
+
+    @field_validator("approver_ids")
+    @classmethod
+    def reject_duplicate_approvers(cls, value: list[UUID]) -> list[UUID]:
+        if len(set(value)) != len(value):
+            raise ValueError("approver_ids must not contain duplicates")
+        return value

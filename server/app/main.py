@@ -48,7 +48,7 @@ def _is_governance_path(path: str) -> bool:
 
 
 def _requires_no_store(path: str) -> bool:
-    return _is_governance_path(path) or path.startswith("/api/v1/email-deliveries") or path.startswith("/api/v1/email-templates") or path.startswith("/api/v1/notifications/") or path.startswith("/api/v1/auth/feishu") or path == "/api/v1/settings" or path.startswith(
+    return _is_governance_path(path) or path.startswith("/api/v1/offers") or path.startswith("/api/v1/offer-approvals") or path.startswith("/api/v1/email-deliveries") or path.startswith("/api/v1/email-templates") or path.startswith("/api/v1/notifications/") or path.startswith("/api/v1/auth/feishu") or path == "/api/v1/settings" or path.startswith(
         "/api/v1/settings/"
     )
 
@@ -197,6 +197,8 @@ def create_app(
     app.include_router(feishu_router)
     from server.app.communications.api import router as communications_router
     app.include_router(communications_router)
+    from server.app.offers.api import router as offers_router
+    app.include_router(offers_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_problem(request: Request, _: RequestValidationError):
