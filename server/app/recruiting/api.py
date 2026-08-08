@@ -1616,6 +1616,7 @@ def confirm_candidate_email(candidate_id: UUID, payload: CandidateEmailConfirmat
             protected = request.app.state.contact_cipher.protect("email", payload.value)
 
             def action():
+                lock_active_candidate(db, principal.organization_id, candidate_id)
                 current = _primary_email_contact(db, principal.organization_id, candidate_id, lock=True)
                 current_version = current.version if current else 1
                 if current_version != expected:
@@ -1627,15 +1628,11 @@ def confirm_candidate_email(candidate_id: UUID, payload: CandidateEmailConfirmat
                 ))
                 if matching is not None and matching.candidate_id != candidate_id:
                     raise CandidateEmailConflict
-                contact = matching or current
-                if contact is None:
-                    contact = CandidateContact(organization_id=principal.organization_id, candidate_id=candidate_id, kind="email", ciphertext=protected.ciphertext, lookup_hash=protected.lookup_hash, masked_value=protected.masked_value, source="manual", confirmation_status="confirmed", confirmed_by=principal.user_id, confirmed_at=datetime.now(timezone.utc), version=2)
+                if matching is None:
+                    contact = CandidateContact(organization_id=principal.organization_id, candidate_id=candidate_id, kind="email", ciphertext=protected.ciphertext, lookup_hash=protected.lookup_hash, masked_value=protected.masked_value, source="manual", confirmation_status="confirmed", confirmed_by=principal.user_id, confirmed_at=datetime.now(timezone.utc), version=current_version + 1)
                     db.add(contact)
                 else:
-                    contact.ciphertext = protected.ciphertext
-                    contact.lookup_hash = protected.lookup_hash
-                    contact.masked_value = protected.masked_value
-                    contact.source = "manual"
+                    contact = matching
                     contact.confirmation_status = "confirmed"
                     contact.confirmed_by = principal.user_id
                     contact.confirmed_at = datetime.now(timezone.utc)

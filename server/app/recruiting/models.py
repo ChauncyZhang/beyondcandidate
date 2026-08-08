@@ -45,7 +45,7 @@ class CandidateContact(Record, Base):
         UniqueConstraint("organization_id", "kind", "lookup_hash"),
         ForeignKeyConstraint(["organization_id", "candidate_id"], ["candidates.organization_id", "candidates.id"], ondelete="CASCADE"),
         ForeignKeyConstraint(["organization_id", "confirmed_by"], ["users.organization_id", "users.id"]),
-        CheckConstraint("source in ('legacy','manual','extracted')", name="ck_candidate_contacts_source"),
+        CheckConstraint("source in ('legacy','manual','native','ocr')", name="ck_candidate_contacts_source"),
         CheckConstraint("confirmation_status in ('unconfirmed','confirmed')", name="ck_candidate_contacts_confirmation_status"),
     )
 

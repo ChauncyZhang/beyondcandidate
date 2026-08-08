@@ -40,6 +40,10 @@ def test_0030_backfills_existing_candidate_contacts_as_legacy_unconfirmed() -> N
         assert connection.execute(text("SELECT source,confirmation_status,confirmed_by,confirmed_at,version FROM candidate_contacts WHERE id=:contact"), ids).one() == ("legacy", "unconfirmed", None, None, 1)
         constraints = {item["name"] for item in inspect(engine).get_check_constraints("candidate_contacts")}
         assert {"ck_candidate_contacts_source", "ck_candidate_contacts_confirmation_status"} <= constraints
+        for source in ("legacy", "manual", "native", "ocr"):
+            connection.execute(text("UPDATE candidate_contacts SET source=:source WHERE id=:contact"), {**ids, "source": source})
+        with pytest.raises(IntegrityError):
+            connection.execute(text("UPDATE candidate_contacts SET source='extracted' WHERE id=:contact"), ids)
     engine.dispose()
 
 

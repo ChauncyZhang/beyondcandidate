@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event, func, select
+from sqlalchemy.exc import IntegrityError
 
 from server.app.core.settings import Settings
 from server.app.identity.models import Department, Organization, User, UserRole, UserStatus, Job, JobCollaborator
@@ -442,11 +443,85 @@ def test_candidate_email_confirmation_is_hr_only_audited_no_store_and_idempotent
         assert "candidate@example.com" not in client.get(f"/api/v1/candidates/{candidate_id}", headers=admin_headers).text
 
     with app.state.identity_store.sync_session() as db:
-        contact = db.query(CandidateContact).filter_by(candidate_id=UUID(candidate_id), kind="email").one()
+        contacts = db.query(CandidateContact).filter_by(candidate_id=UUID(candidate_id), kind="email").all()
+        assert len(contacts) == 2
+        contact = next(contact for contact in contacts if contact.confirmation_status == "confirmed")
         assert contact.ciphertext != b"candidate@example.com"
         assert db.query(AuditLog).filter_by(event_type="candidate.email_read").count() == 1
         assert db.query(AuditLog).filter_by(event_type="candidate.email_confirmed").count() == 1
         assert db.query(IdempotencyRecord).filter_by(operation=f"candidate.email_confirm:{candidate_id}").count() == 1
+
+
+def test_candidate_contact_sources_are_exactly_the_supported_provenance_values(tmp_path) -> None:
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "email-source-admin@example.test")
+    with app.state.identity_store.sync_session() as db:
+        admin = db.get(User, admin_id)
+        candidate = Candidate(organization_id=admin.organization_id, display_name="Source candidate")
+        db.add(candidate); db.flush()
+        for index, source in enumerate(("legacy", "manual", "native", "ocr")):
+            protected = app.state.contact_cipher.protect("email", f"source-{index}@example.com")
+            db.add(CandidateContact(organization_id=admin.organization_id, candidate_id=candidate.id, kind="email", ciphertext=protected.ciphertext, lookup_hash=protected.lookup_hash, masked_value=protected.masked_value, source=source))
+        db.flush()
+        protected = app.state.contact_cipher.protect("email", "unsupported-source@example.com")
+        with pytest.raises(IntegrityError):
+            with db.begin_nested():
+                db.add(CandidateContact(organization_id=admin.organization_id, candidate_id=candidate.id, kind="email", ciphertext=protected.ciphertext, lookup_hash=protected.lookup_hash, masked_value=protected.masked_value, source="extracted"))
+                db.flush()
+
+
+def test_candidate_email_confirmation_appends_and_preserves_existing_provenance(tmp_path) -> None:
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "email-history-admin@example.test")
+    with TestClient(app) as client:
+        headers = login(client, "email-history-admin@example.test")
+        candidate = client.post("/api/v1/candidates", json={"display_name": "History candidate", "contacts": [{"kind": "email", "value": "original@example.com"}]}, headers=headers)
+        candidate_id = candidate.json()["data"]["id"]
+        with app.state.identity_store.sync_session() as db:
+            protected = app.state.contact_cipher.protect("email", "native@example.com")
+            db.add(CandidateContact(organization_id=db.get(User, admin_id).organization_id, candidate_id=UUID(candidate_id), kind="email", ciphertext=protected.ciphertext, lookup_hash=protected.lookup_hash, masked_value=protected.masked_value, source="native", confirmation_status="unconfirmed", version=1))
+            db.commit()
+
+        selected = client.put(f"/api/v1/candidates/{candidate_id}/email", json={"value": "native@example.com"}, headers={**headers, "If-Match": '"1"', "Idempotency-Key": "confirm-native"})
+        appended = client.put(f"/api/v1/candidates/{candidate_id}/email", json={"value": "manual@example.com"}, headers={**headers, "If-Match": '"2"', "Idempotency-Key": "append-manual"})
+        assert selected.status_code == appended.status_code == 200
+        assert selected.json()["data"]["source"] == "native"
+        assert appended.json()["data"]["source"] == "manual"
+        assert appended.json()["data"]["value"] == "manual@example.com"
+
+    with app.state.identity_store.sync_session() as db:
+        contacts = db.query(CandidateContact).filter_by(candidate_id=UUID(candidate_id), kind="email").order_by(CandidateContact.created_at).all()
+        assert len(contacts) == 3
+        assert [(contact.source, contact.confirmation_status) for contact in contacts] == [("manual", "unconfirmed"), ("native", "confirmed"), ("manual", "confirmed")]
+        assert app.state.contact_cipher.decrypt(contacts[0].ciphertext) == "original@example.com"
+        assert app.state.contact_cipher.decrypt(contacts[1].ciphertext) == "native@example.com"
+        assert app.state.contact_cipher.decrypt(contacts[2].ciphertext) == "manual@example.com"
+
+
+def test_candidate_email_confirmation_locks_candidate_before_reading_empty_contact_set(tmp_path, monkeypatch) -> None:
+    app = make_app(tmp_path)
+    seed_user(app, "recruiting_admin", "email-lock-admin@example.test")
+    events = []
+    original_lock = recruiting_api.lock_active_candidate
+    original_primary = recruiting_api._primary_email_contact
+
+    def lock(db, organization_id, candidate_id):
+        events.append("candidate_lock")
+        return original_lock(db, organization_id, candidate_id)
+
+    def primary(db, organization_id, candidate_id, **kwargs):
+        events.append("contact_read")
+        assert events.index("candidate_lock") < events.index("contact_read")
+        return original_primary(db, organization_id, candidate_id, **kwargs)
+
+    monkeypatch.setattr(recruiting_api, "lock_active_candidate", lock)
+    monkeypatch.setattr(recruiting_api, "_primary_email_contact", primary)
+    with TestClient(app) as client:
+        headers = login(client, "email-lock-admin@example.test")
+        candidate = client.post("/api/v1/candidates", json={"display_name": "No email candidate"}, headers=headers)
+        response = client.put(f"/api/v1/candidates/{candidate.json()['data']['id']}/email", json={"value": "first@example.com"}, headers={**headers, "If-Match": '"1"', "Idempotency-Key": "first-email"})
+    assert response.status_code == 200
+    assert events[:2] == ["candidate_lock", "contact_read"]
 
 
 def test_candidate_application_detail_includes_open_review_task_assignee(tmp_path) -> None:

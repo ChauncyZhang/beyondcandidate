@@ -21,7 +21,7 @@ def upgrade() -> None:
     op.alter_column("candidate_contacts", "confirmation_status", nullable=False, server_default="unconfirmed")
     op.alter_column("candidate_contacts", "version", nullable=False, server_default="1")
     op.create_foreign_key("fk_candidate_contacts_tenant_confirmer", "candidate_contacts", "users", ["organization_id", "confirmed_by"], ["organization_id", "id"])
-    op.create_check_constraint("ck_candidate_contacts_source", "candidate_contacts", "source in ('legacy','manual','extracted')")
+    op.create_check_constraint("ck_candidate_contacts_source", "candidate_contacts", "source in ('legacy','manual','native','ocr')")
     op.create_check_constraint("ck_candidate_contacts_confirmation_status", "candidate_contacts", "confirmation_status in ('unconfirmed','confirmed')")
 
 
