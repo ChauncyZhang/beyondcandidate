@@ -40,6 +40,9 @@ class DeliveryCommand:
     template_version: int | None = None
     parent_delivery_id: uuid.UUID | None = None
     trace_id: str | None = None
+    attachment_filename: str | None = None
+    attachment_content_type: str | None = None
+    attachment_content: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,15 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
         db.execute(text("select pg_advisory_xact_lock(hashtextextended(:scope, 0))"), {"scope": f"email-delivery:{command.organization_id}:{business_dedupe_key}"})
     if (command.reply_to_email is None) != (command.reply_to_name is None):
         raise ValueError("reply_to_pair_required")
+    attachment_values = (
+        command.attachment_filename,
+        command.attachment_content_type,
+        command.attachment_content,
+    )
+    if any(value is not None for value in attachment_values) and not all(
+        value is not None for value in attachment_values
+    ):
+        raise ValueError("attachment_triplet_required")
 
     def fingerprint(reply_to_email: str, reply_to_name: str) -> str:
         return cipher.fingerprint("delivery-request", {
@@ -98,6 +110,9 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
             "template_id": str(command.template_id) if command.template_id else None,
             "template_version": command.template_version, "parent_delivery_id": str(command.parent_delivery_id) if command.parent_delivery_id else None,
             "sender_email": sender_policy.email, "sender_name": sender_policy.name,
+            "attachment_filename": command.attachment_filename,
+            "attachment_content_type": command.attachment_content_type,
+            "attachment_content": command.attachment_content.hex() if command.attachment_content is not None else None,
         })
 
     existing = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == command.organization_id, EmailDelivery.business_dedupe_key == business_dedupe_key))
@@ -122,6 +137,9 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
         sender_email=sender, sender_name=_safe_header(sender_policy.name), reply_to_email=reply_to,
         reply_to_name=_safe_header(reply_to_name), rendered_subject=_safe_header(command.subject),
         rendered_body=command.body, resource_type=command.resource_type, resource_id=command.resource_id,
+        attachment_filename=_safe_header(command.attachment_filename) if command.attachment_filename else None,
+        attachment_content_type=_safe_header(command.attachment_content_type) if command.attachment_content_type else None,
+        attachment_content=command.attachment_content,
         business_dedupe_key=business_dedupe_key, request_fingerprint=request_fingerprint,
         parent_delivery_id=command.parent_delivery_id, created_by=command.created_by, status="queued", version=1,
     )

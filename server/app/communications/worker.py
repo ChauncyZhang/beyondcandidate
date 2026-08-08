@@ -57,7 +57,19 @@ class EmailDeliveryJobHandler:
                 else:
                     delivery.attempts += 1
                     delivery.version += 1
-                    message = MailMessage(recipient, delivery.sender_email, delivery.sender_name, delivery.reply_to_email, delivery.reply_to_name, delivery.rendered_subject, delivery.rendered_body, f"<email-{delivery.id}@beyondcandidate.internal>")
+                    message = MailMessage(
+                        recipient,
+                        delivery.sender_email,
+                        delivery.sender_name,
+                        delivery.reply_to_email,
+                        delivery.reply_to_name,
+                        delivery.rendered_subject,
+                        delivery.rendered_body,
+                        f"<email-{delivery.id}@beyondcandidate.internal>",
+                        delivery.attachment_filename,
+                        delivery.attachment_content_type,
+                        delivery.attachment_content,
+                    )
                     provider = self._provider or SmtpMailProvider(host=config.host, port=config.port, tls_mode=config.tls_mode, username=config.username, password=password, timeout_seconds=self._timeout)
 
         if setup_error is not None:

@@ -90,12 +90,19 @@ def test_worker_retries_temporary_smtp_failure_without_marking_sent(tmp_path):
 
 def test_worker_uses_fixed_sender_hr_reply_to_and_immutable_snapshots(tmp_path):
     sessions, cipher, delivery_id, job = delivery_store(tmp_path)
+    with sessions.begin() as db:
+        stored = db.get(EmailDelivery, delivery_id)
+        stored.attachment_filename = "interview.ics"
+        stored.attachment_content_type = "text/calendar"
+        stored.attachment_content = b"BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n"
     provider = FakeMailProvider()
     asyncio.run(EmailDeliveryJobHandler(sessions, provider, cipher)(job))
     message = provider.messages[0]
     assert (message.sender_email, message.sender_name) == ("careers@example.com", "BeyondCandidate")
     assert (message.reply_to_email, message.reply_to_name) == ("hr@example.com", "Responsible HR")
     assert (message.recipient, message.subject, message.body) == ("candidate@example.com", "Interview invitation", "Hello Candidate")
+    assert (message.attachment_filename, message.attachment_content_type) == ("interview.ics", "text/calendar")
+    assert message.attachment_content.startswith(b"BEGIN:VCALENDAR\r\n")
     assert message.message_id == f"<email-{delivery_id}@beyondcandidate.internal>"
     with sessions() as db:
         stored = db.get(EmailDelivery, delivery_id)
@@ -269,13 +276,22 @@ def test_smtp_provider_keeps_certificate_verification_and_receipt_opaque(monkeyp
     async def smtp_send(message, **kwargs):
         captured.update(kwargs)
         captured["message_id"] = message["Message-ID"]
+        captured["attachments"] = [
+            (part.get_content_type(), part.get_filename()) for part in message.iter_attachments()
+        ]
         return ({"candidate@example.com": "250 accepted"}, "queued as private-provider-detail")
     monkeypatch.setattr("server.app.communications.provider.aiosmtplib.send", smtp_send)
     provider = SmtpMailProvider(host="smtp.example.com", port=587, tls_mode="starttls", username="mailer", password="private")
-    receipt = asyncio.run(provider.send(MailMessage("candidate@example.com", "careers@example.com", "BeyondCandidate", "hr@example.com", "HR", "Subject", "Body", "<email-test@beyondcandidate.internal>")))
+    receipt = asyncio.run(provider.send(MailMessage(
+        "candidate@example.com", "careers@example.com", "BeyondCandidate",
+        "hr@example.com", "HR", "Subject", "Body",
+        "<email-test@beyondcandidate.internal>", "interview.ics", "text/calendar",
+        b"BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n",
+    )))
     assert captured["start_tls"] is True and captured["use_tls"] is False
     assert captured.get("validate_certs", True) is True
     assert captured["message_id"] == "<email-test@beyondcandidate.internal>"
+    assert captured["attachments"] == [("text/calendar", "interview.ics")]
     assert "candidate@example.com" not in receipt.receipt_id
     assert "private-provider-detail" not in receipt.receipt_id
 

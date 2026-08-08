@@ -29,6 +29,9 @@ class MailMessage:
     subject: str
     body: str
     message_id: str
+    attachment_filename: str | None = None
+    attachment_content_type: str | None = None
+    attachment_content: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,25 @@ class SmtpMailProvider:
         mail["Subject"] = _header(message.subject, "subject")
         mail["Message-ID"] = _header(message.message_id, "message id")
         mail.set_content(message.body)
+        attachment_values = (
+            message.attachment_filename,
+            message.attachment_content_type,
+            message.attachment_content,
+        )
+        if any(value is not None for value in attachment_values):
+            if not all(value is not None for value in attachment_values):
+                raise ValueError("invalid attachment")
+            filename = _header(message.attachment_filename, "attachment filename")
+            content_type = _header(message.attachment_content_type, "attachment content type")
+            if "/" not in content_type:
+                raise ValueError("invalid attachment content type")
+            maintype, subtype = content_type.split("/", 1)
+            mail.add_attachment(
+                message.attachment_content,
+                maintype=maintype,
+                subtype=subtype,
+                filename=filename,
+            )
         try:
             await aiosmtplib.send(
                 mail,

@@ -9,6 +9,14 @@ from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import and_, delete, exists, func, or_, select, text
 
+from server.app.communications.interview_messages import (
+    INTERVIEW_MESSAGE_KINDS,
+    CandidateEmailUnavailable,
+    EmailConfigurationUnavailable,
+    enqueue_interview_message,
+)
+from server.app.communications.models import EmailDelivery
+from server.app.communications.service import SenderPolicy
 from server.app.governance.retention import recalculate_candidate_retention
 from server.app.identity.api import problem, session_token
 from server.app.identity.models import AuditLog, Job, JobCollaborator, User, UserRole, UserStatus, WorkflowTemplate
@@ -463,6 +471,23 @@ def _interview_data(db, interview: Interview) -> dict:
         )
         .order_by(User.display_name, User.id)
     ).all()
+    delivery = db.scalar(
+        select(EmailDelivery)
+        .where(
+            EmailDelivery.organization_id == interview.organization_id,
+            EmailDelivery.resource_id == interview.id,
+            EmailDelivery.resource_type.in_(INTERVIEW_MESSAGE_KINDS),
+        )
+        .order_by(EmailDelivery.created_at.desc(), EmailDelivery.id.desc())
+        .limit(1)
+    )
+    delivery_data = None if delivery is None else {
+        "id": str(delivery.id),
+        "recipient": delivery.recipient_masked,
+        "status": delivery.status,
+        "version": delivery.version,
+        "safe_error_code": delivery.safe_error_code,
+    }
     return {
         "id": str(interview.id),
         "application_id": str(interview.application_id),
@@ -480,8 +505,9 @@ def _interview_data(db, interview: Interview) -> dict:
         "location": interview.location,
         "meeting_url": interview.meeting_url,
         "status": interview.status,
-        "notification_status": interview.notification_status,
+        "notification_status": delivery.status if delivery is not None else interview.notification_status,
         "invitation_status": interview.invitation_status,
+        "email_delivery": delivery_data,
         "participants": [
             {
                 "user_id": str(participant.user_id),
@@ -509,6 +535,21 @@ def _schedule_snapshot(interview: Interview) -> dict:
         "location": interview.location,
         "meeting_url": interview.meeting_url,
     }
+
+
+def _enqueue_candidate_interview_email(request: Request, db, interview: Interview, kind: str):
+    return enqueue_interview_message(
+        db,
+        interview=interview,
+        kind=kind,
+        trace_id=request.state.trace_id,
+        contact_cipher=request.app.state.contact_cipher,
+        email_cipher=request.app.state.email_secret_cipher,
+        sender_policy=SenderPolicy(
+            request.app.state.settings.email_from_address,
+            request.app.state.settings.email_from_name,
+        ),
+    )
 
 
 def _advance_application_if_interviews_complete(
@@ -1095,6 +1136,13 @@ def create_interview(payload: InterviewCreate, request: Request, idempotency_key
                     )
                 )
                 db.flush()
+                _enqueue_candidate_interview_email(
+                    request,
+                    db,
+                    interview,
+                    "interview_invitation",
+                )
+                interview.notification_status = "queued"
                 recalculate_candidate_retention(
                     db, principal.organization_id, candidate_id
                 )
@@ -1127,6 +1175,12 @@ def create_interview(payload: InterviewCreate, request: Request, idempotency_key
         except IdempotencyConflict:
             db.rollback()
             return problem(request, 409, "idempotency_conflict", "The idempotency key was reused with another request.")
+        except CandidateEmailUnavailable:
+            db.rollback()
+            return problem(request, 409, "candidate_email_unconfirmed", "Confirm the candidate email before scheduling the interview.")
+        except EmailConfigurationUnavailable:
+            db.rollback()
+            return problem(request, 409, "email_not_configured", "Configure transactional email before scheduling the interview.")
         except ScheduleConflict as error:
             db.rollback()
             return problem(
@@ -1314,6 +1368,13 @@ def patch_interview(interview_id: UUID, payload: InterviewPatch, request: Reques
                 )
             )
             db.flush()
+            _enqueue_candidate_interview_email(
+                request,
+                db,
+                interview,
+                "interview_rescheduled",
+            )
+            interview.notification_status = "queued"
             recalculate_candidate_retention(
                 db, principal.organization_id, candidate_id
             )
@@ -1344,6 +1405,12 @@ def patch_interview(interview_id: UUID, payload: InterviewPatch, request: Reques
             response = JSONResponse(body)
             response.headers["ETag"] = f'"{body["data"]["version"]}"'
             return response
+        except CandidateEmailUnavailable:
+            db.rollback()
+            return problem(request, 409, "candidate_email_unconfirmed", "Confirm the candidate email before rescheduling the interview.")
+        except EmailConfigurationUnavailable:
+            db.rollback()
+            return problem(request, 409, "email_not_configured", "Configure transactional email before rescheduling the interview.")
         except Exception:
             db.rollback()
             raise
@@ -1545,6 +1612,13 @@ def transition_interview(
                     db, principal.organization_id, candidate_id
                 )
                 if target == "cancelled":
+                    _enqueue_candidate_interview_email(
+                        request,
+                        db,
+                        locked,
+                        "interview_cancelled",
+                    )
+                    locked.notification_status = "queued"
                     schedule_interview_sync(db, locked, "cancel")
                     schedule_feishu_notification(
                         db,
@@ -1593,6 +1667,12 @@ def transition_interview(
         except CandidateUnavailable:
             db.rollback()
             return _denied(request)
+        except CandidateEmailUnavailable:
+            db.rollback()
+            return problem(request, 409, "candidate_email_unconfirmed", "Confirm the candidate email before cancelling the interview.")
+        except EmailConfigurationUnavailable:
+            db.rollback()
+            return problem(request, 409, "email_not_configured", "Configure transactional email before cancelling the interview.")
         except ResourceVersionConflict:
             db.rollback()
             return problem(request, 409, "resource_version_conflict", "The interview changed. Refresh and retry.")

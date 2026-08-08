@@ -79,6 +79,9 @@ class EmailDelivery(Base):
     reply_to_name: Mapped[str] = mapped_column(String(200), nullable=False)
     rendered_subject: Mapped[str] = mapped_column(String(998), nullable=False)
     rendered_body: Mapped[str] = mapped_column(Text, nullable=False)
+    attachment_filename: Mapped[str | None] = mapped_column(String(255))
+    attachment_content_type: Mapped[str | None] = mapped_column(String(255))
+    attachment_content: Mapped[bytes | None] = mapped_column(LargeBinary)
     resource_type: Mapped[str] = mapped_column(String(64), nullable=False)
     resource_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     business_dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -111,6 +114,11 @@ class EmailDelivery(Base):
         CheckConstraint(
             "(template_id is null and template_version is null) or (template_id is not null and template_version is not null)",
             name="ck_email_deliveries_template_version_pair",
+        ),
+        CheckConstraint(
+            "(attachment_filename is null and attachment_content_type is null and attachment_content is null) or "
+            "(attachment_filename is not null and attachment_content_type is not null and attachment_content is not null)",
+            name="ck_email_deliveries_attachment_triplet",
         ),
         Index("ix_email_deliveries_history", "organization_id", "created_at"),
     )

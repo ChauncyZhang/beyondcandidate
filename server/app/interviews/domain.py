@@ -113,6 +113,7 @@ def build_calendar_invitation(
     status: str = "scheduled",
     organizer: CalendarContact = DEFAULT_CALENDAR_ORGANIZER,
     attendees: tuple[CalendarContact, ...] = DEFAULT_CALENDAR_ATTENDEES,
+    timezone_name: str | None = None,
 ) -> bytes:
     if duration_minutes <= 0:
         raise ValueError("duration_minutes must be positive")
@@ -121,12 +122,14 @@ def build_calendar_invitation(
     if status not in {"draft", "scheduled", "confirmed", "completed", "pending_feedback", "feedback_completed", "rescheduled", "cancelled", "no_show"}:
         raise ValueError("unsupported calendar status")
     ends_at = starts_at + timedelta(minutes=duration_minutes)
+    timezone_lines = [] if timezone_name is None else [f"X-WR-TIMEZONE:{_escape_text(timezone_name)}"]
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         "PRODID:-//HR Resume Filter//Recruiting Interview//CN",
         "CALSCALE:GREGORIAN",
         "METHOD:CANCEL" if status == "cancelled" else "METHOD:REQUEST",
+        *timezone_lines,
         "BEGIN:VEVENT",
         f"UID:{interview_id}@beyondcandidate",
         f"DTSTAMP:{_utc_stamp(dtstamp)}",
