@@ -148,10 +148,13 @@ def upgrade() -> None:
     op.execute("""
         CREATE FUNCTION prevent_submitted_offer_version_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
-          IF TG_OP = 'DELETE' AND OLD.submitted_at IS NOT NULL THEN
-            RAISE EXCEPTION 'submitted offer versions are immutable';
+          IF TG_OP = 'DELETE' THEN
+            IF OLD.submitted_at IS NOT NULL THEN
+              RAISE EXCEPTION 'submitted offer versions are immutable';
+            END IF;
+            RETURN OLD;
           END IF;
-          IF TG_OP = 'UPDATE' AND OLD.submitted_at IS NOT NULL THEN
+          IF OLD.submitted_at IS NOT NULL THEN
             RAISE EXCEPTION 'submitted offer versions are immutable';
           END IF;
           RETURN NEW;

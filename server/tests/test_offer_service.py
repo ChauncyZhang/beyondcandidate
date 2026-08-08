@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
@@ -338,6 +339,49 @@ def test_revision_preserves_omitted_fields_allows_explicit_template_clear_and_re
         assert current.content == {"salary": "100"}
 
 
+def test_offer_revision_omits_required_snapshot_fields_to_preserve_them():
+    revision = OfferVersionCommand()
+    special_revision = OfferVersionCommand(is_special=True)
+
+    assert revision.model_fields_set == set()
+    assert revision.content is None
+    assert revision.candidate_response_deadline is None
+    assert revision.is_special is None
+    assert revision.special_reason is None
+    assert special_revision.model_fields_set == {"is_special"}
+    assert special_revision.special_reason is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "field"),
+    [
+        ({"content": None}, "content"),
+        ({"content": {"body": None}}, "content"),
+        ({"content": {"compensation": None}}, "content"),
+        ({"candidate_response_deadline": None}, "candidate_response_deadline"),
+        ({"is_special": None}, "is_special"),
+        ({"is_special": True, "special_reason": None}, "special_reason"),
+        ({"special_reason": None}, "special_reason"),
+        ({"special_reason": "   "}, "special_reason"),
+        ({"is_special": False, "special_reason": "Exception"}, "special_reason"),
+    ],
+)
+def test_offer_revision_rejects_explicit_null_or_invalid_required_snapshot_values(payload, field):
+    with pytest.raises(ValidationError) as error:
+        OfferVersionCommand.model_validate(payload)
+
+    assert any(item["loc"] == (field,) for item in error.value.errors())
+
+
+def test_offer_revision_allows_explicit_template_and_normal_special_metadata_clear():
+    revision = OfferVersionCommand(template_id=None, is_special=False, special_reason=None)
+
+    assert revision.model_fields_set == {"template_id", "is_special", "special_reason"}
+    assert revision.template_id is None
+    assert revision.is_special is False
+    assert revision.special_reason is None
+
+
 def test_user_transitions_require_current_version_and_expiry_never_repeats_or_expires_answered_offer():
     with make_session() as db:
         seed_application(db)
@@ -379,11 +423,12 @@ def test_rejection_reason_is_constrained_and_excluded_from_global_audit_metadata
         assert "ck_offer_approvals_rejection_reason" in checks
 
 
-def test_offer_migration_uses_deferred_exact_current_pointer_and_returns_new_from_trigger():
+def test_offer_migration_uses_deferred_exact_current_pointer_and_correct_trigger_returns():
     migration = Path("server/migrations/versions/0033_offer_workflow.py").read_text(encoding="utf-8")
     assert '"fk_offers_current_version"' in migration
     assert 'deferrable=True, initially="DEFERRED"' in migration
     assert "RETURN NEW;" in migration
+    assert "RETURN OLD;" in migration
     assert "uq_offer_versions_current" not in migration
 
 

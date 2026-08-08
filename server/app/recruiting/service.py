@@ -639,10 +639,14 @@ def consume_download_ticket_record(db, raw, organization_id, user_id, resume_id,
     return ticket
 
 
-def persisted_idempotent(db, organization_id, user_id, operation, key, body, action):
+def _idempotency_request_hash(body):
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def resolve_idempotent_replay(db, organization_id, user_id, operation, key, body):
     from server.app.recruiting.models import IdempotencyRecord
 
-    request_hash = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    request_hash = _idempotency_request_hash(body)
     if db.get_bind().dialect.name == "postgresql":
         lock_key = f"{organization_id}:{user_id}:{operation}:{key}"
         db.execute(text("select pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"), {"lock_key": lock_key})
@@ -659,6 +663,16 @@ def persisted_idempotent(db, organization_id, user_id, operation, key, body, act
         if record.request_hash != request_hash:
             raise IdempotencyConflict
         return record.status_code, record.response_json
+    return None
+
+
+def persisted_idempotent(db, organization_id, user_id, operation, key, body, action):
+    from server.app.recruiting.models import IdempotencyRecord
+
+    replay = resolve_idempotent_replay(db, organization_id, user_id, operation, key, body)
+    if replay is not None:
+        return replay
+    request_hash = _idempotency_request_hash(body)
     status_code, response = action()
     db.add(IdempotencyRecord(organization_id=organization_id, user_id=user_id, operation=operation, idempotency_key=key, request_hash=request_hash, status_code=status_code, response_json=response))
     db.flush()

@@ -50,7 +50,7 @@ from server.app.recruiting.service import (
     InvalidStateTransition, ResourceVersionConflict, SystemClock, SystemTokens,
     TicketInvalid, consume_download_ticket_record, create_application_record,
     create_job_definition_record,
-    issue_download_ticket_record, persisted_idempotent,
+    issue_download_ticket_record, persisted_idempotent, resolve_idempotent_replay,
     lock_active_candidate, lock_job_for_version_write,
     transition_job_record, patch_job_record, patch_candidate_record, patch_application_record,
     replace_job_definition_record, apply_application_workflow_action_record,
@@ -756,6 +756,23 @@ def create_job_definition(payload: JobDefinitionCommand, request: Request, idemp
         if field not in payload.model_fields_set:
             command.pop(field)
     with request.app.state.identity_store.sync_session() as db:
+        try:
+            replay = resolve_idempotent_replay(
+                db,
+                principal.organization_id,
+                principal.user_id,
+                "job_definition.create",
+                key,
+                command,
+            )
+            if replay is not None:
+                status, body = replay
+                response = _job_definition_response(request, body, status)
+                db.commit()
+                return response
+        except IdempotencyConflict as error:
+            db.rollback()
+            return _problem_for(request, error)
         invalid_offer_default = _validate_offer_defaults_response(request, db, principal.organization_id, command)
         if invalid_offer_default is not None:
             return invalid_offer_default
@@ -832,6 +849,23 @@ def replace_job_definition(job_id: UUID, payload: JobDefinitionCommand, request:
         job = _load_job(db, principal, job_id, RecruitingAction.MANAGE_JOB)
         if job is None:
             return _denied(request)
+        try:
+            replay = resolve_idempotent_replay(
+                db,
+                principal.organization_id,
+                principal.user_id,
+                f"job_definition.replace:{job_id}",
+                key,
+                command,
+            )
+            if replay is not None:
+                status, body = replay
+                response = _job_definition_response(request, body, status)
+                db.commit()
+                return response
+        except IdempotencyConflict as error:
+            db.rollback()
+            return _problem_for(request, error)
         invalid_offer_default = _validate_offer_defaults_response(request, db, principal.organization_id, command)
         if invalid_offer_default is not None:
             return invalid_offer_default

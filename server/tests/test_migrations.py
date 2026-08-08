@@ -314,6 +314,10 @@ def test_offer_postgres_constraints_and_history_triggers() -> None:
         transaction.rollback()
 
     with engine.begin() as connection:
+        unsubmitted = {**identifiers, "unsubmitted_version": uuid.uuid4()}
+        connection.execute(text("INSERT INTO offer_versions(id,organization_id,offer_id,version_number,content,candidate_response_deadline,is_special,created_by,created_at,updated_at) VALUES(:unsubmitted_version,:organization,:offer,2,'{\"body\":\"draft\"}',now(),false,:owner,now(),now())"), unsubmitted)
+        connection.execute(text("DELETE FROM offer_versions WHERE id=:unsubmitted_version"), unsubmitted)
+        assert connection.scalar(text("SELECT count(*) FROM offer_versions WHERE id=:unsubmitted_version"), unsubmitted) == 0
         connection.execute(text("UPDATE offer_versions SET submitted_at=now() WHERE id=:version"), identifiers)
         connection.execute(text("INSERT INTO offer_approvals(id,organization_id,offer_id,offer_version_id,round_number,version_number,sequence,assignee_id,status,created_at,updated_at) VALUES(:approval,:organization,:offer,:version,1,1,1,:owner,'pending',now(),now())"), identifiers)
 

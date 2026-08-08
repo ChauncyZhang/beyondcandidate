@@ -1781,6 +1781,129 @@ def test_job_definition_idempotency_replays_and_rejects_body_conflicts(tmp_path)
         assert db.query(Job).count() == db.query(IdempotencyRecord).count() == 1
 
 
+@pytest.mark.parametrize(
+    ("changed_default", "expected_code"),
+    [("approver", "offer_approver_invalid"), ("template", "offer_template_invalid")],
+)
+def test_job_definition_create_replay_precedes_mutable_offer_default_validation(
+    tmp_path, changed_default, expected_code
+) -> None:
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
+    approver_id = seed_user(app, "hiring_manager", "approver@example.test")
+    with app.state.identity_store.sync_session() as db:
+        admin = db.get(User, admin_id)
+        template = OfferTemplate(organization_id=admin.organization_id, name="Standard", content={})
+        db.add(template)
+        db.commit()
+        template_id = str(template.id)
+    payload = job_definition_payload(
+        hiring_owner_id=str(admin_id),
+        offer_approver_id=str(approver_id),
+        offer_template_id=template_id,
+    )
+
+    with TestClient(app) as client:
+        headers = login(client, "admin@example.test")
+        first = client.post(
+            "/api/v1/job-definitions",
+            json=payload,
+            headers={**headers, "Idempotency-Key": "mutable-default-create"},
+        )
+        with app.state.identity_store.sync_session() as db:
+            if changed_default == "approver":
+                db.get(User, approver_id).status = UserStatus.DISABLED
+            else:
+                db.get(OfferTemplate, UUID(template_id)).status = "inactive"
+            db.commit()
+        replay = client.post(
+            "/api/v1/job-definitions",
+            json=payload,
+            headers={**headers, "Idempotency-Key": "mutable-default-create"},
+        )
+        conflict = client.post(
+            "/api/v1/job-definitions",
+            json={**payload, "title": "Different"},
+            headers={**headers, "Idempotency-Key": "mutable-default-create"},
+        )
+        fresh = client.post(
+            "/api/v1/job-definitions",
+            json=payload,
+            headers={**headers, "Idempotency-Key": "mutable-default-create-fresh"},
+        )
+
+    assert first.status_code == replay.status_code == 201
+    assert first.json() == replay.json()
+    assert conflict.status_code == 409 and conflict.json()["code"] == "idempotency_conflict"
+    assert fresh.status_code == 422 and fresh.json()["code"] == expected_code
+
+
+@pytest.mark.parametrize(
+    ("changed_default", "expected_code"),
+    [("approver", "offer_approver_invalid"), ("template", "offer_template_invalid")],
+)
+def test_job_definition_replace_replay_precedes_mutable_offer_default_validation(
+    tmp_path, changed_default, expected_code
+) -> None:
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
+    approver_id = seed_user(app, "hiring_manager", "approver@example.test")
+    with app.state.identity_store.sync_session() as db:
+        admin = db.get(User, admin_id)
+        template = OfferTemplate(organization_id=admin.organization_id, name="Standard", content={})
+        db.add(template)
+        db.commit()
+        template_id = str(template.id)
+    initial = job_definition_payload(hiring_owner_id=str(admin_id))
+    replacement = job_definition_payload(
+        title="Principal Engineer",
+        hiring_owner_id=str(admin_id),
+        offer_approver_id=str(approver_id),
+        offer_template_id=template_id,
+    )
+
+    with TestClient(app) as client:
+        headers = login(client, "admin@example.test")
+        created = client.post(
+            "/api/v1/job-definitions",
+            json=initial,
+            headers={**headers, "Idempotency-Key": "mutable-default-replace-create"},
+        )
+        job_id = created.json()["data"]["job"]["id"]
+        first = client.put(
+            f"/api/v1/job-definitions/{job_id}",
+            json=replacement,
+            headers={**headers, "If-Match": '"1"', "Idempotency-Key": "mutable-default-replace"},
+        )
+        with app.state.identity_store.sync_session() as db:
+            if changed_default == "approver":
+                db.get(User, approver_id).status = UserStatus.DISABLED
+            else:
+                db.get(OfferTemplate, UUID(template_id)).status = "inactive"
+            db.commit()
+        replay = client.put(
+            f"/api/v1/job-definitions/{job_id}",
+            json=replacement,
+            headers={**headers, "If-Match": '"1"', "Idempotency-Key": "mutable-default-replace"},
+        )
+        conflict = client.put(
+            f"/api/v1/job-definitions/{job_id}",
+            json={**replacement, "title": "Different"},
+            headers={**headers, "If-Match": '"2"', "Idempotency-Key": "mutable-default-replace"},
+        )
+        fresh = client.put(
+            f"/api/v1/job-definitions/{job_id}",
+            json=replacement,
+            headers={**headers, "If-Match": '"2"', "Idempotency-Key": "mutable-default-replace-fresh"},
+        )
+
+    assert created.status_code == 201
+    assert first.status_code == replay.status_code == 200
+    assert first.json() == replay.json()
+    assert conflict.status_code == 409 and conflict.json()["code"] == "idempotency_conflict"
+    assert fresh.status_code == 422 and fresh.json()["code"] == expected_code
+
+
 def test_job_definition_failure_rolls_back_aggregate_and_idempotency(tmp_path) -> None:
     app = make_app(tmp_path)
     admin_id = seed_user(app, "recruiting_admin", "admin@example.test")

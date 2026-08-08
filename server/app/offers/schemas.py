@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 
 class OfferSchema(BaseModel):
@@ -35,7 +35,35 @@ class OfferVersionCommand(OfferSchema):
     is_special: bool | None = None
     special_reason: str | None = None
 
-    @field_validator("special_reason")
+    @field_validator("content", mode="before")
     @classmethod
-    def normalize_special_reason(cls, value: str | None) -> str | None:
-        return value.strip() if value is not None else None
+    def validate_content_when_present(cls, value):
+        if value is None:
+            raise ValueError("content must not be null when provided")
+        if isinstance(value, dict):
+            for field in ("body", "compensation"):
+                if field in value and value[field] is None:
+                    raise ValueError(f"content.{field} must not be null when provided")
+        return value
+
+    @field_validator("candidate_response_deadline", "is_special", mode="before")
+    @classmethod
+    def validate_required_snapshot_field_when_present(cls, value, info: ValidationInfo):
+        if value is None:
+            raise ValueError(f"{info.field_name} must not be null when provided")
+        return value
+
+    @field_validator("special_reason", mode="before")
+    @classmethod
+    def normalize_special_reason(cls, value: str | None, info: ValidationInfo) -> str | None:
+        is_special = info.data.get("is_special")
+        if value is None:
+            if is_special is False:
+                return None
+            raise ValueError("special_reason may only be null when clearing special metadata")
+        value = value.strip()
+        if not value:
+            raise ValueError("special_reason must not be blank when provided")
+        if is_special is False:
+            raise ValueError("special_reason is only allowed for special offers")
+        return value
