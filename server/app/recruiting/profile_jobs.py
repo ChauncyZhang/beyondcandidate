@@ -14,6 +14,7 @@ from server.app.recruiting.models import (
 )
 from server.app.recruiting.profile_builder import PROFILE_VERSION
 from server.app.communications.extraction import contact_cipher_from_settings,extract_email_candidates,persist_extracted_emails
+from server.app.screening.actions import CandidateTombstoned, lock_screening_candidate
 
 
 class ResumeProfileJobHandler:
@@ -82,9 +83,10 @@ class ResumeProfileJobHandler:
                 file_object.mime_type,
                 candidate.display_name,
                 application.job_id if application else None,
+                candidate.id,
             )
 
-        storage_key, filename, mime_type, candidate_name, job_id = source
+        storage_key, filename, mime_type, candidate_name, job_id, candidate_id = source
         enriched = await self.text_enhancer.enhance(
             organization_id,
             storage_key=storage_key,
@@ -103,24 +105,20 @@ class ResumeProfileJobHandler:
 
         try:
             with self.sessions() as database:
-                active_candidate = database.scalar(
-                    select(Candidate)
-                    .join(
-                        Resume,
-                        and_(
-                            Resume.organization_id == Candidate.organization_id,
-                            Resume.candidate_id == Candidate.id,
-                        ),
+                try:
+                    active_candidate = lock_screening_candidate(
+                        database, organization_id, candidate_id
                     )
-                    .where(
-                        Candidate.organization_id == organization_id,
-                        Candidate.deleted_at.is_(None),
+                except CandidateTombstoned:
+                    return
+                if database.scalar(
+                    select(Resume.id).where(
+                        Resume.organization_id == organization_id,
                         Resume.id == resume_id,
+                        Resume.candidate_id == active_candidate.id,
                         Resume.parsed_text.is_not(None),
-                    )
-                    .with_for_update()
-                )
-                if active_candidate is None:
+                    ).with_for_update()
+                ) is None:
                     return
                 if database.scalar(
                     select(ResumeProfile.id).where(

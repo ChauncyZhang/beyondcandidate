@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func,select
 
 from server.app.identity.models import User
+from server.app.governance.deletion_models import DeletionRequest
 from server.app.recruiting.models import Application,ApplicationReviewTask,Candidate,CandidateContact,FileObject,Resume,ResumeProfile
 from server.app.screening.models import ScreeningItem,ScreeningResult,ScreeningRun
 from server.app.llm.models import LlmProviderConfig,PromptVersion
@@ -246,6 +247,47 @@ def test_profile_job_persists_final_ocr_text_email_as_unconfirmed_contact(tmp_pa
         contact=db.scalar(select(CandidateContact).where(CandidateContact.candidate_id==stored.candidate_id))
         assert contact.source=="ocr" and contact.confirmation_status=="unconfirmed"
         assert app.state.contact_cipher.decrypt(contact.ciphertext)=="ocr@example.com"
+
+
+def test_profile_job_writes_no_contact_or_profile_when_deletion_is_approved(tmp_path):
+    app,pipeline,_,_,job,_,item=seeded_pipeline(tmp_path)
+    asyncio.run(pipeline.parse_item(job))
+    with app.state.identity_store.sync_session() as db:
+        stored=db.get(ScreeningItem,uuid.UUID(item["id"])); resume_id=stored.resume_id
+        candidate=db.get(Candidate,stored.candidate_id)
+        organization_id=stored.organization_id
+        db.query(ResumeProfile).delete()
+        db.add(DeletionRequest(
+            organization_id=organization_id,
+            candidate_id=candidate.id,
+            status="approved",
+            reason_code="administrator_request",
+            requested_by=candidate.owner_id,
+            approved_by=candidate.owner_id,
+            impact_manifest={},
+            manifest_hash="0" * 64,
+            policy_version=1,
+            candidate_version=candidate.version,
+        ))
+        db.commit()
+
+    class Enhancer:
+        async def enhance(self,*args,**kwargs):
+            return SimpleNamespace(text="blocked @ example.com",used_ocr=True,safe_error_code=None)
+
+    class Builder:
+        async def build(self,*args,**kwargs):
+            return ProfileBuild({"summary":None,"skills":[],"experience":None,"education":None,"status":"partial","source":"rules"},"partial","rules")
+
+    handler=ResumeProfileJobHandler(app.state.identity_store.sync_session,Enhancer(),Builder(),app.state.contact_cipher)
+    asyncio.run(handler(SimpleNamespace(
+        organization_id=organization_id,
+        payload={"organization_id":str(organization_id),"resume_id":str(resume_id)},
+    )))
+
+    with app.state.identity_store.sync_session() as db:
+        assert db.scalar(select(ResumeProfile.id).where(ResumeProfile.resume_id==resume_id)) is None
+        assert db.scalar(select(CandidateContact.id).where(CandidateContact.candidate_id==candidate.id)) is None
 
 def test_rule_score_atomically_enqueues_eligible_llm_without_finishing_item(tmp_path):
     app,pipeline,storage,scanner,job,run,item=seeded_pipeline(tmp_path); asyncio.run(pipeline.parse_item(job))

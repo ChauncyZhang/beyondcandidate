@@ -5,12 +5,13 @@ from email_validator import EmailNotValidError, validate_email
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from server.app.recruiting.models import Candidate, CandidateContact
+from server.app.recruiting.models import CandidateContact
 from server.app.recruiting.security import ContactCipher
+from server.app.screening.actions import CandidateTombstoned, lock_screening_candidate
 
 
 _MAX_TEXT_CHARS = 200_000
-_MAX_SCANNED_CANDIDATES = 100
+_MAX_SCANNED_CANDIDATES = 10
 _MAX_EMAILS = 10
 _EMAIL_CANDIDATE = re.compile(
     r"[A-Za-z0-9.!#$%&'+/=?^_`{|}~-]{1,64}\s*@\s*"
@@ -42,16 +43,9 @@ def extract_email_candidates(text: str) -> tuple[str, ...]:
 def persist_extracted_emails(db, *, organization_id, candidate_id, values, source: str, cipher: ContactCipher) -> int:
     if source not in {"native", "ocr", "manual"}:
         raise ValueError("invalid extracted email source")
-    candidate = db.scalar(
-        select(Candidate)
-        .where(
-            Candidate.organization_id == organization_id,
-            Candidate.id == candidate_id,
-            Candidate.deleted_at.is_(None),
-        )
-        .with_for_update()
-    )
-    if candidate is None:
+    try:
+        lock_screening_candidate(db, organization_id, candidate_id)
+    except CandidateTombstoned:
         return 0
 
     created = 0
