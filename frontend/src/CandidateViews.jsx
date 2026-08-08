@@ -334,6 +334,66 @@ function ResumePreview({ candidate, file, status, error, downloading, onClose, o
   </div>;
 }
 
+const candidateEmailSourceLabels = { legacy: "历史数据", manual: "人工录入", native: "简历原文", ocr: "OCR 识别" };
+const candidateEmailRoles = new Set(["招聘管理员", "recruiting_admin", "HR 招聘专员", "recruiter", "HR"]);
+
+function CandidateEmailDialog({ candidate, controller, onClose, onConfirmed }) {
+  const dialogRef = useRef(null);
+  const restoreRef = useRef(typeof document === "undefined" ? null : document.activeElement);
+  const [state, setState] = useState({ status: "loading", email: null, error: "", conflict: false });
+  const [selectedAddress, setSelectedAddress] = useState("");
+  const [confirmedByHr, setConfirmedByHr] = useState(false);
+
+  async function load() {
+    setState({ status: "loading", email: null, error: "", conflict: false });
+    try {
+      const email = await controller.getCandidateEmail(candidate.id);
+      setSelectedAddress(email.value || email.addresses[0]?.value || "");
+      setConfirmedByHr(false);
+      setState({ status: "ready", email, error: "", conflict: false });
+    } catch { setState({ status: "error", email: null, error: "邮箱信息加载失败，请确认权限或稍后重试。", conflict: false }); }
+  }
+
+  useEffect(() => { void load(); }, [candidate.id, controller]);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog || typeof document === "undefined") return undefined;
+    dialog.querySelector("[data-email-dialog-initial-focus]")?.focus();
+    return () => restoreRef.current?.isConnected !== false && restoreRef.current?.focus?.();
+  }, [state.status]);
+
+  function handleKeyDown(event) {
+    if (event.key === "Escape") { event.preventDefault(); if (state.status !== "saving") onClose(); return; }
+    if (event.key !== "Tab") return;
+    const controls = [...dialogRef.current.querySelectorAll("button, input")].filter((item) => !item.disabled);
+    const first = controls[0]; const last = controls.at(-1);
+    if (event.shiftKey && (document.activeElement === first || !dialogRef.current.contains(document.activeElement))) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && (document.activeElement === last || !dialogRef.current.contains(document.activeElement))) { event.preventDefault(); first?.focus(); }
+  }
+
+  async function confirm() {
+    if (!state.email || !selectedAddress || !confirmedByHr) return;
+    setState((current) => ({ ...current, status: "saving", error: "", conflict: false }));
+    try { const saved = await controller.confirmCandidateEmail(candidate.id, state.email.version, selectedAddress); await onConfirmed(saved); onClose(); }
+    catch (error) { setState((current) => ({ ...current, status: "ready", conflict: error?.status === 409, error: error?.status === 409 ? "邮箱信息已被其他成员更新。你的确认未覆盖最新记录。" : "邮箱确认失败，请稍后重试。" })); }
+  }
+
+  const email = state.email;
+  const addresses = email?.addresses || [];
+  return <div className="candidate-dialog-backdrop candidate-email-dialog-backdrop" role="presentation" onMouseDown={state.status === "saving" ? undefined : onClose}><section ref={dialogRef} className="candidate-dialog candidate-email-dialog" role="dialog" aria-modal="true" aria-labelledby="candidate-email-dialog-title" onMouseDown={(event) => event.stopPropagation()} onKeyDown={handleKeyDown}>
+    <header><div><h3 id="candidate-email-dialog-title">确认候选人邮箱</h3><p>{candidate.name} · 明文仅在此授权窗口中显示</p></div><button className="icon-button" type="button" data-email-dialog-initial-focus aria-label="关闭" disabled={state.status === "saving"} onClick={onClose}><X size={19} /></button></header>
+    <div className="candidate-dialog-body email-confirmation-body">
+      {state.status === "loading" && <div className="candidate-email-state" role="status"><LoaderCircle className="spin" size={20} />正在读取授权邮箱…</div>}
+      {state.status === "error" && <div className="candidate-email-state error" role="alert"><CircleAlert size={20} /><span>{state.error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
+      {email && <><div className="email-source-summary"><span>来源</span><strong>{candidateEmailSourceLabels[email.source] || "来源未标记"}</strong><span>确认状态</span><strong>{email.confirmationStatus === "confirmed" ? "已确认" : "待确认"}</strong></div>
+        {addresses.length > 1 ? <fieldset className="candidate-email-options"><legend>选择要确认的邮箱地址</legend>{addresses.map((item) => <label key={`${item.value}-${item.source}`}><input type="radio" name="candidate-email" value={item.value} checked={selectedAddress === item.value} disabled={state.status === "saving"} onChange={(event) => { setSelectedAddress(event.target.value); setConfirmedByHr(false); }} /><span><strong>{item.value}</strong><small>{candidateEmailSourceLabels[item.source] || "来源未标记"}</small></span></label>)}</fieldset> : addresses.length === 1 ? <div className="candidate-email-value"><span>邮箱地址</span><strong>{addresses[0].value}</strong></div> : <label>邮箱地址<input type="email" value={selectedAddress} disabled={state.status === "saving"} onChange={(event) => { setSelectedAddress(event.target.value); setConfirmedByHr(false); }} placeholder="candidate@example.com" /></label>}
+        <label className="candidate-email-explicit"><input type="checkbox" checked={confirmedByHr} disabled={state.status === "saving"} onChange={(event) => setConfirmedByHr(event.target.checked)} /><span>我已与候选人核对，并确认将此地址用于招聘邮件。</span></label>
+        {state.error && <div className="candidate-email-state error" role="alert"><CircleAlert size={18} /><span>{state.error}</span>{state.conflict && <button type="button" onClick={() => void load()}>加载最新邮箱</button>}</div>}</>}
+    </div>
+    <footer><button className="button secondary" type="button" disabled={state.status === "saving"} onClick={onClose}>取消</button><button className="button primary" type="button" disabled={state.status !== "ready" || !selectedAddress || !confirmedByHr} onClick={() => void confirm()}>{state.status === "saving" ? "确认中…" : email?.confirmationStatus === "confirmed" ? "重新确认此邮箱" : "确认并用于发送"}</button></footer>
+  </section></div>;
+}
+
 const governanceCountLabels = [
   ["contacts", "联系方式"], ["resumes", "简历记录"], ["applications", "职位申请"], ["screeningRecords", "筛选记录"], ["interviews", "面试"], ["feedbackRecords", "反馈记录"], ["talentMemberships", "人才库关系"], ["resumeObjects", "简历文件"], ["temporaryExports", "临时导出"],
 ];
@@ -423,6 +483,7 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
   const [conflict, setConflict] = useState(false);
   const [previewState, setPreviewState] = useState(null);
   const [reassignOpen, setReassignOpen] = useState(false);
+  const [emailDialogOpen, setEmailDialogOpen] = useState(false);
   const previewRequestRef = useRef(null);
 
   useEffect(() => {
@@ -530,12 +591,13 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
   const nextStep = candidateNextStep(candidate.stage, candidate.jobStatus);
   const canScheduleCurrent = canScheduleCandidateInterview(candidate.stage, role, onScheduleInterview, candidate.jobStatus);
   const canReassignReview = candidate.serverBacked && candidate.stage === "待复核" && candidate.reviewTask && canPerformAction(role, "推进候选人");
+  const canConfirmEmail = candidate.serverBacked && candidateEmailRoles.has(role);
   const tabs = candidateDetailTabs(candidate.serverBacked);
   const notes = candidate.notes || [];
   const profileLine = [candidate.role, candidate.company, candidate.city].filter(Boolean).join(" · ");
   return <div className="candidate-page candidate-detail-page">
     <button className="back-link" type="button" onClick={onBack}><ArrowLeft size={17} />{backLabel || "返回候选人列表"}</button>
-    <section className="candidate-detail-hero"><div className="candidate-profile"><span>{candidate.name.slice(-1)}</span><div><div><h2>{candidate.name}</h2><StageTag stage={candidate.stage} /></div><p>{profileLine}</p><div className="masked-contacts"><span><Phone size={13} />{candidate.phone}</span><span><Mail size={13} />{candidate.email}</span></div></div></div><div className="candidate-detail-actions">{!candidate.serverBacked && <button className="button secondary" type="button" onClick={() => onNotify("联系方式已复制，操作已记录") }><ClipboardCopy size={16} />复制联系信息</button>}<button className="button secondary" type="button" disabled={candidate.serverBacked && (!candidate.resume?.id || pendingAction === "download")} onClick={() => void downloadResume()}><Download size={16} />{pendingAction === "download" ? "下载中" : "下载简历"}</button>{canAddCandidateToTalentPool(candidate) && onAddToTalentPool && <button className="button secondary" type="button" onClick={() => onAddToTalentPool([candidate.id])}><BriefcaseBusiness size={16} />加入人才库</button>}{canScheduleCurrent && <button className="button primary" type="button" onClick={() => onScheduleInterview(candidate)}><CalendarDays size={16} />安排面试</button>}{availableWorkflowActions.map((action) => <button className={`button ${action.reasonRequired ? "secondary" : "primary"}`} type="button" key={action.id} onClick={() => { setActionError(""); setConflict(false); setSelectedWorkflowAction(action); }}><UserRoundCheck size={16} />{action.label}</button>)}</div></section>
+    <section className="candidate-detail-hero"><div className="candidate-profile"><span>{candidate.name.slice(-1)}</span><div><div><h2>{candidate.name}</h2><StageTag stage={candidate.stage} /></div><p>{profileLine}</p><div className="masked-contacts"><span><Phone size={13} />{candidate.phone}</span><span><Mail size={13} />{candidate.email}</span></div></div></div><div className="candidate-detail-actions">{!candidate.serverBacked && <button className="button secondary" type="button" onClick={() => onNotify("联系方式已复制，操作已记录") }><ClipboardCopy size={16} />复制联系信息</button>}{canConfirmEmail && <button className="button secondary" type="button" onClick={() => setEmailDialogOpen(true)}><Mail size={16} />查看并确认邮箱</button>}<button className="button secondary" type="button" disabled={candidate.serverBacked && (!candidate.resume?.id || pendingAction === "download")} onClick={() => void downloadResume()}><Download size={16} />{pendingAction === "download" ? "下载中" : "下载简历"}</button>{canAddCandidateToTalentPool(candidate) && onAddToTalentPool && <button className="button secondary" type="button" onClick={() => onAddToTalentPool([candidate.id])}><BriefcaseBusiness size={16} />加入人才库</button>}{canScheduleCurrent && <button className="button primary" type="button" onClick={() => onScheduleInterview(candidate)}><CalendarDays size={16} />安排面试</button>}{availableWorkflowActions.map((action) => <button className={`button ${action.reasonRequired ? "secondary" : "primary"}`} type="button" key={action.id} onClick={() => { setActionError(""); setConflict(false); setSelectedWorkflowAction(action); }}><UserRoundCheck size={16} />{action.label}</button>)}</div></section>
     {actionError && !selectedWorkflowAction && <div className="candidate-action-error" role="alert"><CircleAlert size={16} /><span>{actionError}</span>{conflict && <button type="button" onClick={() => void onRefresh()}>刷新最新详情</button>}</div>}
     <div className="candidate-detail-layout"><main className="candidate-detail-main"><section className="candidate-detail-panel"><div className="candidate-detail-tabs">{tabs.map((item) => <button type="button" key={item} className={tab === item ? "active" : ""} onClick={() => onTabChange(item)}>{item}</button>)}</div>
       {tab === "档案与简历" && <div className="candidate-tab-content profile-tab">{candidate.serverBacked && candidate.profileStatus !== "ready" && <div className="candidate-profile-notice" role="status"><CircleAlert size={17} /><span><strong>自动结构化信息不完整</strong><small>部分内容未能可靠识别，请以右侧原始简历为准。</small></span></div>}<section><h3>候选人摘要{candidate.summaryOrigin === "generated" && <span className="candidate-generated-label">AI 基于简历生成</span>}</h3><p>{candidate.summary}</p></section><section><h3>技能</h3><div className="candidate-skill-tags">{candidate.skills.length ? candidate.skills.map((item) => <span key={item}>{item}</span>) : <span>暂无结构化技能</span>}</div></section><div className="profile-facts"><div><BriefcaseBusiness size={18} /><span><strong>工作经验</strong><small>{candidate.experience}</small></span></div><div><GraduationCap size={18} /><span><strong>教育经历</strong><small>{candidate.education}</small></span></div><div className="resume-detail-row"><FileText size={18} /><span><strong>当前简历</strong><small>{candidate.serverBacked ? resumeDisplayName(candidate.resume) : `${candidate.name}_简历.pdf · 解析质量良好`}</small>{candidate.serverBacked && candidate.resume?.id && <span className="resume-inline-actions"><button type="button" onClick={() => void loadPreview()}><Eye size={14} />预览</button><button type="button" onClick={() => void downloadResume()}><Download size={14} />下载</button></span>}</span></div></div></div>}
@@ -546,6 +608,7 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
     </section></main><aside className="candidate-context"><section><h3>当前申请</h3><dl><div><dt>应聘职位</dt><dd>{candidate.position}</dd></div><div><dt>当前状态</dt><dd><StageTag stage={candidate.stage} /></dd></div><div><dt>招聘负责人（HR）</dt><dd>{candidate.owner}</dd></div><div><dt>下一步</dt><dd>{nextStep}</dd></div><div><dt>最近进展</dt><dd>{candidate.lastActivity || "未记录"}</dd></div></dl><p className="candidate-auto-stage-note">状态会在完成业务动作后自动更新，无需手动维护。</p></section>{candidate.reviewTask && candidate.stage === "待复核" && <section className="candidate-review-assignee"><h3>简历评审</h3><dl><div><dt>当前评审人</dt><dd>{candidate.reviewTask.assigneeName}</dd></div></dl>{canReassignReview && <button className="button secondary full" type="button" disabled={pendingAction === "review-reassignment"} onClick={() => { setActionError(""); setConflict(false); setReassignOpen(true); }}><UserRoundCheck size={16} />改派评审人</button>}</section>}<CandidateGovernance candidate={candidate} role={role} onNotify={onNotify} />{!candidate.serverBacked && <section><h3>标签</h3><div className="context-tags">{candidate.tags.map((item) => <span key={item}>{item}</span>)}</div><div className="inline-add"><input value={tagInput} onChange={(event) => setTagInput(event.target.value)} placeholder="添加标签" /><button type="button" aria-label="添加标签" onClick={addTag}><Plus size={15} /></button></div></section>}<section><h3>招聘备注</h3>{notes.map((item, index) => <p className="saved-note" key={typeof item === "object" ? item.id : `${item}-${index}`}>{typeof item === "object" ? item.body : item}</p>)}{notes.length === 0 && <p className="candidate-muted">暂无招聘备注</p>}<textarea rows="4" disabled={pendingAction === "note"} value={note} onChange={(event) => setNote(event.target.value)} placeholder="记录沟通重点或后续事项" /><button className="button secondary full" type="button" disabled={!note.trim() || pendingAction === "note"} onClick={() => void addNote()}>{pendingAction === "note" ? "保存中" : "保存备注"}</button></section></aside></div>
     {selectedWorkflowAction && <WorkflowActionDialog candidate={candidate} action={selectedWorkflowAction} serverBacked={candidate.serverBacked} submitting={pendingAction === "workflow"} actionError={actionError} conflict={conflict} onClose={() => setSelectedWorkflowAction(null)} onCommit={commitWorkflowAction} onConflictRefresh={(latestStage) => { if (candidate.serverBacked) { void onRefresh(); setSelectedWorkflowAction(null); return; } update({ stage: latestStage, version: 3, lastActivity: "刚刚", timeline: [{ time: "刚刚", actor: "系统", action: `检测到其他成员已更新流程` }, ...candidate.timeline] }); setSelectedWorkflowAction(null); onNotify("已刷新为服务端最新状态"); }} />}
     {reassignOpen && <ReviewReassignmentDialog candidate={candidate} controller={controller} submitting={pendingAction === "review-reassignment"} onClose={() => setReassignOpen(false)} onConfirm={commitReviewReassignment} />}
+    {emailDialogOpen && <CandidateEmailDialog candidate={candidate} controller={controller} onClose={() => setEmailDialogOpen(false)} onConfirmed={async () => { onNotify("候选人邮箱已确认"); await onRefresh(); }} />}
     {previewState && <ResumePreview candidate={candidate} file={previewState.file} status={previewState.status} error={previewState.error} downloading={pendingAction === "download"} onClose={closePreview} onRetry={() => void loadPreview()} onDownload={() => void downloadResume()} />}
   </div>;
 }

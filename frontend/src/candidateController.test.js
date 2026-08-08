@@ -456,3 +456,33 @@ test("notes, preview, and ticket download use the authorized server APIs", async
   assert.deepEqual(calls.find((call) => call.path.endsWith("/file")), { kind: "download", path: "/api/v1/resumes/resume-1/file", options: {} });
   assert.deepEqual(calls.at(-1), { kind: "download", path: "/api/v1/download-tickets/consume", options: { method: "POST", body: { token: "one-time-token" } } });
 });
+
+test("first outbound email requires an explicitly confirmed address", async () => {
+  const calls = [];
+  const client = { async request(path, options = {}) {
+    calls.push({ path, options });
+    if (!options.method) return { data: { masked_value: "c***@example.com", value: "candidate@example.com", source: "native", confirmation_status: "unconfirmed", confirmed_at: null, version: 2 } };
+    return { data: { masked_value: "c***@example.com", value: "candidate@example.com", source: "native", confirmation_status: "confirmed", confirmed_at: "2026-08-08T00:00:00Z", version: 3 } };
+  } };
+  const controller = createCandidateController({ client, idempotencyKey: () => "confirm-email-key" });
+
+  const email = await controller.getCandidateEmail(candidateId);
+  assert.equal(email.confirmationStatus, "unconfirmed");
+  assert.deepEqual(email.addresses, [{ value: "candidate@example.com", source: "native" }]);
+  const confirmed = await controller.confirmCandidateEmail(candidateId, email.version, "candidate@example.com");
+
+  assert.equal(confirmed.confirmationStatus, "confirmed");
+  assert.deepEqual(calls, [
+    { path: `/api/v1/candidates/${candidateId}/email`, options: {} },
+    { path: `/api/v1/candidates/${candidateId}/email`, options: { method: "PUT", ifMatch: '"2"', idempotencyKey: "confirm-email-key", body: { value: "candidate@example.com" } } },
+  ]);
+});
+
+test("candidate list normalization keeps email masked", async () => {
+  const client = { async request() { return { data: [{ id: candidateId, display_name: "陈曦", contacts: [{ kind: "email", value: "c***@example.com" }] }], meta: {} }; } };
+
+  const page = await createCandidateController({ client }).listCandidates();
+
+  assert.equal(page.records[0].email, "c***@example.com");
+  assert.equal(JSON.stringify(page.records).includes("candidate@example.com"), false);
+});

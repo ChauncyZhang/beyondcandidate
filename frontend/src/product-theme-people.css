@@ -515,3 +515,31 @@ body .review-referral-state {
 body .review-referral-state.error { color: var(--red); background: #fff2f3; }
 body .review-referral-state span { min-width: 0; flex: 1; }
 body .review-referral-state button { border: 0; color: var(--blue); background: transparent; cursor: pointer; }
+
+.candidate-email-dialog { width: min(560px, 100%); }
+.email-confirmation-body { min-width: 0; }
+.candidate-email-state { min-height: 64px; padding: 12px; border-radius: 7px; background: #f5f7f9; display: flex; align-items: center; gap: 9px; }
+.candidate-email-state.error { color: var(--red); background: #fff2f3; }
+.candidate-email-state span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.candidate-email-state button { border: 0; color: var(--blue); background: transparent; cursor: pointer; }
+.email-source-summary { padding: 12px; border: 1px solid var(--people-row-line); border-radius: 7px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px 14px; }
+.email-source-summary span { color: var(--muted); }
+.candidate-email-value { padding: 15px; border-radius: 7px; background: #f5f7f9; display: grid; gap: 5px; }
+.candidate-email-value span { color: var(--muted); font-size: 13px; }
+.candidate-email-value strong { min-width: 0; overflow-wrap: anywhere; }
+.candidate-email-options { margin: 0; padding: 0; border: 0; display: grid; gap: 8px; }
+.candidate-email-options legend { margin-bottom: 8px; font-weight: 600; }
+.candidate-email-options label { padding: 11px; border: 1px solid var(--people-row-line); border-radius: 7px; display: flex; align-items: flex-start; gap: 9px; }
+.candidate-email-options label span { min-width: 0; display: grid; gap: 3px; }
+.candidate-email-options strong, .candidate-email-options small { overflow-wrap: anywhere; }
+.candidate-email-options small { color: var(--muted); }
+.candidate-email-explicit { padding: 12px; border: 1px solid #cbd9e8; border-radius: 7px; background: #f5f9ff; display: flex !important; grid-template-columns: auto minmax(0, 1fr); align-items: flex-start; gap: 9px !important; }
+.candidate-email-explicit input { width: auto; margin-top: 2px; }
+.candidate-email-explicit span { min-width: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 720px) {
+  .candidate-email-dialog-backdrop { padding: 0; }
+  .candidate-email-dialog { width: 100%; max-height: 100dvh; border-radius: 0; }
+  .candidate-email-dialog > footer { flex-direction: column-reverse; }
+  .candidate-email-dialog > footer .button { width: 100%; }
+}

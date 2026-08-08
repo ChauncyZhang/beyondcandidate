@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { AlertTriangle, ArrowDown, ArrowUp, Bot, CalendarDays, CheckCircle2, ChevronDown, Copy, Database, FileClock, KeyRound, LockKeyhole, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal, Trash2, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Bot, CalendarDays, CheckCircle2, ChevronDown, Copy, Database, FileClock, KeyRound, LockKeyhole, Mail, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal, Trash2, Users, X } from "lucide-react";
 import { canEditAiSettings, canEditOrganizationSettings, canEditRetentionSettings, canViewAuditSettings, canViewDeletionApprovalQueue, canViewRetentionSettings, getAllowedSettingsSections } from "./roleCapabilities.js";
 import { createLlmSettingsController, getTestDisabledReason, releaseLlmSettingsSubscription } from "./llmSettings.js";
 import { createOcrSettingsController, getOcrTestDisabledReason, releaseOcrSettingsSubscription } from "./ocrSettings.js";
@@ -8,6 +8,7 @@ import { getInviteRoleOptions, getRecruitingScopeLabel, isRecruitingScopeValid, 
 import { FeishuIntegrationSettings } from "./FeishuIntegrationSettings.jsx";
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { workflowTemplateController } from "./workflowTemplateController.js";
+import { emailSettingsController } from "./emailSettingsController.js";
 import "./product-theme-admin.css";
 
 const settingsSections = [
@@ -1008,13 +1009,70 @@ function AuditSettings({ role, onNotify }) {
   <section className="retention-policy"><header><Database size={21} /><div><h3>数据保留策略</h3><p>缩短任一周期必须先预览服务端影响并显式确认。</p></div></header>{retention.status === "loading" && !retention.policy && <div className="governance-loading" role="status"><RefreshCw size={18} />正在加载保留策略…</div>}{retention.status === "denied" && <GovernanceState denied title="无保留策略权限" message="服务端未授权当前账号查看保留策略。" />}{retention.status === "error" && !retention.policy && <GovernanceState title="保留策略加载失败" message={retention.error} onRetry={() => controller.loadRetention()} />}{retention.status !== "denied" && retention.policy && retention.draft && <>{retention.error && <div className="settings-error" role="alert"><AlertTriangle size={17} />{retention.error}</div>}{retention.message && <div className="llm-settings-message" role="status">{retention.message}</div>}<div><label>终态候选人保留天数<input type="number" min="30" max="3650" disabled={!editable || retentionBusy} value={retention.draft.terminalDays} onChange={(event) => changeRetention("terminalDays", event.target.value)} /></label><label>人才库保留天数<input type="number" min="30" max="3650" disabled={!editable || retentionBusy} value={retention.draft.talentPoolDays} onChange={(event) => changeRetention("talentPoolDays", event.target.value)} /></label><label>备份窗口天数<input type="number" min="30" max="3650" disabled={!editable || retentionBusy} value={retention.draft.backupWindowDays} onChange={(event) => changeRetention("backupWindowDays", event.target.value)} /></label>{editable && <button className="button primary" type="button" disabled={!retention.dirty || retentionBusy} onClick={saveRetention}>{retention.status === "previewing" ? "正在预览…" : retention.status === "saving" ? "保存中…" : "保存保留策略"}</button>}</div><small className="retention-version">当前版本 {retention.policy.version} · 最近更新 {formatAuditTime(retention.policy.updatedAt)}</small></>}</section>{activeSelected && <aside className="settings-drawer" aria-label="审计详情"><header><div><h2>审计详情</h2><p>{activeSelected.id} · {auditOutcomeLabel(activeSelected.outcome)}</p></div><button className="icon-button" type="button" aria-label="关闭" onClick={() => setSelected(null)}><X size={20} /></button></header><div className="settings-drawer-body"><dl><div><dt>时间</dt><dd>{formatAuditTime(activeSelected.createdAt)}</dd></div><div><dt>操作者</dt><dd>{activeSelected.actor.displayName || "已删除用户"}</dd></div><div><dt>事件摘要</dt><dd>{activeSelected.summary || activeSelected.eventType || "—"}</dd></div><div><dt>资源</dt><dd>{auditResourceLabel(activeSelected.resource)}</dd></div><div><dt>结果</dt><dd>{auditOutcomeLabel(activeSelected.outcome)}</dd></div><div><dt>网络标识</dt><dd>{activeSelected.networkRef || "—"}</dd></div><div><dt>Trace ID</dt><dd>{activeSelected.traceId || "—"}</dd></div></dl></div><footer><button className="button primary" type="button" onClick={() => setSelected(null)}>完成</button></footer></aside>}{retention.preview && <DangerDialog title="确认缩短数据保留周期" description={`服务端影响预览有效期至 ${formatAuditTime(retention.preview.expiresAt)}。`} impact={`预计 ${retention.preview.affectedCandidateCount} 位候选人受到影响。请核对后明确确认。`} confirmText={retention.status === "saving" ? "保存中…" : "确认缩短期限"} confirmDisabled={retention.status === "saving"} onCancel={() => controller.cancelRetentionPreview()} onConfirm={confirmRetention} />}{deletionQueue.selected && <aside className="settings-drawer deletion-request-drawer" role="dialog" aria-modal="true" aria-label="删除请求详情"><header><div><h2>删除请求详情</h2><p>{deletionQueue.selected.id} · {deletionStatusLabel(deletionQueue.selected.status)}</p></div><button className="icon-button" type="button" aria-label="关闭" disabled={deletionQueue.approving} onClick={() => controller.loadDeletionRequests(deletionQueue.statusFilter)}><X size={20} /></button></header><div className="settings-drawer-body">{deletionQueue.detailStatus === "loading" ? <div className="governance-loading" role="status"><RefreshCw size={18} />正在刷新请求…</div> : <><dl><div><dt>请求 ID</dt><dd>{deletionQueue.selected.id}</dd></div><div><dt>原因代码</dt><dd>{deletionQueue.selected.reasonCode || "—"}</dd></div><div><dt>状态</dt><dd>{deletionStatusLabel(deletionQueue.selected.status)}</dd></div><div><dt>版本</dt><dd>{deletionQueue.selected.version}</dd></div><div><dt>请求时间</dt><dd>{formatAuditTime(deletionQueue.selected.requestedAt)}</dd></div><div><dt>批准时间</dt><dd>{formatAuditTime(deletionQueue.selected.approvedAt)}</dd></div><div><dt>安全错误码</dt><dd>{deletionQueue.selected.safeErrorCode || "—"}</dd></div><div><dt>进行中的申请</dt><dd>{deletionQueue.selected.activeApplicationCount === null ? "未确认" : `${deletionQueue.selected.activeApplicationCount} 项`}</dd></div><div><dt>策略版本</dt><dd>{deletionQueue.selected.impact.policyVersion}</dd></div><div><dt>候选人版本</dt><dd>{deletionQueue.selected.impact.candidateVersion}</dd></div><div><dt>备份窗口</dt><dd>{formatAuditTime(deletionQueue.selected.impact.backupWindowEndsAt)}</dd></div></dl>{deletionQueue.selected.activeApplicationCount > 0 && <div className="settings-error" role="alert"><AlertTriangle size={17} />批准删除将先把 {deletionQueue.selected.activeApplicationCount} 项进行中申请标记为已撤回，再删除候选人及关联数据。</div>}<div className="deletion-impact-grid">{deletionCountLabels.map(([key, label]) => <span key={key}>{label}<strong>{deletionQueue.selected.impact.counts[key]}</strong></span>)}</div>{deletionQueue.impactChanged && <div className="settings-error" role="alert"><AlertTriangle size={17} />影响已变化，请重新核对后再次确认。</div>}{deletionQueue.detailError && <div className="settings-error" role="alert"><AlertTriangle size={17} />{deletionQueue.detailError}</div>}</>}</div><footer><button className="button secondary" type="button" disabled={deletionQueue.approving} onClick={() => controller.loadDeletionRequests(deletionQueue.statusFilter)}>关闭</button>{canApproveDeletion && ["requested", "failed"].includes(deletionQueue.selected.status) && <button className="button danger" type="button" disabled={deletionQueue.approving || deletionQueue.detailStatus === "loading"} onClick={() => setApprovalOpen(true)}>批准删除</button>}</footer></aside>}{approvalOpen && deletionQueue.selected && <DangerDialog surfaceClassName="deletion-approval-dialog" title={deletionQueue.selected.activeApplicationCount > 0 ? "确认终止申请并删除候选人" : "确认批准删除请求"} description={`请求 ${deletionQueue.selected.id} 将进入删除处理队列。`} impact={deletionQueue.selected.activeApplicationCount > 0 ? `系统将先把 ${deletionQueue.selected.activeApplicationCount} 项进行中申请标记为已撤回。该操作不可撤销，请确认后继续。` : "请核对九类影响数量和备份窗口。批准后仍可能因影响变化而要求重新确认。"} confirmText={deletionQueue.approving ? "批准中…" : deletionQueue.selected.activeApplicationCount > 0 ? `终止 ${deletionQueue.selected.activeApplicationCount} 项申请并批准删除` : "确认批准"} confirmDisabled={deletionQueue.approving} onCancel={() => setApprovalOpen(false)} onConfirm={confirmDeletionApproval} />}</div>;
 }
 
+function emailSettingsError(error, action) {
+  if (error?.code === "resource_version_conflict") return "邮件设置已被其他管理员更新，请重新加载后再保存。";
+  if (["password_required", "password_reentry_required"].includes(error?.code)) return "请明确输入 SMTP 密码替换值后再保存。";
+  if (error?.kind === "unavailable") return "邮件服务暂时不可用，请稍后重试。";
+  return action === "test" ? "测试邮件未能提交，请核对测试收件人与回复地址。" : "邮件设置未能保存，当前修改已保留。";
+}
+
+function EmailSettings({ onNotify, onDirtyChange, controller = emailSettingsController }) {
+  const empty = { configured: false, host: "", port: 587, tlsMode: "starttls", username: "", enabled: false, version: 0 };
+  const [saved, setSaved] = useState(empty);
+  const [draft, setDraft] = useState(empty);
+  const [passwordReplacement, setPasswordReplacement] = useState("");
+  const [status, setStatus] = useState("loading");
+  const [error, setError] = useState("");
+  const [testForm, setTestForm] = useState({ recipient: "", replyToEmail: "", replyToName: "" });
+  const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(saved) || passwordReplacement.length > 0, [draft, saved, passwordReplacement]);
+  const busy = ["loading", "saving", "testing"].includes(status);
+
+  useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
+  useEffect(() => {
+    const beforeunload = (event) => { if (dirty) { event.preventDefault(); event.returnValue = ""; } };
+    window.addEventListener("beforeunload", beforeunload);
+    return () => window.removeEventListener("beforeunload", beforeunload);
+  }, [dirty]);
+
+  async function load() {
+    setStatus("loading"); setError("");
+    try { const config = await controller.load(); setSaved(config); setDraft(config); setPasswordReplacement(""); setStatus("ready"); }
+    catch (requestError) { setStatus("error"); setError(emailSettingsError(requestError, "load")); }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function save(event) {
+    event.preventDefault(); setStatus("saving"); setError("");
+    try { const config = await controller.save(draft, passwordReplacement); setSaved(config); setDraft(config); setPasswordReplacement(""); setStatus("ready"); onNotify("邮件发送设置已保存"); }
+    catch (requestError) { setStatus("ready"); setError(emailSettingsError(requestError, "save")); }
+  }
+  async function testSaved() {
+    setStatus("testing"); setError("");
+    try { await controller.testSavedConfiguration(testForm, { dirty }); setStatus("ready"); onNotify("测试邮件已使用已保存配置进入发送队列"); }
+    catch (requestError) { setStatus("ready"); setError(emailSettingsError(requestError, "test")); }
+  }
+
+  const testReady = saved.configured && !dirty && testForm.recipient.trim() && testForm.replyToEmail.trim() && testForm.replyToName.trim();
+  const endpointChanged = ["host", "port", "tlsMode", "username"].some((key) => draft[key] !== saved[key]);
+  const passwordRequired = !saved.configured || endpointChanged;
+  return <section className="settings-section email-settings" aria-labelledby="email-settings-title">
+    <div className="settings-section-heading"><div><h2 id="email-settings-title"><Mail size={21} />邮件发送设置</h2><p>仅系统管理员可配置组织的 SMTP 连接；密码只在明确替换时提交。</p></div>{status === "error" && <button className="button secondary" type="button" onClick={() => void load()}><RefreshCw size={16} />重新加载</button>}</div>
+    {status === "loading" && <div className="organization-state" role="status"><RefreshCw size={18} />正在加载邮件设置…</div>}
+    {error && <div className="settings-error" role="alert"><AlertTriangle size={17} />{error}</div>}
+    {status !== "loading" && <><div className="email-server-policy"><LockKeyhole size={19} /><div><strong>发件身份由服务端统一管理</strong><p>发件人名称与地址不可在此修改，系统不会允许客户端伪造 From 身份。</p><small>默认回复地址：服务端当前未向设置 API 公开；业务发送由授权流程提供，测试时需在下方单独填写。</small></div></div>
+      <form className="email-settings-form" onSubmit={save}><label>SMTP 主机<input required maxLength="253" disabled={busy} value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} placeholder="smtp.example.com" /></label><label>端口<input required type="number" min="1" max="65535" disabled={busy} value={draft.port} onChange={(event) => setDraft({ ...draft, port: Number(event.target.value) })} /></label><label>TLS 模式<select disabled={busy} value={draft.tlsMode} onChange={(event) => setDraft({ ...draft, tlsMode: event.target.value })}><option value="starttls">STARTTLS</option><option value="tls">TLS</option></select></label><label>用户名<input required maxLength="320" autoComplete="username" disabled={busy} value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></label><label className="email-password-field">替换 SMTP 密码<input type="password" autoComplete="new-password" disabled={busy} value={passwordReplacement} onChange={(event) => setPasswordReplacement(event.target.value)} placeholder={saved.configured ? "留空表示不替换" : "首次配置必须填写"} /><small>系统不会读取、返回或保留已保存密码；首次配置或修改连接端点时必须明确输入替换值。</small></label><label className="email-enabled"><input type="checkbox" disabled={busy} checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />启用此 SMTP 配置</label><div className="email-settings-actions"><span aria-live="polite">{passwordRequired && dirty && !passwordReplacement ? "当前修改需要输入 SMTP 密码替换值。" : dirty ? "有未保存修改；保存前不能发送测试邮件。" : saved.configured ? `已保存版本 ${saved.version}` : "尚未保存 SMTP 配置"}</span><button className="button primary" type="submit" disabled={busy || !dirty || !draft.host.trim() || !draft.username.trim() || (passwordRequired && !passwordReplacement)}>{status === "saving" ? "保存中…" : "保存邮件设置"}</button></div></form>
+      <section className="email-test-panel"><header><h3>测试已保存配置</h3><p>测试只使用服务端已保存的 SMTP 配置，不会使用上方未保存内容。</p></header><div className="email-test-fields"><label>测试收件人<input type="email" disabled={busy} value={testForm.recipient} onChange={(event) => setTestForm({ ...testForm, recipient: event.target.value })} /></label><label>本次测试回复地址<input type="email" disabled={busy} value={testForm.replyToEmail} onChange={(event) => setTestForm({ ...testForm, replyToEmail: event.target.value })} /></label><label>本次测试回复名称<input disabled={busy} value={testForm.replyToName} onChange={(event) => setTestForm({ ...testForm, replyToName: event.target.value })} /></label><button className="button secondary" type="button" disabled={busy || !testReady} onClick={() => void testSaved()}>{status === "testing" ? "提交中…" : "发送测试邮件"}</button></div></section></>}
+  </section>;
+}
+
 export function SettingsWorkspace({ currentRole, onRoleChange, onNotify, pageActionHost, section = "组织与权限", organizationTab = "成员", templateTab = "招聘流程", onRouteChange = () => {} }) {
   const [aiDirty, setAiDirty] = useState(false);
+  const [emailDirty, setEmailDirty] = useState(false);
   const [pendingSection, setPendingSection] = useState(null);
   const allowedSettingsSections = getAllowedSettingsSections(currentRole);
   const visibleSettingsSections = settingsSections.filter(([label]) => allowedSettingsSections.includes(label));
   const activeSection = allowedSettingsSections.includes(section) ? section : allowedSettingsSections[0];
-  const content = activeSection === "组织与权限" ? <OrganizationSettings role={currentRole} onNotify={onNotify} pageActionHost={pageActionHost} activeTab={organizationTab} onTabChange={(tab) => onRouteChange("组织与权限", tab)} /> : activeSection === "流程与评价模板" ? <TemplateSettings role={currentRole} onNotify={onNotify} activeTab={templateTab} onTabChange={(tab) => onRouteChange("流程与评价模板", tab)} /> : activeSection === "AI 设置" ? <AiSettings role={currentRole} onNotify={onNotify} onDirtyChange={setAiDirty} /> : activeSection === "飞书集成" ? <FeishuIntegrationSettings onNotify={onNotify} /> : activeSection === "审计与数据治理" ? <AuditSettings key={currentRole} role={currentRole} onNotify={onNotify} /> : <section className="settings-denied"><LockKeyhole size={31} /><h3>无设置权限</h3><p>当前账号未获得系统设置访问权限。</p></section>;
+  const content = activeSection === "组织与权限" ? <OrganizationSettings role={currentRole} onNotify={onNotify} pageActionHost={pageActionHost} activeTab={organizationTab} onTabChange={(tab) => onRouteChange("组织与权限", tab)} /> : activeSection === "流程与评价模板" ? <TemplateSettings role={currentRole} onNotify={onNotify} activeTab={templateTab} onTabChange={(tab) => onRouteChange("流程与评价模板", tab)} /> : activeSection === "AI 设置" ? <><AiSettings role={currentRole} onNotify={onNotify} onDirtyChange={setAiDirty} />{currentRole === "系统管理员" && <EmailSettings onNotify={onNotify} onDirtyChange={setEmailDirty} />}</> : activeSection === "飞书集成" ? <FeishuIntegrationSettings onNotify={onNotify} /> : activeSection === "审计与数据治理" ? <AuditSettings key={currentRole} role={currentRole} onNotify={onNotify} /> : <section className="settings-denied"><LockKeyhole size={31} /><h3>无设置权限</h3><p>当前账号未获得系统设置访问权限。</p></section>;
   useEffect(() => {
     if (!aiDirty) return undefined;
     const preventUnsavedExit = (event) => { event.preventDefault(); event.returnValue = ""; };
@@ -1022,7 +1080,7 @@ export function SettingsWorkspace({ currentRole, onRoleChange, onNotify, pageAct
     return () => window.removeEventListener("beforeunload", preventUnsavedExit);
   }, [aiDirty]);
   function openSection(nextSection) {
-    if (activeSection === "AI 设置" && aiDirty && nextSection !== activeSection) {
+    if (activeSection === "AI 设置" && (aiDirty || emailDirty) && nextSection !== activeSection) {
       setPendingSection(nextSection);
       return;
     }
@@ -1030,8 +1088,9 @@ export function SettingsWorkspace({ currentRole, onRoleChange, onNotify, pageAct
   }
   function leaveAiSettings() {
     setAiDirty(false);
+    setEmailDirty(false);
     onRouteChange(pendingSection, settingsDefaultTabs[pendingSection]);
     setPendingSection(null);
   }
-  return <div className="settings-page"><RoleSwitch value={currentRole} onChange={onRoleChange} /><div className="settings-layout"><nav className="settings-subnav" aria-label="设置导航">{visibleSettingsSections.map(([label, Icon]) => <button type="button" key={label} className={activeSection === label ? "active" : ""} aria-current={activeSection === label ? "page" : undefined} onClick={() => openSection(label)}><Icon size={17} />{label}</button>)}</nav><main className="settings-content">{content}</main></div>{pendingSection && <div className="ux07-dialog-backdrop"><section className="ux07-dialog" role="dialog" aria-modal="true" aria-label="AI 设置尚未保存"><header><div><h3>AI 设置尚未保存</h3><p>离开将放弃 LLM 或 OCR 中尚未保存的配置修改。</p></div><button className="icon-button" type="button" aria-label="关闭" onClick={() => setPendingSection(null)}><X size={19} /></button></header><div className="ux07-danger-impact"><AlertTriangle size={22} /><span>未保存的 Provider、Base URL、模型和 API Key 替换内容都会被清除。</span></div><footer><button className="button secondary" type="button" onClick={() => setPendingSection(null)}>继续编辑</button><button className="button danger" type="button" onClick={leaveAiSettings}>放弃修改并离开</button></footer></section></div>}</div>;
+  return <div className="settings-page"><RoleSwitch value={currentRole} onChange={onRoleChange} /><div className="settings-layout"><nav className="settings-subnav" aria-label="设置导航">{visibleSettingsSections.map(([label, Icon]) => <button type="button" key={label} className={activeSection === label ? "active" : ""} aria-current={activeSection === label ? "page" : undefined} onClick={() => openSection(label)}><Icon size={17} />{label}</button>)}</nav><main className="settings-content">{content}</main></div>{pendingSection && <div className="ux07-dialog-backdrop"><section className="ux07-dialog" role="dialog" aria-modal="true" aria-label="系统设置尚未保存"><header><div><h3>系统设置尚未保存</h3><p>离开将放弃当前页面中尚未保存的配置修改。</p></div><button className="icon-button" type="button" aria-label="关闭" onClick={() => setPendingSection(null)}><X size={19} /></button></header><div className="ux07-danger-impact"><AlertTriangle size={22} /><span>未保存的 AI 或邮件连接配置与密码替换输入都会被清除。</span></div><footer><button className="button secondary" type="button" onClick={() => setPendingSection(null)}>继续编辑</button><button className="button danger" type="button" onClick={leaveAiSettings}>放弃修改并离开</button></footer></section></div>}</div>;
 }

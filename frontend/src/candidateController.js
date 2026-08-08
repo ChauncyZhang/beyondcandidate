@@ -102,6 +102,26 @@ function contactValue(contacts, kind) {
   return safeString(safeArray(contacts).find((item) => item?.kind === kind)?.value, "未提供");
 }
 
+function normalizeCandidateEmail(value) {
+  const source = safeString(value?.source);
+  const addresses = safeArray(value?.addresses).flatMap((item) => {
+    const address = typeof item === "string" ? item : safeString(item?.value);
+    if (!address) return [];
+    return [{ value: address, source: safeString(item?.source, source) }];
+  });
+  const primaryValue = safeString(value?.value);
+  if (!addresses.length && primaryValue) addresses.push({ value: primaryValue, source });
+  return {
+    maskedValue: safeString(value?.masked_value) || null,
+    value: primaryValue || addresses[0]?.value || null,
+    source: source || addresses[0]?.source || null,
+    confirmationStatus: value?.confirmation_status === "confirmed" ? "confirmed" : "unconfirmed",
+    confirmedAt: safeString(value?.confirmed_at) || null,
+    version: Number.isInteger(value?.version) ? value.version : 1,
+    addresses,
+  };
+}
+
 function displayDateTime(value) {
   const raw = safeString(value);
   if (!raw) return "未记录";
@@ -400,7 +420,30 @@ export function createCandidateController({ client = apiClient, idempotencyKey =
     return client.download("/api/v1/download-tickets/consume", { method: "POST", body: { token: ticket?.data?.token }, ...signalOption(signal) });
   }
 
-  return { listCandidates, listJobs, listReviewerOptions, loadReview, workflowAction, reassignOpenReviewTask, addNote, previewResume, getResumeFile, downloadResume };
+  async function getCandidateEmail(candidateId, { signal } = {}) {
+    const id = safeString(candidateId).trim();
+    if (!id) throw codedError("CANDIDATE_ID_REQUIRED", "candidate id required");
+    const result = await client.request(`/api/v1/candidates/${encodeURIComponent(id)}/email`, signalOption(signal));
+    return normalizeCandidateEmail(result?.data);
+  }
+
+  async function confirmCandidateEmail(candidateId, version, value, { signal } = {}) {
+    const id = safeString(candidateId).trim();
+    const address = safeString(value).trim();
+    if (!id) throw codedError("CANDIDATE_ID_REQUIRED", "candidate id required");
+    if (!Number.isInteger(version) || version < 1) throw codedError("CANDIDATE_EMAIL_VERSION_REQUIRED", "candidate email version required");
+    if (!address) throw codedError("CANDIDATE_EMAIL_REQUIRED", "candidate email required");
+    const result = await client.request(`/api/v1/candidates/${encodeURIComponent(id)}/email`, {
+      method: "PUT",
+      ifMatch: `"${version}"`,
+      idempotencyKey: idempotencyKey(),
+      body: { value: address },
+      ...signalOption(signal),
+    });
+    return normalizeCandidateEmail(result?.data);
+  }
+
+  return { listCandidates, listJobs, listReviewerOptions, loadReview, workflowAction, reassignOpenReviewTask, addNote, previewResume, getResumeFile, downloadResume, getCandidateEmail, confirmCandidateEmail };
 }
 
 export const candidateController = createCandidateController();

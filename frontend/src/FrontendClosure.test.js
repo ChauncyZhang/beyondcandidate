@@ -3,12 +3,25 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { createServer } from "vite";
+import { readFileSync } from "node:fs";
 
 const prototypeRoot = fileURLToPath(new URL("../", import.meta.url));
 const departments = [{ id: "00000000-0000-4000-8000-000000000201", name: "技术部", parent_id: null, member_count: 6, job_count: 3 }];
 const users = [{ id: "user-1", display_name: "Admin", email: "admin@example.test", department_id: departments[0].id, department_name: "技术部", roles: ["recruiting_admin"], status: "active" }];
 const notificationJobId = "10000000-0000-4000-8000-000000000001";
 const standardWorkflowTemplate = { id: "50000000-0000-4000-8000-000000000001", name: "标准社招流程", rounds: ["一面"], status: "active", version: 1 };
+
+test("email settings and candidate confirmation source preserve the privacy contract", () => {
+  const settingsSource = readFileSync(new URL("./SettingsViews.jsx", import.meta.url), "utf8");
+  const candidateSource = readFileSync(new URL("./CandidateViews.jsx", import.meta.url), "utf8");
+  assert.match(settingsSource, /邮件发送设置/);
+  assert.match(settingsSource, /发件身份由服务端统一管理/);
+  assert.match(settingsSource, /beforeunload/);
+  assert.match(candidateSource, /确认候选人邮箱/);
+  assert.match(candidateSource, /role="dialog"/);
+  assert.match(candidateSource, /data-email-dialog-initial-focus/);
+  assert.doesNotMatch(candidateSource, /candidate-table-row[^\n]+getCandidateEmail/s);
+});
 
 function notificationCandidate(stage, index, name) {
   return {
