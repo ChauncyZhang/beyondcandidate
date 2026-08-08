@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 class ApiModel(BaseModel):
@@ -11,12 +11,25 @@ class EmailConfigUpdate(ApiModel):
     tls_mode: str = Field(pattern=r"^(starttls|tls)$")
     username: str = Field(min_length=1, max_length=320)
     password: str | None = Field(default=None, min_length=1, max_length=4096)
+    default_reply_to_email: EmailStr | None = None
+    default_reply_to_name: str | None = Field(default=None, min_length=1, max_length=200)
     enabled: bool = False
 
-    @field_validator("host", "username")
+    @field_validator("host", "username", "default_reply_to_name")
     @classmethod
-    def strip_value(cls, value: str) -> str:
-        return value.strip()
+    def strip_value(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value or "\r" in value or "\n" in value:
+            raise ValueError("invalid email configuration value")
+        return value
+
+    @model_validator(mode="after")
+    def reply_to_pair(self) -> "EmailConfigUpdate":
+        if (self.default_reply_to_email is None) != (self.default_reply_to_name is None):
+            raise ValueError("default reply-to email and name must be configured together")
+        return self
 
 
 class EmailTemplateUpdate(ApiModel):
@@ -35,5 +48,21 @@ class EmailTemplateUpdate(ApiModel):
 
 class EmailTestSend(ApiModel):
     recipient: EmailStr
-    reply_to_email: EmailStr
-    reply_to_name: str = Field(min_length=1, max_length=200)
+    reply_to_email: EmailStr | None = None
+    reply_to_name: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("reply_to_name")
+    @classmethod
+    def validate_reply_to_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value or "\r" in value or "\n" in value:
+            raise ValueError("invalid reply-to name")
+        return value
+
+    @model_validator(mode="after")
+    def override_pair(self) -> "EmailTestSend":
+        if (self.reply_to_email is None) != (self.reply_to_name is None):
+            raise ValueError("reply-to override email and name must be supplied together")
+        return self

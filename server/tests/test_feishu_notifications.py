@@ -194,6 +194,7 @@ def test_failed_email_notification_is_opaque_and_revalidated_for_durable_recipie
         provider_config = EmailProviderConfig(
             organization_id=admin.organization_id, host="smtp.example.test", port=587,
             tls_mode="starttls", username="mailer", encrypted_password=app.state.email_secret_cipher.encrypt_smtp_password("private"),
+            default_reply_to_email=admin.email, default_reply_to_name=admin.display_name,
             enabled=True, version=1, created_by=admin.id, updated_by=admin.id,
         )
         db.add(provider_config); db.flush()

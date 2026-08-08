@@ -27,14 +27,14 @@ logger = logging.getLogger(__name__)
 class DeliveryCommand:
     organization_id: uuid.UUID
     recipient: str
-    reply_to_email: str
-    reply_to_name: str
     subject: str
     body: str
     resource_type: str
     resource_id: uuid.UUID
     idempotency_key: str
     operation: str
+    reply_to_email: str | None = None
+    reply_to_name: str | None = None
     created_by: uuid.UUID | None = None
     template_id: uuid.UUID | None = None
     template_version: int | None = None
@@ -85,36 +85,42 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
         "delivery-business-key",
         {"organization_id": str(command.organization_id), "actor": actor_scope, "operation": command.operation, "key": command.idempotency_key},
     )
-    request_fingerprint = cipher.fingerprint(
-        "delivery-request",
-        {
-            "recipient": command.recipient, "reply_to_email": command.reply_to_email,
-            "reply_to_name": command.reply_to_name, "subject": command.subject, "body": command.body,
+    if db.bind.dialect.name == "postgresql":
+        db.execute(text("select pg_advisory_xact_lock(hashtextextended(:scope, 0))"), {"scope": f"email-delivery:{command.organization_id}:{business_dedupe_key}"})
+    if (command.reply_to_email is None) != (command.reply_to_name is None):
+        raise ValueError("reply_to_pair_required")
+
+    def fingerprint(reply_to_email: str, reply_to_name: str) -> str:
+        return cipher.fingerprint("delivery-request", {
+            "recipient": command.recipient, "reply_to_email": reply_to_email,
+            "reply_to_name": reply_to_name, "subject": command.subject, "body": command.body,
             "resource_type": command.resource_type, "resource_id": str(command.resource_id),
             "template_id": str(command.template_id) if command.template_id else None,
             "template_version": command.template_version, "parent_delivery_id": str(command.parent_delivery_id) if command.parent_delivery_id else None,
             "sender_email": sender_policy.email, "sender_name": sender_policy.name,
-        },
-    )
-    if db.bind.dialect.name == "postgresql":
-        db.execute(text("select pg_advisory_xact_lock(hashtextextended(:scope, 0))"), {"scope": f"email-delivery:{command.organization_id}:{business_dedupe_key}"})
+        })
+
     existing = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == command.organization_id, EmailDelivery.business_dedupe_key == business_dedupe_key))
     if existing is not None:
+        request_fingerprint = fingerprint(command.reply_to_email or existing.reply_to_email, command.reply_to_name or existing.reply_to_name)
         if not hmac.compare_digest(existing.request_fingerprint, request_fingerprint):
             raise DeliveryIdempotencyConflict("idempotency_conflict")
         return existing
     config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.organization_id == command.organization_id).order_by(EmailProviderConfig.version.desc()).limit(1))
     if config is None or not config.enabled:
         raise ValueError("email_not_configured")
+    reply_to_email = command.reply_to_email or config.default_reply_to_email
+    reply_to_name = command.reply_to_name or config.default_reply_to_name
+    request_fingerprint = fingerprint(reply_to_email, reply_to_name)
     recipient = cipher.normalize_email(command.recipient)
     sender = cipher.normalize_email(_safe_header(sender_policy.email))
-    reply_to = cipher.normalize_email(_safe_header(command.reply_to_email))
+    reply_to = cipher.normalize_email(_safe_header(reply_to_email))
     delivery = EmailDelivery(
         organization_id=command.organization_id, provider_config_id=config.id, provider_config_version=config.version,
         template_id=command.template_id, template_version=command.template_version,
         recipient_ciphertext=cipher.encrypt_recipient(recipient), recipient_masked=cipher.mask_email(recipient),
         sender_email=sender, sender_name=_safe_header(sender_policy.name), reply_to_email=reply_to,
-        reply_to_name=_safe_header(command.reply_to_name), rendered_subject=_safe_header(command.subject),
+        reply_to_name=_safe_header(reply_to_name), rendered_subject=_safe_header(command.subject),
         rendered_body=command.body, resource_type=command.resource_type, resource_id=command.resource_id,
         business_dedupe_key=business_dedupe_key, request_fingerprint=request_fingerprint,
         parent_delivery_id=command.parent_delivery_id, created_by=command.created_by, status="queued", version=1,

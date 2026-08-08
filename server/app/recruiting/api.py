@@ -8,7 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import and_, exists, func, literal, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
@@ -131,7 +131,14 @@ class ContactInput(StrictModel):
 
 
 class CandidateEmailConfirmation(StrictModel):
-    value: str = Field(min_length=1, max_length=320)
+    contact_id: UUID | None = None
+    value: EmailStr | None = None
+
+    @model_validator(mode="after")
+    def exactly_one_address_selector(self) -> "CandidateEmailConfirmation":
+        if (self.contact_id is None) == (self.value is None):
+            raise ValueError("exactly one of contact_id or value is required")
+        return self
 
 
 class CandidateCreate(StrictModel):
@@ -342,7 +349,12 @@ def _candidate_data(db, candidate: Candidate, principal: Principal) -> dict[str,
 
 
 def _primary_email_contact(db, organization_id: UUID, candidate_id: UUID, *, lock: bool = False) -> CandidateContact | None:
-    query = select(CandidateContact).where(
+    query = _email_contacts_query(organization_id, candidate_id).limit(1)
+    return db.scalar(query.with_for_update() if lock else query)
+
+
+def _email_contacts_query(organization_id: UUID, candidate_id: UUID):
+    return select(CandidateContact).where(
         CandidateContact.organization_id == organization_id,
         CandidateContact.candidate_id == candidate_id,
         CandidateContact.kind == "email",
@@ -350,17 +362,16 @@ def _primary_email_contact(db, organization_id: UUID, candidate_id: UUID, *, loc
         (CandidateContact.confirmation_status == "confirmed").desc(),
         CandidateContact.confirmed_at.desc(),
         CandidateContact.created_at.desc(),
-    ).limit(1)
-    return db.scalar(query.with_for_update() if lock else query)
+        CandidateContact.id.desc(),
+    )
 
 
-def _candidate_email_data(request: Request, contact: CandidateContact | None) -> dict[str, Any]:
-    if contact is None:
-        return {"masked_value": None, "value": None, "source": None, "confirmation_status": "unconfirmed", "confirmed_at": None, "version": 1}
+def _candidate_email_address_data(request: Request, contact: CandidateContact) -> dict[str, Any]:
     confirmed_at = contact.confirmed_at
     if confirmed_at is not None and confirmed_at.tzinfo is None:
         confirmed_at = confirmed_at.replace(tzinfo=timezone.utc)
     return {
+        "id": str(contact.id),
         "masked_value": contact.masked_value,
         "value": request.app.state.contact_cipher.decrypt(contact.ciphertext),
         "source": contact.source,
@@ -370,10 +381,21 @@ def _candidate_email_data(request: Request, contact: CandidateContact | None) ->
     }
 
 
-def _candidate_email_response(request: Request, contact: CandidateContact | None, status: int = 200) -> JSONResponse:
-    response = JSONResponse({"data": _candidate_email_data(request, contact)}, status_code=status)
+def _candidate_email_data(request: Request, contacts: list[CandidateContact]) -> dict[str, Any]:
+    addresses = [_candidate_email_address_data(request, contact) for contact in contacts]
+    contact = contacts[0] if contacts else None
+    if contact is None:
+        return {"masked_value": None, "value": None, "source": None, "confirmation_status": "unconfirmed", "confirmed_at": None, "version": 1, "addresses": []}
+    selected = dict(addresses[0])
+    selected.pop("id")
+    selected["addresses"] = addresses
+    return selected
+
+
+def _candidate_email_response(request: Request, contacts: list[CandidateContact], status: int = 200) -> JSONResponse:
+    response = JSONResponse({"data": _candidate_email_data(request, contacts)}, status_code=status)
     response.headers["Cache-Control"] = "no-store"
-    response.headers["ETag"] = f'"{contact.version if contact else 1}"'
+    response.headers["ETag"] = f'"{contacts[0].version if contacts else 1}"'
     return response
 
 
@@ -1598,10 +1620,10 @@ def get_candidate_email(candidate_id: UUID, request: Request):
     with request.app.state.identity_store.sync_session() as db:
         candidate = _load_candidate(db, principal, candidate_id, RecruitingAction.MANAGE_CANDIDATE)
         if candidate is None: return _denied(request)
-        contact = _primary_email_contact(db, principal.organization_id, candidate_id)
-        db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, event_type="candidate.email_read", outcome="success", trace_id=request.state.trace_id, metadata_json={"candidate_id": str(candidate_id), "contact_id": str(contact.id) if contact else None}))
+        contacts = db.scalars(_email_contacts_query(principal.organization_id, candidate_id)).all()
+        db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, event_type="candidate.email_read", outcome="success", trace_id=request.state.trace_id, metadata_json={"candidate_id": str(candidate_id), "contact_id": str(contacts[0].id) if contacts else None, "address_count": len(contacts)}))
         db.commit()
-        return _candidate_email_response(request, contact)
+        return _candidate_email_response(request, contacts)
 
 
 @router.put("/candidates/{candidate_id}/email")
@@ -1613,22 +1635,34 @@ def confirm_candidate_email(candidate_id: UUID, payload: CandidateEmailConfirmat
         candidate = _load_candidate(db, principal, candidate_id, RecruitingAction.MANAGE_CANDIDATE)
         if candidate is None: return _denied(request)
         try:
-            protected = request.app.state.contact_cipher.protect("email", payload.value)
+            protected = request.app.state.contact_cipher.protect("email", str(payload.value)) if payload.value is not None else None
 
             def action():
                 lock_active_candidate(db, principal.organization_id, candidate_id)
                 current = _primary_email_contact(db, principal.organization_id, candidate_id, lock=True)
                 current_version = current.version if current else 1
+                selected = None
+                if payload.contact_id is not None:
+                    selected = db.scalar(select(CandidateContact).where(
+                        CandidateContact.organization_id == principal.organization_id,
+                        CandidateContact.candidate_id == candidate_id,
+                        CandidateContact.id == payload.contact_id,
+                        CandidateContact.kind == "email",
+                    ).with_for_update())
+                    if selected is None:
+                        raise CandidateUnavailable
                 if current_version != expected:
                     raise ResourceVersionConflict
-                matching = db.scalar(select(CandidateContact).where(
-                    CandidateContact.organization_id == principal.organization_id,
-                    CandidateContact.kind == "email",
-                    CandidateContact.lookup_hash == protected.lookup_hash,
-                ))
-                if matching is not None and matching.candidate_id != candidate_id:
-                    raise CandidateEmailConflict
-                if matching is None:
+                matching = selected
+                if protected is not None:
+                    matching = db.scalar(select(CandidateContact).where(
+                        CandidateContact.organization_id == principal.organization_id,
+                        CandidateContact.kind == "email",
+                        CandidateContact.lookup_hash == protected.lookup_hash,
+                    ))
+                    if matching is not None and matching.candidate_id != candidate_id:
+                        raise CandidateEmailConflict
+                if matching is None and protected is not None:
                     contact = CandidateContact(organization_id=principal.organization_id, candidate_id=candidate_id, kind="email", ciphertext=protected.ciphertext, lookup_hash=protected.lookup_hash, masked_value=protected.masked_value, source="manual", confirmation_status="confirmed", confirmed_by=principal.user_id, confirmed_at=datetime.now(timezone.utc), version=current_version + 1)
                     db.add(contact)
                 else:
@@ -1638,12 +1672,14 @@ def confirm_candidate_email(candidate_id: UUID, payload: CandidateEmailConfirmat
                     contact.confirmed_at = datetime.now(timezone.utc)
                     contact.version = current_version + 1
                 db.flush()
-                db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, event_type="candidate.email_confirmed", outcome="success", trace_id=request.state.trace_id, metadata_json={"candidate_id": str(candidate_id), "contact_id": str(contact.id), "version": contact.version}))
+                db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, event_type="candidate.email_confirmed", outcome="success", trace_id=request.state.trace_id, metadata_json={"candidate_id": str(candidate_id), "contact_id": str(contact.id), "version": contact.version, "selection_mode": "existing" if payload.contact_id is not None else "manual", "source": contact.source}))
                 return contact
 
-            contact = _email_confirmation_idempotent(db, principal.organization_id, principal.user_id, candidate_id, key, {"candidate_id": candidate_id, "expected_version": expected, "lookup_hash": protected.lookup_hash}, action)
+            fingerprint = {"candidate_id": candidate_id, "expected_version": expected, "contact_id": payload.contact_id, "lookup_hash": protected.lookup_hash if protected is not None else None}
+            _email_confirmation_idempotent(db, principal.organization_id, principal.user_id, candidate_id, key, fingerprint, action)
             db.commit()
-            return _candidate_email_response(request, contact)
+            contacts = db.scalars(_email_contacts_query(principal.organization_id, candidate_id)).all()
+            return _candidate_email_response(request, contacts)
         except (IdempotencyConflict, ResourceVersionConflict, CandidateEmailConflict, CandidateUnavailable) as error:
             db.rollback()
             return _problem_for(request, error)

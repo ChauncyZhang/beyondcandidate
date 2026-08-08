@@ -20,6 +20,8 @@ class EmailProviderConfig(Base):
     tls_mode: Mapped[str] = mapped_column(String(16), nullable=False)
     username: Mapped[str] = mapped_column(String(320), nullable=False)
     encrypted_password: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    default_reply_to_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    default_reply_to_name: Mapped[str] = mapped_column(String(200), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)

@@ -30,6 +30,7 @@ def test_email_delivery_schema_has_versioned_provider_and_dedupe_guards() -> Non
         if constraint.__class__.__name__ == "UniqueConstraint"
     }
     assert ("organization_id", "version") in provider_unique_columns
+    assert {"default_reply_to_email", "default_reply_to_name"} <= set(EmailProviderConfig.__table__.columns.keys())
     assert {"request_fingerprint", "version"} <= set(EmailDelivery.__table__.columns.keys())
     check_names = {
         constraint.name

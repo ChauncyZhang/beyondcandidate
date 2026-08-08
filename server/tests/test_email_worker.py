@@ -45,7 +45,7 @@ def delivery_store(tmp_path, *, feishu_state="enabled", automated=False, admin_r
         if admin_role:
             user.roles.append(UserRole(role="recruiting_admin"))
         db.add_all([organization, user]); db.flush()
-        db.add(EmailProviderConfig(organization_id=organization.id, host="smtp.example.test", port=587, tls_mode="starttls", username="mailer@example.test", encrypted_password=cipher.encrypt_smtp_password("smtp-private"), enabled=True, version=1, created_by=user.id, updated_by=user.id))
+        db.add(EmailProviderConfig(organization_id=organization.id, host="smtp.example.test", port=587, tls_mode="starttls", username="mailer@example.test", encrypted_password=cipher.encrypt_smtp_password("smtp-private"), default_reply_to_email="default-hr@example.com", default_reply_to_name="Default HR", enabled=True, version=1, created_by=user.id, updated_by=user.id))
         if feishu_state != "absent":
             db.add(FeishuOrganizationConfig(organization_id=organization.id, app_id="app", encrypted_app_secret=b"opaque", redirect_uri="https://hr.example.test/callback", calendar_id="primary", enabled=feishu_state == "enabled", version=1, created_by=user.id, updated_by=user.id))
         delivery = enqueue_delivery(db, DeliveryCommand(organization_id=organization.id, recipient="candidate@example.com", reply_to_email="hr@example.com", reply_to_name="Responsible HR", subject="Interview invitation", body="Hello Candidate", resource_type="test", resource_id=uuid.uuid4(), idempotency_key="worker-delivery", operation="test.worker", created_by=None if automated else user.id), cipher=cipher, sender_policy=SenderPolicy("careers@example.com", "BeyondCandidate"))
@@ -106,7 +106,7 @@ def test_worker_uses_exact_saved_provider_snapshot_when_newer_config_exists(tmp_
     sessions, cipher, delivery_id, job = delivery_store(tmp_path)
     with sessions.begin() as db:
         config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.version == 1))
-        db.add(EmailProviderConfig(organization_id=config.organization_id, host="smtp-new.example.com", port=465, tls_mode="tls", username="new@example.test", encrypted_password=cipher.encrypt_smtp_password("new-private"), enabled=True, version=2, created_by=config.created_by, updated_by=config.updated_by))
+        db.add(EmailProviderConfig(organization_id=config.organization_id, host="smtp-new.example.com", port=465, tls_mode="tls", username="new@example.test", encrypted_password=cipher.encrypt_smtp_password("new-private"), default_reply_to_email=config.default_reply_to_email, default_reply_to_name=config.default_reply_to_name, enabled=True, version=2, created_by=config.created_by, updated_by=config.updated_by))
     captured = {}
     monkeypatch.setattr("server.app.communications.worker.SmtpMailProvider", lambda **kwargs: captured.update(kwargs) or FakeMailProvider())
     asyncio.run(EmailDeliveryJobHandler(sessions, None, cipher)(job))
@@ -120,7 +120,7 @@ def test_disabled_provider_is_a_persisted_hr_visible_final_failure(tmp_path):
     sessions, cipher, delivery_id, job = delivery_store(tmp_path)
     with sessions.begin() as db:
         config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.version == 1))
-        db.add(EmailProviderConfig(organization_id=config.organization_id, host=config.host, port=config.port, tls_mode=config.tls_mode, username=config.username, encrypted_password=config.encrypted_password, enabled=False, version=2, created_by=config.created_by, updated_by=config.updated_by))
+        db.add(EmailProviderConfig(organization_id=config.organization_id, host=config.host, port=config.port, tls_mode=config.tls_mode, username=config.username, encrypted_password=config.encrypted_password, default_reply_to_email=config.default_reply_to_email, default_reply_to_name=config.default_reply_to_name, enabled=False, version=2, created_by=config.created_by, updated_by=config.updated_by))
     with pytest.raises(PermanentJobError) as caught:
         asyncio.run(EmailDeliveryJobHandler(sessions, FakeMailProvider(), cipher)(job))
     assert caught.value.safe_code == "email_configuration_unavailable"

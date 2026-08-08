@@ -400,7 +400,8 @@ def test_candidate_email_confirmation_is_hr_only_audited_no_store_and_idempotent
         assert denied.status_code == 404
         assert initial.status_code == 200
         assert initial.headers["cache-control"] == "no-store"
-        assert initial.json()["data"] == {
+        initial_data = initial.json()["data"]
+        assert {key: initial_data[key] for key in ("masked_value", "value", "source", "confirmation_status", "confirmed_at", "version")} == {
             "masked_value": "l***@example.com",
             "value": "legacy@example.com",
             "source": "manual",
@@ -408,6 +409,15 @@ def test_candidate_email_confirmation_is_hr_only_audited_no_store_and_idempotent
             "confirmed_at": None,
             "version": 1,
         }
+        assert initial_data["addresses"] == [{
+            "id": initial_data["addresses"][0]["id"],
+            "masked_value": "l***@example.com",
+            "value": "legacy@example.com",
+            "source": "manual",
+            "confirmation_status": "unconfirmed",
+            "confirmed_at": None,
+            "version": 1,
+        }]
 
         headers = {**admin_headers, "If-Match": '"1"', "Idempotency-Key": "confirm-email"}
         confirmed = client.put(
@@ -450,6 +460,82 @@ def test_candidate_email_confirmation_is_hr_only_audited_no_store_and_idempotent
         assert db.query(AuditLog).filter_by(event_type="candidate.email_read").count() == 1
         assert db.query(AuditLog).filter_by(event_type="candidate.email_confirmed").count() == 1
         assert db.query(IdempotencyRecord).filter_by(operation=f"candidate.email_confirm:{candidate_id}").count() == 1
+
+
+def test_candidate_email_addresses_are_ordered_scoped_and_selectable_by_contact_id(tmp_path) -> None:
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "email-selection-admin@example.test")
+    with TestClient(app) as client:
+        headers = login(client, "email-selection-admin@example.test")
+        candidate_id = client.post(
+            "/api/v1/candidates",
+            json={"display_name": "Multiple addresses", "contacts": [{"kind": "email", "value": "legacy@example.com"}]},
+            headers=headers,
+        ).json()["data"]["id"]
+        other_candidate_id = client.post(
+            "/api/v1/candidates",
+            json={"display_name": "Other candidate", "contacts": [{"kind": "email", "value": "other-candidate@example.com"}]},
+            headers=headers,
+        ).json()["data"]["id"]
+        with app.state.identity_store.sync_session() as db:
+            admin = db.get(User, admin_id)
+            for value, source in (("native@example.com", "native"), ("ocr@example.com", "ocr")):
+                protected = app.state.contact_cipher.protect("email", value)
+                db.add(CandidateContact(
+                    organization_id=admin.organization_id, candidate_id=UUID(candidate_id), kind="email",
+                    ciphertext=protected.ciphertext, lookup_hash=protected.lookup_hash,
+                    masked_value=protected.masked_value, source=source,
+                ))
+            foreign_organization = Organization(slug="foreign-email", name="Foreign Email", status="active")
+            db.add(foreign_organization); db.flush()
+            foreign_candidate = Candidate(organization_id=foreign_organization.id, display_name="Foreign candidate")
+            db.add(foreign_candidate); db.flush()
+            protected = app.state.contact_cipher.protect("email", "foreign@example.com")
+            foreign_contact = CandidateContact(
+                organization_id=foreign_organization.id, candidate_id=foreign_candidate.id, kind="email",
+                ciphertext=protected.ciphertext, lookup_hash=protected.lookup_hash,
+                masked_value=protected.masked_value, source="native",
+            )
+            db.add(foreign_contact); db.commit()
+            foreign_contact_id = str(foreign_contact.id)
+
+        first = client.get(f"/api/v1/candidates/{candidate_id}/email", headers=headers)
+        second = client.get(f"/api/v1/candidates/{candidate_id}/email", headers=headers)
+        assert first.status_code == 200 and first.headers["Cache-Control"] == "no-store"
+        assert [item["id"] for item in first.json()["data"]["addresses"]] == [item["id"] for item in second.json()["data"]["addresses"]]
+        assert {item["source"] for item in first.json()["data"]["addresses"]} == {"manual", "native", "ocr"}
+        assert all(set(item) == {"id", "masked_value", "value", "source", "confirmation_status", "confirmed_at", "version"} for item in first.json()["data"]["addresses"])
+        native = next(item for item in first.json()["data"]["addresses"] if item["source"] == "native")
+        other_contact_id = client.get(f"/api/v1/candidates/{other_candidate_id}/email", headers=headers).json()["data"]["addresses"][0]["id"]
+
+        for key, denied_contact_id in (("cross-candidate", other_contact_id), ("cross-tenant", foreign_contact_id)):
+            denied = client.put(
+                f"/api/v1/candidates/{candidate_id}/email", json={"contact_id": denied_contact_id},
+                headers={**headers, "If-Match": '"1"', "Idempotency-Key": key},
+            )
+            assert denied.status_code == 404 and denied.json()["code"] == "resource_not_found"
+        assert client.put(
+            f"/api/v1/candidates/{candidate_id}/email", json={"contact_id": native["id"], "value": "both@example.com"},
+            headers={**headers, "If-Match": '"1"', "Idempotency-Key": "both"},
+        ).status_code == 422
+
+        selected = client.put(
+            f"/api/v1/candidates/{candidate_id}/email", json={"contact_id": native["id"]},
+            headers={**headers, "If-Match": '"1"', "Idempotency-Key": "select-native"},
+        )
+        assert selected.status_code == 200 and selected.headers["ETag"] == '"2"'
+        selected_data = selected.json()["data"]
+        assert selected_data["value"] == "native@example.com"
+        assert selected_data["addresses"][0]["id"] == native["id"]
+        assert selected_data["addresses"][0]["confirmation_status"] == "confirmed"
+        assert len(selected_data["addresses"]) == 3
+        assert client.put(
+            f"/api/v1/candidates/{candidate_id}/email", json={"contact_id": native["id"]},
+            headers={**headers, "If-Match": '"1"', "Idempotency-Key": "stale-selection"},
+        ).status_code == 409
+        bulk = client.get("/api/v1/candidates?limit=100", headers=headers)
+        assert "native@example.com" not in bulk.text
+        assert "n***@example.com" in bulk.text
 
 
 def test_candidate_contact_sources_are_exactly_the_supported_provenance_values(tmp_path) -> None:
