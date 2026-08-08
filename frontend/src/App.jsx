@@ -43,6 +43,7 @@ import {
   candidateListPath,
   clearJobCreateDraft,
   parseAppRoute,
+  offerDetailPath,
   readJobCreateDraft,
   routeForNav,
   safeNavigateBack,
@@ -76,7 +77,7 @@ import {
 } from "./jobWorkspaceState.js";
 import { getRecentScreeningTaskStorageKey, LEGACY_RECENT_SCREENING_TASK_STORAGE_KEY, parseRecentScreeningTask, serializeRecentScreeningTask } from "./screeningIntegration.js";
 import { buildWorkbenchNotificationGroups, countWorkbenchNotifications, removeWorkbenchNotification } from "./workbenchNotifications.js";
-import { OfferApprovalTasks } from "./OfferViews.jsx";
+import { CandidateOfferView, OfferApprovalTasks } from "./OfferViews.jsx";
 import { offerController as defaultOfferController } from "./offerController.js";
 
 const navItems = [
@@ -230,7 +231,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
   }, [hasUnsavedSettings]));
   const route = useMemo(() => parseAppRoute(location), [location.pathname, location.search]);
   const defaultNav = getDefaultNavItem(currentRole) || "设置";
-  const activeNav = route.nav || defaultNav;
+  const activeNav = route.kind === "offer" ? "Offer" : route.nav || defaultNav;
   const [activeJob, setActiveJob] = useState("AI 工程师");
   const [menuOpen, setMenuOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -847,17 +848,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
   }
 
   function openWorkbenchOfferTask(task) {
-    const context = {
-      candidateId: task.candidateId || task.candidate_id,
-      applicationId: task.applicationId || task.application_id,
-      jobId: task.jobId || task.job_id,
-      position: task.jobTitle || task.job_title,
-      approvalId: task.id,
-    };
-    setCandidateOrigin({ activeNav: "工作台", screeningTask: null, screeningViewState: null });
-    setScreeningTask(null);
-    navigate(candidateDetailPath(context, "Offer", "/workbench"));
-    void loadServerCandidate(context);
+    navigate(offerDetailPath(task.offerId || task.offer_id, task.id, "/workbench"));
   }
 
   function openWorkbenchNotificationCandidate(candidate) {
@@ -1067,6 +1058,8 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
           {interviewState.status === "ready" && interviewState.tasks.length === 0 && <section className="workbench-unavailable"><CalendarDays size={24} /><div><strong>暂无待处理面试任务</strong><p>新的安排和反馈任务会在这里显示。</p></div></section>}
           {interviewState.tasks.length > 0 && <section className="rail-section">{interviewState.tasks.map((task) => <button className="rail-item" type="button" key={task.id} onClick={() => task.type === "interview_feedback" ? openFeedbackInterview(task.interviewId) : openInterviewList()}><strong>{task.candidate} · {task.round}</strong><small>{task.position} · {task.startsAt ? new Date(task.startsAt).toLocaleString("zh-CN", { hour12: false }) : "时间未记录"}</small></button>)}</section>}
         </div>}
+
+        {!screeningTask && route.kind === "offer" && <div className="offer-route-page"><button className="back-link" type="button" onClick={() => navigate(route.returnTo || "/workbench", { replace: true })}>返回工作台</button><CandidateOfferView offerId={route.offerId} approvalId={route.approvalId} role={currentRole} controller={offerController} onNotify={notify} /></div>}
 
         {!screeningTask && activeNav === "工作台" && <div className="offer-approval-workbench"><OfferApprovalTasks role={currentRole} controller={offerController} onOpenOffer={openWorkbenchOfferTask} /></div>}
 

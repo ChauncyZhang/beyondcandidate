@@ -4,6 +4,7 @@ import {
   candidateDetailPath,
   candidateListPath,
   clearJobCreateDraft,
+  offerDetailPath,
   parseAppRoute,
   readJobCreateDraft,
   routeForNav,
@@ -18,6 +19,7 @@ const UUID_A = "11111111-1111-4111-8111-111111111111";
 test("parses every required application route from the URL", () => {
   const cases = [
     ["/workbench", { kind: "workbench", nav: "工作台" }],
+    [`/offers/${UUID_A}?approval=approval-1&return=%2Fworkbench`, { kind: "offer", nav: "工作台", mode: "detail", offerId: UUID_A, approvalId: "approval-1", returnTo: "/workbench" }],
     ["/jobs", { kind: "jobs", nav: "职位", mode: "list" }],
     ["/jobs/new", { kind: "jobs", nav: "职位", mode: "new" }],
     ["/screening/tasks", { kind: "screening", nav: "筛选任务", mode: "list" }],
@@ -49,6 +51,15 @@ test("parses every required application route from the URL", () => {
     const parsed = parseAppRoute(new URL(url, "https://ats.example.test"));
     assert.deepEqual(Object.fromEntries(Object.keys(expected).map((key) => [key, parsed[key]])), expected, url);
   }
+});
+
+test("direct Offer route preserves approval and return context across refresh", () => {
+  const path = offerDetailPath(UUID_A, "approval-1", "/workbench");
+  assert.equal(path, `/offers/${UUID_A}?approval=approval-1&return=%2Fworkbench`);
+  const parsed = parseAppRoute(new URL(path, "https://ats.example.test"));
+  assert.deepEqual({ kind: parsed.kind, offerId: parsed.offerId, approvalId: parsed.approvalId, returnTo: parsed.returnTo }, {
+    kind: "offer", offerId: UUID_A, approvalId: "approval-1", returnTo: "/workbench",
+  });
 });
 
 test("candidate list URL keeps only meaningful key filters", () => {

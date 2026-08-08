@@ -408,6 +408,7 @@ input::placeholder, textarea::placeholder { color: #9b9ba1; }
 .offer-approval-history li span { margin-right: 8px; color: var(--muted); }
 .offer-approval-history p { margin: 4px 0; overflow-wrap: anywhere; }
 .offer-approval-workbench { padding: 0 28px 14px; }
+.offer-route-page { display: grid; gap: 16px; padding: 22px 28px 32px; min-width: 0; }
 .offer-approval-workbench:empty { display: none; }
 .offer-task-section { max-width: 520px; }
 .offer-task-section > header { display: flex; justify-content: space-between; }
@@ -449,6 +450,7 @@ input::placeholder, textarea::placeholder { color: #9b9ba1; }
   .dashboard-body .right-rail .rail-section:first-child { min-height: 278px; }
   .job-page, .candidate-page, .interview-page, .talent-page, .report-page, .settings-page, .screening-page { padding: 14px 16px 24px; }
   .offer-approval-workbench { padding: 0 16px 12px; }
+  .offer-route-page { padding: 14px 16px 24px; }
 }
 
 @media (max-width: 640px) {

@@ -53,9 +53,11 @@ export function parseAppRoute(location) {
   const base = { searchParams, returnTo: safeReturnTo(searchParams) };
 
   if (pathname === "/workbench") return { ...base, kind: "workbench", nav: "工作台" };
+  let match = pathname.match(/^\/offers\/([^/]+)$/);
+  if (match) return { ...base, kind: "offer", nav: "工作台", mode: "detail", offerId: decodeURIComponent(match[1]), approvalId: searchParams.get("approval") || undefined };
   if (pathname === "/jobs") return { ...base, kind: "jobs", nav: "职位", mode: "list" };
   if (pathname === "/jobs/new") return { ...base, kind: "jobs", nav: "职位", mode: "new" };
-  let match = pathname.match(/^\/jobs\/([^/]+)(?:\/(edit))?$/);
+  match = pathname.match(/^\/jobs\/([^/]+)(?:\/(edit))?$/);
   if (match) return { ...base, kind: "jobs", nav: "职位", mode: match[2] ? "edit" : "detail", id: decodeURIComponent(match[1]) };
 
   if (pathname === "/screening/tasks") return { ...base, kind: "screening", nav: "筛选任务", mode: "list" };
@@ -136,6 +138,14 @@ export function candidateDetailPath(candidate, tab = "档案与简历", returnTo
   if (returnTo?.startsWith("/") && !returnTo.startsWith("//")) params.set("return", returnTo);
   const search = params.toString();
   return `/candidates/${encodeURIComponent(id)}${search ? `?${search}` : ""}`;
+}
+
+export function offerDetailPath(offerId, approvalId, returnTo) {
+  const params = new URLSearchParams();
+  if (approvalId) params.set("approval", approvalId);
+  if (returnTo?.startsWith("/") && !returnTo.startsWith("//")) params.set("return", returnTo);
+  const search = params.toString();
+  return `/offers/${encodeURIComponent(offerId)}${search ? `?${search}` : ""}`;
 }
 
 export function screeningTaskPath(id, viewState = {}) {

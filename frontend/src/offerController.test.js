@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ApiError } from "./apiClient.js";
-import offerController, { createOfferController } from "./offerController.js";
+import offerController, { createOfferController, filterEligibleSpecialApprovers } from "./offerController.js";
 
 const APPLICATION_ID = "11111111-1111-4111-8111-111111111111";
 const OFFER_ID = "22222222-2222-4222-8222-222222222222";
@@ -15,10 +15,13 @@ function apiOffer(changes = {}) {
     id: OFFER_ID,
     application_id: APPLICATION_ID,
     job_id: "66666666-6666-4666-8666-666666666666",
+    candidate_name: "林夕",
+    job_title: "平台工程师",
     status: "draft",
     version: 3,
     current_version_id: "77777777-7777-4777-8777-777777777777",
     current_version_number: 2,
+    template_id: TEMPLATE_ID,
     candidate_response_deadline: "2026-09-01T12:00:00Z",
     is_special: false,
     special_reason: null,
@@ -72,6 +75,17 @@ test("application lookup uses the exact query contract and returns newest Offer 
   ]);
 });
 
+test("direct Offer lookup uses offer identity and preserves projected display and template fields", async () => {
+  const signal = new AbortController().signal;
+  const { client, calls } = queuedClient([{ data: apiOffer() }]);
+  const offer = await createOfferController({ client }).getOffer(OFFER_ID, { signal });
+
+  assert.deepEqual({ candidateName: offer.candidateName, jobTitle: offer.jobTitle, templateId: offer.templateId }, {
+    candidateName: "林夕", jobTitle: "平台工程师", templateId: TEMPLATE_ID,
+  });
+  assert.deepEqual(calls, [{ path: `/api/v1/offers/${OFFER_ID}`, options: { signal } }]);
+});
+
 test("create and draft update send exact snapshot bodies and mutation headers", async () => {
   const signal = new AbortController().signal;
   const keys = ["create-key", "update-key"];
@@ -100,6 +114,30 @@ test("create and draft update send exact snapshot bodies and mutation headers", 
     { path: `/api/v1/offers/${OFFER_ID}`, options: { method: "PATCH", body: snapshot, ifMatch: '"3"', idempotencyKey: "update-key", signal } },
   ]);
   assert.equal(updated.version, 4);
+});
+
+test("Offer creation permits null template to use the job default", async () => {
+  const { client, calls } = queuedClient([{ data: apiOffer({ template_id: null }) }]);
+  const controller = createOfferController({ client, idempotencyKey: () => "job-default-template" });
+  const created = await controller.createOffer(APPLICATION_ID, {
+    templateId: null,
+    candidateResponseDeadline: "2026-09-01T10:00:00Z",
+    content: { title: "Offer", body: "正文", compensation: "薪酬" },
+    isSpecial: false,
+  });
+
+  assert.equal(created.templateId, "");
+  assert.equal(calls[0].options.body.template_id, null);
+});
+
+test("special approver eligibility excludes recruiters and inactive users", () => {
+  const records = filterEligibleSpecialApprovers([
+    { id: "admin", status: "active", roles: ["recruiting_admin"] },
+    { id: "manager", status: "active", roles: ["hiring_manager"] },
+    { id: "recruiter", status: "active", roles: ["recruiter"] },
+    { id: "inactive", status: "disabled", roles: ["hiring_manager"] },
+  ]);
+  assert.deepEqual(records.map((item) => item.id), ["admin", "manager"]);
 });
 
 test("normal draft explicitly clears special metadata and special drafts require a reason before I/O", async () => {

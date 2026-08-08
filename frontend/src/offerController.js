@@ -53,10 +53,13 @@ function normalizeOffer(value) {
     id: safeString(value?.id),
     applicationId: safeString(value?.application_id),
     jobId: safeString(value?.job_id),
+    candidateName: safeString(value?.candidate_name),
+    jobTitle: safeString(value?.job_title),
     status: safeString(value?.status),
     version: safeVersion(value?.version),
     currentVersionId: safeString(value?.current_version_id),
     currentVersionNumber: safeVersion(value?.current_version_number),
+    templateId: safeString(value?.template_id),
     candidateResponseDeadline: safeString(value?.candidate_response_deadline),
     isSpecial: value?.is_special === true,
     specialReason: canViewSensitiveContent ? safeString(value?.special_reason) : "",
@@ -65,6 +68,11 @@ function normalizeOffer(value) {
     pdfReady: value?.pdf_ready === true,
     allowedActions: normalizeAllowedActions(value?.allowed_actions),
   };
+}
+
+export function filterEligibleSpecialApprovers(users) {
+  return safeArray(users).filter((user) => user?.status === "active"
+    && safeArray(user?.roles).some((role) => ["recruiting_admin", "hiring_manager"].includes(role)));
 }
 
 function normalizeTemplate(value) {

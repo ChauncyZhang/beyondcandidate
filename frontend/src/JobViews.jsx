@@ -270,7 +270,7 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
   const completion = [values.name, values.departmentId, values.jd, values.mustHave, values.process].filter(Boolean).length;
   const reviewerSelectionInvalid = !values.hiringOwnerId || !values.hiringManagerIds.includes(values.hiringOwnerId);
   const workflowUnavailable = workflowTemplatesStatus !== "ready" || !values.workflowTemplateId;
-  const offerApproverOptions = [...new Map([...recruiters, ...hiringManagers].map((item) => [item.id, item])).values()];
+  const offerApproverOptions = hiringManagers;
   return (
     <div className="job-page job-form-page">
       <PagePrimaryAction host={pageActionHost}><>{actions.secondary && <button className="button secondary" type="button" onClick={() => submit(actions.secondary.publish)} disabled={saving || workflowUnavailable || reviewerSelectionInvalid}>{saving ? "正在保存…" : actions.secondary.label}</button>}<button className="button primary" type="button" onClick={() => submit(actions.primary.publish)} disabled={saving || workflowUnavailable || reviewerSelectionInvalid}>{saving ? "正在保存…" : actions.primary.label}</button></></PagePrimaryAction>
@@ -300,7 +300,7 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
               <div className="job-offer-defaults">
                 <div className="field-label-row"><strong>Offer 默认配置</strong><button type="button" onClick={onManageOfferSettings}>管理 Offer 设置</button></div>
                 <div className="job-fields two-columns">
-                  <label>默认 Offer 审批人<select aria-label="默认 Offer 审批人" value={values.offerApproverId} disabled={recruitersStatus === "loading" || hiringManagersStatus === "loading"} onChange={(event) => change("offerApproverId", event.target.value)}><option value="">暂不配置</option>{offerApproverOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+                  <label>默认 Offer 审批人<select aria-label="默认 Offer 审批人" value={values.offerApproverId} disabled={hiringManagersStatus === "loading"} onChange={(event) => change("offerApproverId", event.target.value)}><option value="">暂不配置</option>{offerApproverOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
                   <label>默认 Offer 模板<select aria-label="默认 Offer 模板" value={values.offerTemplateId} disabled={offerTemplatesStatus === "loading"} onChange={(event) => change("offerTemplateId", event.target.value)}><option value="">暂不配置</option>{offerTemplates.map((item) => <option key={item.id} value={item.id} disabled={item.status === "inactive" && item.id !== values.offerTemplateId}>{item.name}{item.status === "inactive" ? "（已停用）" : ""}</option>)}</select></label>
                 </div>
                 <small className="field-state">职位可在未配置时保存；但 HR 提交 Offer 审批前必须配置默认审批人，模板也可在创建 Offer 时明确选择。</small>
