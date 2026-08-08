@@ -7,6 +7,11 @@ from typing import Protocol
 
 import aiosmtplib
 
+# Private/internal SMTP relays are intentionally supported for self-hosted enterprises.
+# Shared-tenant deployments must enforce relay reachability through worker egress policy.
+# SMTP delivery is at-least-once at the ambiguous post-DATA boundary; the stable
+# Message-ID lets operators reconcile retries but does not provide exactly-once delivery.
+
 
 def _header(value: str, field: str) -> str:
     if not value or "\r" in value or "\n" in value:
@@ -23,6 +28,7 @@ class MailMessage:
     reply_to_name: str
     subject: str
     body: str
+    message_id: str
 
 
 @dataclass(frozen=True)
@@ -57,6 +63,7 @@ class SmtpMailProvider:
         mail["To"] = _header(message.recipient, "recipient")
         mail["Reply-To"] = formataddr((_header(message.reply_to_name, "reply-to name"), _header(message.reply_to_email, "reply-to email")))
         mail["Subject"] = _header(message.subject, "subject")
+        mail["Message-ID"] = _header(message.message_id, "message id")
         mail.set_content(message.body)
         try:
             await aiosmtplib.send(

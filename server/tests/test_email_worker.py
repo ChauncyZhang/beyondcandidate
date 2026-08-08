@@ -10,10 +10,11 @@ from sqlalchemy.orm import sessionmaker
 from server.app.communications.models import EmailDelivery, EmailProviderConfig
 from server.app.communications.provider import MailMessage, PermanentMailError, ProviderReceipt, SmtpMailProvider, TemporaryMailError
 from server.app.communications.security import EmailSecretCipher
-from server.app.communications.service import DeliveryCommand, email_delivery_terminal_callback, enqueue_delivery, render_template
+from server.app.communications.service import DeliveryCommand, DeliveryIdempotencyConflict, SenderPolicy, email_delivery_terminal_callback, enqueue_delivery, render_template
 from server.app.communications.worker import EmailDeliveryJobHandler
 from server.app.identity.models import AuditLog, Base, Organization, User
-from server.app.queue.models import BackgroundJob, JobAttempt
+from server.app.integrations.feishu.models import FeishuOrganizationConfig
+from server.app.queue.models import BackgroundJob, JobAttempt, OutboxEvent
 from server.app.queue.repository import QueueRepository
 from server.app.queue.service import PermanentJobError, RetryableJobError
 
@@ -39,10 +40,26 @@ def delivery_store(tmp_path):
         organization = Organization(slug="mail-worker", name="Mail Worker", status="active")
         user = User(organization=organization, email="hr@example.test", normalized_email="hr@example.test", display_name="HR", password_hash="x")
         db.add_all([organization, user]); db.flush()
-        db.add(EmailProviderConfig(organization_id=organization.id, host="smtp.example.test", port=587, tls_mode="starttls", username="mailer@example.test", encrypted_password=cipher.encrypt("smtp-private"), enabled=True, version=1, created_by=user.id, updated_by=user.id))
-        delivery = enqueue_delivery(db, DeliveryCommand(organization_id=organization.id, recipient="candidate@example.com", sender_email="careers@example.com", sender_name="BeyondCandidate", reply_to_email="hr@example.com", reply_to_name="Responsible HR", subject="Interview invitation", body="Hello Candidate", resource_type="test", resource_id=uuid.uuid4(), idempotency_key="worker-delivery"), cipher=cipher)
+        db.add(EmailProviderConfig(organization_id=organization.id, host="smtp.example.test", port=587, tls_mode="starttls", username="mailer@example.test", encrypted_password=cipher.encrypt_smtp_password("smtp-private"), enabled=True, version=1, created_by=user.id, updated_by=user.id))
+        db.add(FeishuOrganizationConfig(organization_id=organization.id, app_id="app", encrypted_app_secret=b"opaque", redirect_uri="https://hr.example.test/callback", calendar_id="primary", enabled=True, version=1, created_by=user.id, updated_by=user.id))
+        delivery = enqueue_delivery(db, DeliveryCommand(organization_id=organization.id, recipient="candidate@example.com", reply_to_email="hr@example.com", reply_to_name="Responsible HR", subject="Interview invitation", body="Hello Candidate", resource_type="test", resource_id=uuid.uuid4(), idempotency_key="worker-delivery", operation="test.worker", created_by=user.id), cipher=cipher, sender_policy=SenderPolicy("careers@example.com", "BeyondCandidate"))
         job = db.scalar(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email"))
-        return sessions, cipher, delivery.id, job
+    return sessions, cipher, delivery.id, job
+
+
+def test_email_cipher_separates_smtp_recipient_and_idempotency_purposes():
+    cipher = EmailSecretCipher(b"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+    password_token = cipher.encrypt_smtp_password("same-value")
+    recipient_token = cipher.encrypt_recipient("same-value")
+    assert password_token != recipient_token
+    assert cipher.decrypt_smtp_password(password_token) == "same-value"
+    assert cipher.decrypt_recipient(recipient_token) == "same-value"
+    with pytest.raises(ValueError):
+        cipher.decrypt_recipient(password_token)
+    first = cipher.fingerprint("email.config.test", {"recipient": "candidate@example.com"})
+    assert first == cipher.fingerprint("email.config.test", {"recipient": "candidate@example.com"})
+    assert first != cipher.fingerprint("email.delivery.request", {"recipient": "candidate@example.com"})
+    assert "candidate" not in first
 
 
 def test_worker_retries_temporary_smtp_failure_without_marking_sent(tmp_path):
@@ -53,7 +70,7 @@ def test_worker_retries_temporary_smtp_failure_without_marking_sent(tmp_path):
     assert caught.value.safe_code == "smtp_timeout"
     with sessions() as db:
         stored = db.get(EmailDelivery, delivery_id)
-        assert (stored.status, stored.safe_error_code, stored.attempts) == ("queued", "smtp_timeout", 1)
+        assert (stored.status, stored.safe_error_code, stored.attempts, stored.version) == ("queued", "smtp_timeout", 1, 3)
 
 
 def test_worker_uses_fixed_sender_hr_reply_to_and_immutable_snapshots(tmp_path):
@@ -64,19 +81,22 @@ def test_worker_uses_fixed_sender_hr_reply_to_and_immutable_snapshots(tmp_path):
     assert (message.sender_email, message.sender_name) == ("careers@example.com", "BeyondCandidate")
     assert (message.reply_to_email, message.reply_to_name) == ("hr@example.com", "Responsible HR")
     assert (message.recipient, message.subject, message.body) == ("candidate@example.com", "Interview invitation", "Hello Candidate")
+    assert message.message_id == f"<email-{delivery_id}@beyondcandidate.internal>"
     with sessions() as db:
         stored = db.get(EmailDelivery, delivery_id)
         assert (stored.status, stored.provider_receipt_id) == ("sent", "receipt-123")
 
 
-def test_worker_uses_latest_saved_active_provider_config(tmp_path):
+def test_worker_uses_exact_saved_provider_snapshot_when_newer_config_exists(tmp_path, monkeypatch):
     sessions, cipher, delivery_id, job = delivery_store(tmp_path)
     with sessions.begin() as db:
-        config = db.scalar(select(EmailProviderConfig))
-        config.version = 2
-        config.host = "smtp-new.example.com"
-    provider = FakeMailProvider()
-    asyncio.run(EmailDeliveryJobHandler(sessions, provider, cipher)(job))
+        config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.version == 1))
+        db.add(EmailProviderConfig(organization_id=config.organization_id, host="smtp-new.example.com", port=465, tls_mode="tls", username="new@example.test", encrypted_password=cipher.encrypt_smtp_password("new-private"), enabled=True, version=2, created_by=config.created_by, updated_by=config.updated_by))
+    captured = {}
+    monkeypatch.setattr("server.app.communications.worker.SmtpMailProvider", lambda **kwargs: captured.update(kwargs) or FakeMailProvider())
+    asyncio.run(EmailDeliveryJobHandler(sessions, None, cipher)(job))
+    assert captured["host"] == "smtp.example.test"
+    assert captured["password"] == "smtp-private"
     with sessions() as db:
         assert db.get(EmailDelivery, delivery_id).status == "sent"
 
@@ -84,7 +104,8 @@ def test_worker_uses_latest_saved_active_provider_config(tmp_path):
 def test_disabled_provider_is_a_persisted_hr_visible_final_failure(tmp_path):
     sessions, cipher, delivery_id, job = delivery_store(tmp_path)
     with sessions.begin() as db:
-        db.scalar(select(EmailProviderConfig)).enabled = False
+        config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.version == 1))
+        db.add(EmailProviderConfig(organization_id=config.organization_id, host=config.host, port=config.port, tls_mode=config.tls_mode, username=config.username, encrypted_password=config.encrypted_password, enabled=False, version=2, created_by=config.created_by, updated_by=config.updated_by))
     with pytest.raises(PermanentJobError) as caught:
         asyncio.run(EmailDeliveryJobHandler(sessions, FakeMailProvider(), cipher)(job))
     assert caught.value.safe_code == "email_configuration_unavailable"
@@ -130,29 +151,49 @@ def test_terminal_callback_is_idempotent_for_hr_failure_notification(tmp_path):
     with sessions() as db:
         audits = db.scalars(select(AuditLog).where(AuditLog.event_type == "email.delivery_failed")).all()
         assert len(audits) == 1
+        events = db.scalars(select(OutboxEvent).where(OutboxEvent.topic == "feishu.notification.send")).all()
+        assert len(events) == 1
+        assert set(events[0].payload) == {"organization_id", "recipient_user_id", "event_type", "email_delivery_id"}
+        assert events[0].payload["event_type"] == "email_delivery_failed"
 
 
 def test_enqueue_delivery_is_transaction_friendly_and_business_idempotent(tmp_path):
     sessions, cipher, delivery_id, _ = delivery_store(tmp_path)
     with sessions.begin() as db:
         original = db.get(EmailDelivery, delivery_id)
-        replay = enqueue_delivery(db, DeliveryCommand(organization_id=original.organization_id, recipient="candidate@example.com", sender_email=original.sender_email, sender_name=original.sender_name, reply_to_email=original.reply_to_email, reply_to_name=original.reply_to_name, subject=original.rendered_subject, body=original.rendered_body, resource_type=original.resource_type, resource_id=original.resource_id, idempotency_key="worker-delivery"), cipher=cipher)
+        replay = enqueue_delivery(db, DeliveryCommand(organization_id=original.organization_id, recipient="candidate@example.com", reply_to_email=original.reply_to_email, reply_to_name=original.reply_to_name, subject=original.rendered_subject, body=original.rendered_body, resource_type=original.resource_type, resource_id=original.resource_id, idempotency_key="worker-delivery", operation="test.worker", created_by=original.created_by), cipher=cipher, sender_policy=SenderPolicy(original.sender_email, original.sender_name))
         assert replay.id == original.id
     with sessions() as db:
         assert len(db.scalars(select(EmailDelivery)).all()) == 1
         assert len(db.scalars(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email")).all()) == 1
 
 
+def test_enqueue_delivery_rejects_same_business_key_with_changed_fingerprint(tmp_path):
+    sessions, cipher, delivery_id, _ = delivery_store(tmp_path)
+    with sessions.begin() as db:
+        original = db.get(EmailDelivery, delivery_id)
+        with pytest.raises(DeliveryIdempotencyConflict):
+            enqueue_delivery(db, DeliveryCommand(
+                organization_id=original.organization_id, recipient="different@example.com",
+                reply_to_email=original.reply_to_email, reply_to_name=original.reply_to_name,
+                subject=original.rendered_subject, body=original.rendered_body,
+                resource_type=original.resource_type, resource_id=original.resource_id,
+                idempotency_key="worker-delivery", operation="test.worker", created_by=original.created_by,
+            ), cipher=cipher, sender_policy=SenderPolicy(original.sender_email, original.sender_name))
+
+
 def test_smtp_provider_keeps_certificate_verification_and_receipt_opaque(monkeypatch):
     captured = {}
     async def smtp_send(message, **kwargs):
         captured.update(kwargs)
+        captured["message_id"] = message["Message-ID"]
         return ({"candidate@example.com": "250 accepted"}, "queued as private-provider-detail")
     monkeypatch.setattr("server.app.communications.provider.aiosmtplib.send", smtp_send)
     provider = SmtpMailProvider(host="smtp.example.com", port=587, tls_mode="starttls", username="mailer", password="private")
-    receipt = asyncio.run(provider.send(MailMessage("candidate@example.com", "careers@example.com", "BeyondCandidate", "hr@example.com", "HR", "Subject", "Body")))
+    receipt = asyncio.run(provider.send(MailMessage("candidate@example.com", "careers@example.com", "BeyondCandidate", "hr@example.com", "HR", "Subject", "Body", "<email-test@beyondcandidate.internal>")))
     assert captured["start_tls"] is True and captured["use_tls"] is False
     assert captured.get("validate_certs", True) is True
+    assert captured["message_id"] == "<email-test@beyondcandidate.internal>"
     assert "candidate@example.com" not in receipt.receipt_id
     assert "private-provider-detail" not in receipt.receipt_id
 

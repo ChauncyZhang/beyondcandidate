@@ -172,7 +172,7 @@ def create_app(
         app.state.feishu_secret_cipher,
     )
     from server.app.communications.security import EmailSecretCipher
-    email_key = settings.contact_encryption_key.get_secret_value()
+    email_key = settings.email_encryption_key.get_secret_value()
     if email_key == "change-me":
         email_key = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
     app.state.email_secret_cipher = EmailSecretCipher(email_key.encode())

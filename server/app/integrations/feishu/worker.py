@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
 
+from server.app.communications.models import EmailDelivery
 from server.app.identity.models import Job, User, UserStatus
 from server.app.integrations.feishu.models import (
     FeishuIdentityBinding,
@@ -173,8 +174,19 @@ def _escape_lark_md(value: object) -> str:
     return "".join(replacements.get(character, character) for character in str(value))
 
 
-def _notification_card(event_type, *, origin, application, candidate, job, interview) -> dict:
-    if event_type == "interview_assignment_removed":
+def _notification_card(event_type, *, origin, application, candidate, job, interview, email_delivery=None) -> dict:
+    if event_type == "email_delivery_failed":
+        if email_delivery is None:
+            raise PermanentJobError("feishu_notification_data_missing")
+        title = "候选人邮件发送失败"
+        description = "一封候选人邮件未能成功发送。"
+        guidance = "请检查邮件配置或更正收件信息后重试。"
+        action_label = "查看邮件记录"
+        action_url = f"{origin}/settings/email?{urlencode({'delivery_id': str(email_delivery.id)})}"
+        template, tag_text, tag_color = "red", "发送失败", "red"
+        icon = "warning_outlined"
+        fields = [("收件人", email_delivery.recipient_masked), ("错误代码", email_delivery.safe_error_code or "email_delivery_failed")]
+    elif event_type == "interview_assignment_removed":
         title = "面试安排已变更"
         description = "你已被移出一场面试安排。"
         guidance = "如飞书日历仍保留旧日程，请忽略该日程。"
@@ -318,6 +330,7 @@ def _notification_recipient_is_current(
     application: Application | None,
     job: Job | None,
     interview: Interview | None,
+    email_delivery: EmailDelivery | None = None,
 ) -> bool:
     participant = None
     if interview is not None:
@@ -330,6 +343,8 @@ def _notification_recipient_is_current(
         )
     if event_type == "interview_assignment_removed":
         return interview is not None and participant is None
+    if event_type == "email_delivery_failed":
+        return email_delivery is not None and email_delivery.status == "failed" and email_delivery.created_by == recipient_user_id
     if application is None or job is None:
         return False
     if event_type == "review_requested":
@@ -383,11 +398,14 @@ class FeishuNotificationOutboxHandler:
             event_type = event.payload["event_type"]
             application_id = UUID(event.payload["application_id"]) if "application_id" in event.payload else None
             interview_id = UUID(event.payload["interview_id"]) if "interview_id" in event.payload else None
+            email_delivery_id = UUID(event.payload["email_delivery_id"]) if "email_delivery_id" in event.payload else None
             if (
                 organization_id != event.organization_id
                 or recipient_user_id != event.aggregate_id
                 or event.aggregate_type != "user"
                 or event_type not in FEISHU_NOTIFICATION_EVENTS
+                or (event_type == "email_delivery_failed" and (email_delivery_id is None or application_id is not None or interview_id is not None))
+                or (event_type != "email_delivery_failed" and email_delivery_id is not None)
             ):
                 raise ValueError
         except (AttributeError, KeyError, TypeError, ValueError):
@@ -436,7 +454,25 @@ class FeishuNotificationOutboxHandler:
                 config.redirect_uri,
                 config.calendar_id,
             )
-            if event_type == "interview_assignment_removed":
+            if event_type == "email_delivery_failed":
+                email_delivery = db.scalar(select(EmailDelivery).where(
+                    EmailDelivery.organization_id == organization_id,
+                    EmailDelivery.id == email_delivery_id,
+                ))
+                if email_delivery is None:
+                    raise PermanentJobError("feishu_notification_data_missing")
+                if not _notification_recipient_is_current(
+                    db, organization_id=organization_id, recipient_user_id=recipient_user_id,
+                    event_type=event_type, application=None, job=None, interview=None,
+                    email_delivery=email_delivery,
+                ):
+                    return
+                card = _notification_card(
+                    event_type, origin=origin, application=None, candidate=None, job=None,
+                    interview=None, email_delivery=email_delivery,
+                )
+                open_id = binding.open_id
+            elif event_type == "interview_assignment_removed":
                 if not _notification_recipient_is_current(
                     db,
                     organization_id=organization_id,

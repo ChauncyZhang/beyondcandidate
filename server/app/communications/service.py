@@ -1,10 +1,12 @@
 import html
+import hmac
 import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 from server.app.communications.models import EmailDelivery, EmailProviderConfig, EmailTemplate
 from server.app.communications.security import EmailSecretCipher
@@ -22,8 +24,6 @@ EMAIL_JOB_PAYLOAD = PayloadSchema({"organization_id": OpaqueIdField(), "delivery
 class DeliveryCommand:
     organization_id: uuid.UUID
     recipient: str
-    sender_email: str
-    sender_name: str
     reply_to_email: str
     reply_to_name: str
     subject: str
@@ -31,11 +31,22 @@ class DeliveryCommand:
     resource_type: str
     resource_id: uuid.UUID
     idempotency_key: str
+    operation: str
     created_by: uuid.UUID | None = None
     template_id: uuid.UUID | None = None
     template_version: int | None = None
     parent_delivery_id: uuid.UUID | None = None
     trace_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SenderPolicy:
+    email: str
+    name: str
+
+
+class DeliveryIdempotencyConflict(ValueError):
+    pass
 
 
 def _safe_header(value: str) -> str:
@@ -65,27 +76,54 @@ def render_template(template: EmailTemplate, variables: dict[str, str]) -> tuple
     return _safe_header(subject), body
 
 
-def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher) -> EmailDelivery:
-    existing = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == command.organization_id, EmailDelivery.business_dedupe_key == command.idempotency_key))
+def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher, sender_policy: SenderPolicy) -> EmailDelivery:
+    actor_scope = str(command.created_by) if command.created_by is not None else "system"
+    business_dedupe_key = cipher.fingerprint(
+        "delivery-business-key",
+        {"organization_id": str(command.organization_id), "actor": actor_scope, "operation": command.operation, "key": command.idempotency_key},
+    )
+    request_fingerprint = cipher.fingerprint(
+        "delivery-request",
+        {
+            "recipient": command.recipient, "reply_to_email": command.reply_to_email,
+            "reply_to_name": command.reply_to_name, "subject": command.subject, "body": command.body,
+            "resource_type": command.resource_type, "resource_id": str(command.resource_id),
+            "template_id": str(command.template_id) if command.template_id else None,
+            "template_version": command.template_version, "parent_delivery_id": str(command.parent_delivery_id) if command.parent_delivery_id else None,
+            "sender_email": sender_policy.email, "sender_name": sender_policy.name,
+        },
+    )
+    if db.bind.dialect.name == "postgresql":
+        db.execute(text("select pg_advisory_xact_lock(hashtextextended(:scope, 0))"), {"scope": f"email-delivery:{command.organization_id}:{business_dedupe_key}"})
+    existing = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == command.organization_id, EmailDelivery.business_dedupe_key == business_dedupe_key))
     if existing is not None:
+        if not hmac.compare_digest(existing.request_fingerprint, request_fingerprint):
+            raise DeliveryIdempotencyConflict("idempotency_conflict")
         return existing
-    config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.organization_id == command.organization_id))
+    config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.organization_id == command.organization_id).order_by(EmailProviderConfig.version.desc()).limit(1))
     if config is None or not config.enabled:
         raise ValueError("email_not_configured")
     recipient = cipher.normalize_email(command.recipient)
-    sender = cipher.normalize_email(_safe_header(command.sender_email))
+    sender = cipher.normalize_email(_safe_header(sender_policy.email))
     reply_to = cipher.normalize_email(_safe_header(command.reply_to_email))
     delivery = EmailDelivery(
         organization_id=command.organization_id, provider_config_id=config.id, provider_config_version=config.version,
         template_id=command.template_id, template_version=command.template_version,
-        recipient_ciphertext=cipher.encrypt(recipient), recipient_masked=cipher.mask_email(recipient),
-        sender_email=sender, sender_name=_safe_header(command.sender_name), reply_to_email=reply_to,
+        recipient_ciphertext=cipher.encrypt_recipient(recipient), recipient_masked=cipher.mask_email(recipient),
+        sender_email=sender, sender_name=_safe_header(sender_policy.name), reply_to_email=reply_to,
         reply_to_name=_safe_header(command.reply_to_name), rendered_subject=_safe_header(command.subject),
         rendered_body=command.body, resource_type=command.resource_type, resource_id=command.resource_id,
-        business_dedupe_key=command.idempotency_key, parent_delivery_id=command.parent_delivery_id,
-        created_by=command.created_by, status="queued",
+        business_dedupe_key=business_dedupe_key, request_fingerprint=request_fingerprint,
+        parent_delivery_id=command.parent_delivery_id, created_by=command.created_by, status="queued", version=1,
     )
-    db.add(delivery); db.flush()
+    try:
+        with db.begin_nested():
+            db.add(delivery); db.flush()
+    except IntegrityError:
+        existing = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == command.organization_id, EmailDelivery.business_dedupe_key == business_dedupe_key))
+        if existing is None or not hmac.compare_digest(existing.request_fingerprint, request_fingerprint):
+            raise DeliveryIdempotencyConflict("idempotency_conflict") from None
+        return existing
     QueueRepository(db).enqueue(
         command.organization_id, "communications.send_email",
         {"organization_id": str(command.organization_id), "delivery_id": str(delivery.id)},
@@ -100,6 +138,7 @@ def mark_delivery_failed(db, delivery: EmailDelivery, safe_code: str, now: datet
     delivery.status = "failed"
     delivery.safe_error_code = normalize_safe_code(safe_code)
     delivery.failed_at = now or datetime.now(timezone.utc)
+    delivery.version += 1
     db.add(AuditLog(
         organization_id=delivery.organization_id, actor_user_id=delivery.created_by,
         category="recruiting", event_type="email.delivery_failed", outcome="failure",
@@ -107,6 +146,12 @@ def mark_delivery_failed(db, delivery: EmailDelivery, safe_code: str, now: datet
         trace_id=f"email-{str(delivery.id)[:8]}",
         metadata_json={"delivery_id": str(delivery.id), "recipient": delivery.recipient_masked, "safe_error_code": delivery.safe_error_code},
     ))
+    if delivery.created_by is not None:
+        from server.app.integrations.feishu.notifications import schedule_feishu_notification
+        schedule_feishu_notification(
+            db, organization_id=delivery.organization_id, event_type="email_delivery_failed",
+            recipient_user_ids=[delivery.created_by], email_delivery_id=delivery.id,
+        )
 
 
 def email_delivery_terminal_callback(db, job, safe_code, now) -> None:

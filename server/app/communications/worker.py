@@ -38,25 +38,33 @@ class EmailDeliveryJobHandler:
                 return
             if delivery.status == "failed":
                 raise PermanentJobError(delivery.safe_error_code or "email_delivery_failed")
-            config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.organization_id == organization_id, EmailProviderConfig.id == delivery.provider_config_id))
-            if config is None or not config.enabled:
+            latest_config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.organization_id == organization_id).order_by(EmailProviderConfig.version.desc()).limit(1))
+            config = db.scalar(select(EmailProviderConfig).where(
+                EmailProviderConfig.organization_id == organization_id,
+                EmailProviderConfig.id == delivery.provider_config_id,
+                EmailProviderConfig.version == delivery.provider_config_version,
+            ))
+            if latest_config is None or not latest_config.enabled or config is None or not config.enabled:
                 mark_delivery_failed(db, delivery, "email_configuration_unavailable")
                 setup_error = "email_configuration_unavailable"
             else:
                 try:
-                    recipient = self._cipher.decrypt(delivery.recipient_ciphertext)
-                    password = self._cipher.decrypt(config.encrypted_password)
+                    recipient = self._cipher.decrypt_recipient(delivery.recipient_ciphertext)
+                    password = self._cipher.decrypt_smtp_password(config.encrypted_password)
                 except ValueError:
                     mark_delivery_failed(db, delivery, "email_secret_unavailable")
                     setup_error = "email_secret_unavailable"
                 else:
                     delivery.attempts += 1
-                    message = MailMessage(recipient, delivery.sender_email, delivery.sender_name, delivery.reply_to_email, delivery.reply_to_name, delivery.rendered_subject, delivery.rendered_body)
+                    delivery.version += 1
+                    message = MailMessage(recipient, delivery.sender_email, delivery.sender_name, delivery.reply_to_email, delivery.reply_to_name, delivery.rendered_subject, delivery.rendered_body, f"<email-{delivery.id}@beyondcandidate.internal>")
                     provider = self._provider or SmtpMailProvider(host=config.host, port=config.port, tls_mode=config.tls_mode, username=config.username, password=password, timeout_seconds=self._timeout)
 
         if setup_error is not None:
             raise PermanentJobError(setup_error)
 
+        # SMTP is at-least-once: a disconnect after DATA can leave acceptance
+        # ambiguous. Retries reuse the deterministic Message-ID for reconciliation.
         try:
             receipt = await provider.send(message)
         except TemporaryMailError as error:
@@ -64,6 +72,7 @@ class EmailDeliveryJobHandler:
                 delivery = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == organization_id, EmailDelivery.id == delivery_id).with_for_update())
                 if delivery is not None and delivery.status == "queued":
                     delivery.safe_error_code = error.safe_code
+                    delivery.version += 1
             logger.error("email_delivery_attempt_failed", extra={"context": {"delivery_id": str(delivery_id), "safe_error_code": error.safe_code}})
             raise RetryableJobError(error.safe_code) from None
         except PermanentMailError as error:
@@ -79,7 +88,7 @@ class EmailDeliveryJobHandler:
             if delivery is None or delivery.status != "queued":
                 raise PermanentJobError("email_delivery_state_conflict")
             delivery.status = "sent"; delivery.safe_error_code = None
-            delivery.provider_receipt_id = receipt.receipt_id[:255]; delivery.sent_at = datetime.now(timezone.utc)
+            delivery.provider_receipt_id = receipt.receipt_id[:255]; delivery.sent_at = datetime.now(timezone.utc); delivery.version += 1
 
 
 __all__ = ["EmailDeliveryJobHandler", "communications_terminal_callbacks"]

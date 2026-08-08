@@ -1,10 +1,13 @@
 import uuid
+import hashlib
+import json
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from server.app.communications.models import EmailDelivery, EmailProviderConfig, EmailTemplate
 from server.app.queue.models import BackgroundJob
+from server.app.recruiting.models import IdempotencyRecord
 from server.tests.test_screening_api import app_and_seed, login
 
 
@@ -22,14 +25,27 @@ def test_email_config_is_encrypted_masked_versioned_and_role_scoped(tmp_path):
         assert stale.status_code == 409 and stale.json()["code"] == "resource_version_conflict"
         invalid_tls = client.put("/api/v1/settings/email", json={**payload, "tls_mode": "none"}, headers={**system, "If-Match": '"1"', "Idempotency-Key": "email-config-none"})
         assert invalid_tls.status_code == 422
+        redirected = client.put("/api/v1/settings/email", json={**payload, "host": "attacker.example.com", "password": None}, headers={**system, "If-Match": '"1"', "Idempotency-Key": "redirect-without-password"})
+        assert redirected.status_code == 422
+        assert redirected.json()["code"] == "password_reentry_required"
+        toggled = client.put("/api/v1/settings/email", json={**payload, "password": None, "enabled": False}, headers={**system, "If-Match": '"1"', "Idempotency-Key": "disable-email"})
+        assert toggled.status_code == 200 and toggled.json()["data"]["version"] == 2
         client.post("/api/v1/auth/logout", headers=system)
         recruiting = login(client, "admin@example.test")
-        assert client.get("/api/v1/settings/email", headers=recruiting).status_code == 200
+        assert client.get("/api/v1/settings/email", headers=recruiting).status_code == 404
         denied = client.put("/api/v1/settings/email", json=payload, headers={**recruiting, "If-Match": '"1"', "Idempotency-Key": "denied"})
         assert denied.status_code == 404
     with app.state.identity_store.sync_session() as db:
-        config = db.scalar(select(EmailProviderConfig))
-        assert config is not None and b"smtp-private" not in config.encrypted_password
+        configs = db.scalars(select(EmailProviderConfig).order_by(EmailProviderConfig.version)).all()
+        assert [row.version for row in configs] == [1, 2]
+        assert configs[0].host == configs[1].host == "smtp.example.test"
+        assert configs[0].enabled is True and configs[1].enabled is False
+        assert configs[0].encrypted_password == configs[1].encrypted_password
+        assert b"smtp-private" not in configs[0].encrypted_password
+        assert app.state.email_secret_cipher.decrypt_smtp_password(configs[0].encrypted_password) == "smtp-private"
+        record = db.scalar(select(IdempotencyRecord).where(IdempotencyRecord.operation == "email.config.put", IdempotencyRecord.idempotency_key == "email-config-v1"))
+        raw_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        assert record.request_hash != raw_hash
 
 
 def test_templates_enforce_allowlist_missing_variables_and_header_safety(tmp_path):
@@ -65,9 +81,14 @@ def test_test_send_history_and_resend_use_saved_config_and_opaque_jobs(tmp_path)
         assert history.status_code == 200 and history.headers["Cache-Control"] == "no-store"
         assert history.json()["data"][0]["recipient"] == "r************r@example.com"
         assert "responsible.hr@example.com" not in history.text
-        resent = client.post(f"/api/v1/email-deliveries/{delivery_id}/resend", headers={**admin, "Idempotency-Key": "resend-once"})
-        replay = client.post(f"/api/v1/email-deliveries/{delivery_id}/resend", headers={**admin, "Idempotency-Key": "resend-once"})
+        missing_match = client.post(f"/api/v1/email-deliveries/{delivery_id}/resend", headers={**admin, "Idempotency-Key": "resend-missing-match"})
+        assert missing_match.status_code == 428
+        resent = client.post(f"/api/v1/email-deliveries/{delivery_id}/resend", headers={**admin, "If-Match": '"1"', "Idempotency-Key": "resend-once"})
+        replay = client.post(f"/api/v1/email-deliveries/{delivery_id}/resend", headers={**admin, "If-Match": '"1"', "Idempotency-Key": "resend-once"})
         assert resent.status_code == 202 and replay.json() == resent.json()
+        assert resent.json()["data"]["version"] == 1
+        stale = client.post(f"/api/v1/email-deliveries/{delivery_id}/resend", headers={**admin, "If-Match": '"1"', "Idempotency-Key": "resend-stale"})
+        assert stale.status_code == 409 and stale.json()["code"] == "resource_version_conflict"
         first_page = client.get("/api/v1/email-deliveries?limit=1", headers=admin).json()
         second_page = client.get(f"/api/v1/email-deliveries?limit=1&cursor={first_page['meta']['next_cursor']}", headers=admin).json()
         assert first_page["meta"]["next_cursor"] is not None
@@ -79,7 +100,12 @@ def test_test_send_history_and_resend_use_saved_config_and_opaque_jobs(tmp_path)
         assert original.recipient_masked == "r************r@example.com"
         assert b"responsible.hr@example.com" not in original.recipient_ciphertext
         assert original.sender_email == app.state.settings.email_from_address
+        assert original.version == 2
         assert len(db.scalars(select(EmailDelivery)).all()) == 2
         assert jobs[0].payload == {"organization_id": str(original.organization_id), "delivery_id": str(original.id)}
         assert jobs[0].max_attempts == 3
         assert "responsible.hr@example.com" not in str(jobs[0].payload)
+        records = db.scalars(select(IdempotencyRecord).where(IdempotencyRecord.operation == "email.config.test")).all()
+        assert len(records) == 1
+        raw_test_hash = hashlib.sha256(json.dumps({"recipient":"responsible.hr@example.com","reply_to_email":"responsible.hr@example.com","reply_to_name":"Responsible HR"}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        assert records[0].request_hash != raw_test_hash

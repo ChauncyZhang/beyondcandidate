@@ -10,6 +10,7 @@ import httpx
 import pytest
 from sqlalchemy import select
 
+from server.app.communications.models import EmailDelivery, EmailProviderConfig
 from server.app.identity.models import User
 from server.app.integrations.feishu.models import (
     FeishuIdentityBinding,
@@ -176,6 +177,60 @@ def test_disabled_config_does_not_schedule_notification_and_payload_rejects_pii(
                 "candidate_name": "不应进入 Outbox",
             },
         )
+    with pytest.raises(UnsafePayload):
+        DEFAULT_PAYLOAD_POLICIES.validate_topic(
+            "feishu.notification.send",
+            {"organization_id": str(uuid4()), "recipient_user_id": str(uuid4()), "event_type": "email_delivery_failed"},
+        )
+
+
+def test_failed_email_notification_is_opaque_and_revalidated_for_creator(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    _enable_feishu(app, seed)
+    with app.state.identity_store.sync_session() as db:
+        admin = db.get(User, seed["admin_id"])
+        provider_config = EmailProviderConfig(
+            organization_id=admin.organization_id, host="smtp.example.test", port=587,
+            tls_mode="starttls", username="mailer", encrypted_password=app.state.email_secret_cipher.encrypt_smtp_password("private"),
+            enabled=True, version=1, created_by=admin.id, updated_by=admin.id,
+        )
+        db.add(provider_config); db.flush()
+        delivery = EmailDelivery(
+            organization_id=admin.organization_id, provider_config_id=provider_config.id, provider_config_version=1,
+            recipient_ciphertext=app.state.email_secret_cipher.encrypt_recipient("candidate@example.com"), recipient_masked="c*******e@example.com",
+            sender_email="careers@beyondcandidate.com", sender_name="BeyondCandidate", reply_to_email=admin.email,
+            reply_to_name=admin.display_name, rendered_subject="snapshot", rendered_body="snapshot", resource_type="email_test",
+            resource_id=uuid4(), business_dedupe_key="a" * 64, request_fingerprint="b" * 64,
+            status="failed", safe_error_code="smtp_unavailable", created_by=admin.id, version=2,
+        )
+        db.add(delivery)
+        db.add(FeishuIdentityBinding(organization_id=admin.organization_id, user_id=admin.id, union_id="on_admin", open_id="ou_admin", tenant_key="tenant"))
+        db.flush()
+        events = schedule_feishu_notification(
+            db, organization_id=admin.organization_id, recipient_user_ids=[admin.id],
+            event_type="email_delivery_failed", email_delivery_id=delivery.id,
+        )
+        db.commit()
+        event_id, delivery_id = events[0].id, delivery.id
+    with app.state.identity_store.sync_session() as db:
+        event = db.get(OutboxEvent, event_id); db.expunge(event)
+    assert event.payload == {
+        "organization_id": str(event.organization_id), "recipient_user_id": str(seed["admin_id"]),
+        "event_type": "email_delivery_failed", "email_delivery_id": str(delivery_id),
+    }
+    provider = FakeFeishuProvider()
+    asyncio.run(FeishuNotificationOutboxHandler(app.state.identity_store.sync_session, provider, app.state.feishu_secret_cipher)(event, event.id))
+    assert provider.cards[0][0] == "ou_admin"
+    rendered = json.dumps(provider.cards[0][1], ensure_ascii=False)
+    assert "example.com" in rendered and "smtp&#95;unavailable" in rendered
+    assert f"/settings/email?delivery_id={delivery_id}" in rendered
+
+    with app.state.identity_store.sync_session() as db:
+        stored = db.get(EmailDelivery, delivery_id); stored.status = "sent"; db.commit()
+    provider.cards.clear()
+    asyncio.run(FeishuNotificationOutboxHandler(app.state.identity_store.sync_session, provider, app.state.feishu_secret_cipher)(event, event.id))
+    assert provider.cards == []
 
 
 def test_feedback_handler_sends_open_id_card_with_origin_and_outbox_idempotency(tmp_path) -> None:
@@ -255,8 +310,8 @@ def test_all_controlled_events_build_chinese_platform_cards() -> None:
         timezone="Asia/Shanghai",
     )
 
-    assert len(FEISHU_NOTIFICATION_EVENTS) == 13
-    for event_type in FEISHU_NOTIFICATION_EVENTS:
+    assert len(FEISHU_NOTIFICATION_EVENTS) == 14
+    for event_type in FEISHU_NOTIFICATION_EVENTS - {"email_delivery_failed"}:
         card = _notification_card(
             event_type,
             origin="https://hr.example.test",

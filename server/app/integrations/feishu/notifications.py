@@ -5,20 +5,22 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from server.app.communications.models import EmailDelivery
 from server.app.integrations.feishu.models import FeishuOrganizationConfig
 from server.app.interviews.models import InterviewParticipant
 from server.app.queue.payloads import FEISHU_NOTIFICATION_EVENTS
 from server.app.queue.repository import QueueRepository
 
 
-_APPLICATION_EVENTS = FEISHU_NOTIFICATION_EVENTS - {
+_EMAIL_DELIVERY_EVENTS = {"email_delivery_failed"}
+_APPLICATION_EVENTS = FEISHU_NOTIFICATION_EVENTS - _EMAIL_DELIVERY_EVENTS - {
     "interview_scheduled",
     "interview_rescheduled",
     "interview_cancelled",
     "interview_assignment_removed",
     "feedback_requested",
 }
-_INTERVIEW_EVENTS = FEISHU_NOTIFICATION_EVENTS - _APPLICATION_EVENTS
+_INTERVIEW_EVENTS = FEISHU_NOTIFICATION_EVENTS - _APPLICATION_EVENTS - _EMAIL_DELIVERY_EVENTS
 
 
 def schedule_feishu_notification(
@@ -29,6 +31,7 @@ def schedule_feishu_notification(
     event_type: str,
     application_id: UUID | None = None,
     interview_id: UUID | None = None,
+    email_delivery_id: UUID | None = None,
     actor_user_id: UUID | None = None,
     exclude_actor: bool = False,
 ):
@@ -38,6 +41,8 @@ def schedule_feishu_notification(
         raise ValueError("application_id is required for this Feishu notification event")
     if event_type in _INTERVIEW_EVENTS and interview_id is None:
         raise ValueError("interview_id is required for this Feishu notification event")
+    if event_type in _EMAIL_DELIVERY_EVENTS and email_delivery_id is None:
+        raise ValueError("email_delivery_id is required for this Feishu notification event")
     if not isinstance(organization_id, UUID):
         raise ValueError("organization_id must be a UUID")
     if actor_user_id is not None and not isinstance(actor_user_id, UUID):
@@ -58,6 +63,14 @@ def schedule_feishu_notification(
             if not exclude_actor or user_id != actor_user_id
         )
     )
+    if event_type in _EMAIL_DELIVERY_EVENTS:
+        delivery = db.scalar(select(EmailDelivery).where(
+            EmailDelivery.organization_id == organization_id,
+            EmailDelivery.id == email_delivery_id,
+        ))
+        if delivery is None or delivery.status != "failed" or delivery.created_by is None:
+            return []
+        recipients = tuple(user_id for user_id in recipients if user_id == delivery.created_by)
     if any(not isinstance(user_id, UUID) for user_id in recipients):
         raise ValueError("recipient_user_ids must contain UUIDs")
     if event_type == "feedback_requested":
@@ -85,6 +98,8 @@ def schedule_feishu_notification(
             payload["application_id"] = str(application_id)
         if interview_id is not None:
             payload["interview_id"] = str(interview_id)
+        if email_delivery_id is not None:
+            payload["email_delivery_id"] = str(email_delivery_id)
         events.append(
             repository.append_outbox(
                 organization_id,

@@ -40,6 +40,7 @@ class Settings(BaseModel):
     contact_lookup_secret: SecretStr = SecretStr("change-me")
     llm_config_encryption_key: SecretStr = SecretStr("change-me")
     feishu_config_encryption_key: SecretStr = SecretStr("change-me")
+    email_encryption_key: SecretStr = SecretStr("change-me")
     email_from_address: str = "careers@beyondcandidate.com"
     email_from_name: str = "BeyondCandidate"
     email_smtp_timeout_seconds: float = Field(default=10, gt=0, le=60)
@@ -124,6 +125,7 @@ class Settings(BaseModel):
             self.contact_lookup_secret.get_secret_value().strip().lower(),
             self.llm_config_encryption_key.get_secret_value().strip().lower(),
             self.feishu_config_encryption_key.get_secret_value().strip().lower(),
+            self.email_encryption_key.get_secret_value().strip().lower(),
         )
         database_url = urlsplit(self.database_url)
         if not database_url.scheme or not database_url.hostname:
@@ -139,11 +141,11 @@ class Settings(BaseModel):
             raise ValueError("production credentials must not use placeholders")
         if not all(credentials):
             raise ValueError("production credentials are required")
-        contact_values = [self.contact_encryption_key.get_secret_value(), self.contact_lookup_secret.get_secret_value(), self.llm_config_encryption_key.get_secret_value(), self.feishu_config_encryption_key.get_secret_value()]
-        if any(re.fullmatch(r"[A-Za-z0-9_-]{43}=", value) is None for value in contact_values):
+        encryption_values = [self.contact_encryption_key.get_secret_value(), self.contact_lookup_secret.get_secret_value(), self.llm_config_encryption_key.get_secret_value(), self.feishu_config_encryption_key.get_secret_value(), self.email_encryption_key.get_secret_value()]
+        if any(re.fullmatch(r"[A-Za-z0-9_-]{43}=", value) is None for value in encryption_values):
             raise ValueError("encryption keys must use padded base64url")
         try:
-            decoded = [base64.b64decode(value, altchars=b"-_", validate=True) for value in contact_values]
+            decoded = [base64.b64decode(value, altchars=b"-_", validate=True) for value in encryption_values]
         except (ValueError, base64.binascii.Error):
             raise ValueError("encryption keys must be base64url") from None
         if any(len(value) != 32 for value in decoded):
@@ -172,6 +174,7 @@ class Settings(BaseModel):
             "CONTACT_LOOKUP_SECRET": "contact_lookup_secret",
             "LLM_CONFIG_ENCRYPTION_KEY": "llm_config_encryption_key",
             "FEISHU_CONFIG_ENCRYPTION_KEY": "feishu_config_encryption_key",
+            "EMAIL_ENCRYPTION_KEY": "email_encryption_key",
             "EMAIL_FROM_ADDRESS": "email_from_address",
             "EMAIL_FROM_NAME": "email_from_name",
             "EMAIL_SMTP_TIMEOUT_SECONDS": "email_smtp_timeout_seconds",

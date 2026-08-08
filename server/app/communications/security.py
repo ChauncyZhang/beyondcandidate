@@ -1,24 +1,60 @@
+import base64
+import hashlib
+import hmac
+import json
+
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from email_validator import EmailNotValidError, validate_email
 
 
 class EmailSecretCipher:
     def __init__(self, key: bytes) -> None:
         try:
-            self._cipher = Fernet(key)
+            master = base64.urlsafe_b64decode(key)
+            if len(master) != 32:
+                raise ValueError
         except Exception:
             raise ValueError("invalid email encryption key") from None
 
-    def encrypt(self, value: str) -> bytes:
+        def derive(purpose: bytes) -> bytes:
+            return HKDF(algorithm=hashes.SHA256(), length=32, salt=b"BeyondCandidate/email/v1", info=purpose).derive(master)
+
+        self._smtp_cipher = Fernet(base64.urlsafe_b64encode(derive(b"smtp-password")))
+        self._recipient_cipher = Fernet(base64.urlsafe_b64encode(derive(b"recipient")))
+        self._idempotency_key = derive(b"idempotency-hmac")
+
+    @staticmethod
+    def _encrypt(cipher: Fernet, value: str) -> bytes:
         if not value or len(value) > 4096:
             raise ValueError("invalid protected email value")
-        return self._cipher.encrypt(value.encode())
+        return cipher.encrypt(value.encode())
 
-    def decrypt(self, value: bytes) -> str:
+    @staticmethod
+    def _decrypt(cipher: Fernet, value: bytes) -> str:
         try:
-            return self._cipher.decrypt(value).decode()
+            return cipher.decrypt(value).decode()
         except (InvalidToken, UnicodeDecodeError):
             raise ValueError("protected email value cannot be decrypted") from None
+
+    def encrypt_smtp_password(self, value: str) -> bytes:
+        return self._encrypt(self._smtp_cipher, value)
+
+    def decrypt_smtp_password(self, value: bytes) -> str:
+        return self._decrypt(self._smtp_cipher, value)
+
+    def encrypt_recipient(self, value: str) -> bytes:
+        return self._encrypt(self._recipient_cipher, value)
+
+    def decrypt_recipient(self, value: bytes) -> str:
+        return self._decrypt(self._recipient_cipher, value)
+
+    def fingerprint(self, purpose: str, payload: object) -> str:
+        if not purpose or len(purpose) > 100:
+            raise ValueError("invalid fingerprint purpose")
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+        return hmac.new(self._idempotency_key, purpose.encode() + b"\0" + encoded, hashlib.sha256).hexdigest()
 
     @staticmethod
     def normalize_email(value: str) -> str:

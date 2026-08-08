@@ -24,6 +24,7 @@ FEISHU_NOTIFICATION_EVENTS = frozenset(
         "candidate_rejected",
         "offer_accepted",
         "offer_declined",
+        "email_delivery_failed",
     }
 )
 
@@ -99,6 +100,17 @@ class PayloadSchema:
         if not isinstance(payload, Mapping) or not set(self.fields) <= set(payload) or not set(payload) <= set(self.fields) | set(self.optional_fields): raise UnsafePayload("payload fields do not match registered schema")
         policies = {**self.fields, **self.optional_fields}
         return {key: policies[key].validate(value) for key, value in payload.items()}
+
+
+class FeishuNotificationPayloadSchema(PayloadSchema):
+    def validate(self, payload: Mapping[str, object]) -> dict[str, object]:
+        validated = super().validate(payload)
+        is_email_failure = validated["event_type"] == "email_delivery_failed"
+        if is_email_failure != ("email_delivery_id" in validated):
+            raise UnsafePayload("email delivery notification identity does not match event")
+        if is_email_failure and ({"application_id", "interview_id"} & set(validated)):
+            raise UnsafePayload("email delivery notification contains unrelated identities")
+        return validated
 
 
 class PayloadPolicyRegistry:
@@ -194,7 +206,7 @@ for _feishu_topic in (
 
 DEFAULT_PAYLOAD_POLICIES.register_topic(
     "feishu.notification.send",
-    PayloadSchema(
+    FeishuNotificationPayloadSchema(
         {
             "organization_id": OpaqueIdField(),
             "recipient_user_id": OpaqueIdField(),
@@ -203,6 +215,7 @@ DEFAULT_PAYLOAD_POLICIES.register_topic(
         {
             "application_id": OpaqueIdField(),
             "interview_id": OpaqueIdField(),
+            "email_delivery_id": OpaqueIdField(),
         },
     ),
 )

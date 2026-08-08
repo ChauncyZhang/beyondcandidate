@@ -21,6 +21,24 @@ def test_latest_migration_revision_is_current() -> None:
     assert script_directory.get_current_head() == "0031_email_delivery"
 
 
+def test_email_delivery_schema_has_versioned_provider_and_dedupe_guards() -> None:
+    from server.app.communications.models import EmailDelivery, EmailProviderConfig
+
+    provider_unique_columns = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in EmailProviderConfig.__table__.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    assert ("organization_id", "version") in provider_unique_columns
+    assert {"request_fingerprint", "version"} <= set(EmailDelivery.__table__.columns.keys())
+    check_names = {
+        constraint.name
+        for constraint in EmailDelivery.__table__.constraints
+        if constraint.__class__.__name__ == "CheckConstraint"
+    }
+    assert {"ck_email_deliveries_version", "ck_email_deliveries_template_version_pair"} <= check_names
+
+
 @pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")
 def test_0030_backfills_existing_candidate_contacts_as_legacy_unconfirmed() -> None:
     url = os.environ["POSTGRES_SMOKE_URL"]

@@ -206,7 +206,7 @@ def build_communications_handler(settings: Settings):
     from sqlalchemy.orm import sessionmaker
     from server.app.communications.security import EmailSecretCipher
     from server.app.communications.worker import EmailDeliveryJobHandler
-    key = settings.contact_encryption_key.get_secret_value()
+    key = settings.email_encryption_key.get_secret_value()
     if key == "change-me":
         key = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
     sessions = sessionmaker(create_engine(_sync_database_url(settings.database_url), pool_pre_ping=True), expire_on_commit=False)

@@ -19,6 +19,7 @@ def production_settings(**overrides: object) -> Settings:
         "contact_lookup_secret": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
         "llm_config_encryption_key": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=",
         "feishu_config_encryption_key": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=",
+        "email_encryption_key": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8=",
         "cors_origins": ["https://hr.example.com"],
     }
     values.update(overrides)
@@ -140,7 +141,7 @@ def test_production_accepts_explicit_origins_and_non_placeholder_secrets() -> No
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("contact_encryption_key", "change-me"), ("contact_lookup_secret", "placeholder"), ("llm_config_encryption_key", "change-me"), ("feishu_config_encryption_key", "change-me")],
+    [("contact_encryption_key", "change-me"), ("contact_lookup_secret", "placeholder"), ("llm_config_encryption_key", "change-me"), ("feishu_config_encryption_key", "change-me"), ("email_encryption_key", "change-me")],
 )
 def test_production_rejects_placeholder_contact_secrets(field: str, value: str) -> None:
     with pytest.raises(ValidationError):
@@ -151,6 +152,7 @@ def test_production_accepts_deployment_supplied_contact_secrets() -> None:
     settings = production_settings()
     assert isinstance(settings.contact_encryption_key, SecretStr)
     assert isinstance(settings.feishu_config_encryption_key, SecretStr)
+    assert isinstance(settings.email_encryption_key, SecretStr)
     assert "AAECAw" not in repr(settings)
 
 
@@ -175,6 +177,19 @@ def test_production_rejects_equal_contact_keys() -> None:
     key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
     with pytest.raises(ValidationError):
         production_settings(contact_encryption_key=key, contact_lookup_secret=key)
+
+
+@pytest.mark.parametrize("other_field", ["contact_encryption_key", "contact_lookup_secret", "llm_config_encryption_key", "feishu_config_encryption_key"])
+def test_production_email_key_must_be_independent(other_field: str) -> None:
+    key = production_settings().email_encryption_key.get_secret_value()
+    with pytest.raises(ValidationError):
+        production_settings(**{other_field: key})
+
+
+def test_email_encryption_key_loads_from_environment(monkeypatch) -> None:
+    key = "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8="
+    monkeypatch.setenv("EMAIL_ENCRYPTION_KEY", key)
+    assert Settings.from_environment().email_encryption_key.get_secret_value() == key
 
 
 def governance_settings(**overrides: object):

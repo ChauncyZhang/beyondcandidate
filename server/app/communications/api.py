@@ -1,14 +1,12 @@
 import re
 import uuid
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 
 from server.app.communications.models import EmailDelivery, EmailProviderConfig, EmailTemplate
 from server.app.communications.schemas import EmailConfigUpdate, EmailTemplateUpdate, EmailTestSend
-from server.app.communications.service import DeliveryCommand, enqueue_delivery, validate_template
+from server.app.communications.service import DeliveryCommand, DeliveryIdempotencyConflict, SenderPolicy, enqueue_delivery, validate_template
 from server.app.identity.api import problem
 from server.app.identity.models import AuditLog
 from server.app.identity.policy import Permission, require_permission
@@ -33,7 +31,6 @@ def _error(request, status, code):
 
 def _system(principal): return require_permission(principal, Permission.MANAGE_SYSTEM)
 def _recruiting_admin(principal): return principal.active and "recruiting_admin" in principal.roles
-def _admin(principal): return _system(principal) or _recruiting_admin(principal)
 
 
 def _version(request, value):
@@ -49,16 +46,24 @@ def _config_view(config):
 
 
 def _delivery_view(row):
-    return {"id": str(row.id), "recipient": row.recipient_masked, "subject": row.rendered_subject, "resource_type": row.resource_type, "resource_id": str(row.resource_id), "status": row.status, "attempts": row.attempts, "safe_error_code": row.safe_error_code, "created_at": row.created_at.isoformat(), "sent_at": row.sent_at.isoformat() if row.sent_at else None, "failed_at": row.failed_at.isoformat() if row.failed_at else None}
+    return {"id": str(row.id), "recipient": row.recipient_masked, "subject": row.rendered_subject, "resource_type": row.resource_type, "resource_id": str(row.resource_id), "status": row.status, "attempts": row.attempts, "version": row.version, "safe_error_code": row.safe_error_code, "created_at": row.created_at.isoformat(), "sent_at": row.sent_at.isoformat() if row.sent_at else None, "failed_at": row.failed_at.isoformat() if row.failed_at else None}
+
+
+def _sender_policy(request: Request) -> SenderPolicy:
+    return SenderPolicy(request.app.state.settings.email_from_address, request.app.state.settings.email_from_name)
+
+
+def _email_idempotency_body(request: Request, purpose: str, payload: object) -> dict[str, str]:
+    return {"request_fingerprint": request.app.state.email_secret_cipher.fingerprint(purpose, payload)}
 
 
 @router.get("/api/v1/settings/email")
 def get_email_config(request: Request):
     principal = _principal(request)
     if isinstance(principal, JSONResponse): return principal
-    if not _admin(principal): return _error(request, 404, "resource_not_found")
+    if not _system(principal): return _error(request, 404, "resource_not_found")
     with request.app.state.identity_store.sync_session() as db:
-        config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.organization_id == principal.organization_id))
+        config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.organization_id == principal.organization_id).order_by(EmailProviderConfig.version.desc()).limit(1))
         return _response(_config_view(config))
 
 
@@ -72,17 +77,27 @@ def put_email_config(payload: EmailConfigUpdate, request: Request, if_match: str
     with request.app.state.identity_store.sync_session() as db:
         try:
             def action():
-                config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.organization_id == principal.organization_id).with_for_update())
-                if (config.version if config else 0) != expected: raise RuntimeError("version")
-                encrypted = request.app.state.email_secret_cipher.encrypt(payload.password) if payload.password is not None else (config.encrypted_password if config else None)
-                if encrypted is None: raise ValueError("password_required")
-                if config is None:
-                    config = EmailProviderConfig(organization_id=principal.organization_id, host=payload.host, port=payload.port, tls_mode=payload.tls_mode, username=payload.username, encrypted_password=encrypted, enabled=payload.enabled, version=1, created_by=principal.user_id, updated_by=principal.user_id); db.add(config)
-                else:
-                    config.host=payload.host; config.port=payload.port; config.tls_mode=payload.tls_mode; config.username=payload.username; config.encrypted_password=encrypted; config.enabled=payload.enabled; config.updated_by=principal.user_id; config.version += 1; config.updated_at=datetime.now(timezone.utc)
+                if db.bind.dialect.name == "postgresql":
+                    db.execute(text("select pg_advisory_xact_lock(hashtextextended(:scope, 0))"), {"scope": f"email-provider-config:{principal.organization_id}"})
+                current = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.organization_id == principal.organization_id).order_by(EmailProviderConfig.version.desc()).limit(1).with_for_update())
+                if (current.version if current else 0) != expected: raise RuntimeError("version")
+                endpoint_changed = current is not None and (current.host, current.port, current.tls_mode, current.username) != (payload.host, payload.port, payload.tls_mode, payload.username)
+                if payload.password is None and endpoint_changed:
+                    raise ValueError("password_reentry_required")
+                if payload.password is None and current is None:
+                    raise ValueError("password_required")
+                encrypted = request.app.state.email_secret_cipher.encrypt_smtp_password(payload.password) if payload.password is not None else current.encrypted_password
+                config = EmailProviderConfig(
+                    organization_id=principal.organization_id, host=payload.host, port=payload.port,
+                    tls_mode=payload.tls_mode, username=payload.username, encrypted_password=encrypted,
+                    enabled=payload.enabled, version=expected + 1, created_by=principal.user_id,
+                    updated_by=principal.user_id,
+                )
+                db.add(config)
                 db.flush(); db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, category="system", event_type="email.config_updated", outcome="success", resource_type="email_provider_config", resource_id=config.id, trace_id=request.state.trace_id, metadata_json={"enabled": config.enabled, "tls_mode": config.tls_mode}))
                 return 200, {"data": _config_view(config)}
-            status, body = persisted_idempotent(db, principal.organization_id, principal.user_id, "email.config.put", key, payload.model_dump(), action); db.commit()
+            semantic = {"expected_version": expected, **payload.model_dump()}
+            status, body = persisted_idempotent(db, principal.organization_id, principal.user_id, "email.config.put", key, _email_idempotency_body(request, "email.config.put", semantic), action); db.commit()
         except IdempotencyConflict: db.rollback(); return _error(request, 409, "idempotency_conflict")
         except RuntimeError: db.rollback(); return _error(request, 409, "resource_version_conflict")
         except ValueError as error: db.rollback(); return _error(request, 422, str(error))
@@ -134,10 +149,11 @@ def test_email_config(payload: EmailTestSend, request: Request, idempotency_key:
     with request.app.state.identity_store.sync_session() as db:
         try:
             def action():
-                delivery=enqueue_delivery(db,DeliveryCommand(organization_id=principal.organization_id,recipient=str(payload.recipient),sender_email=request.app.state.settings.email_from_address,sender_name=request.app.state.settings.email_from_name,reply_to_email=str(payload.reply_to_email),reply_to_name=payload.reply_to_name,subject="Transactional email test",body="This is a transactional email configuration test.",resource_type="email_test",resource_id=uuid.uuid4(),idempotency_key=f"test:{key}",created_by=principal.user_id,trace_id=request.state.trace_id),cipher=request.app.state.email_secret_cipher)
+                delivery=enqueue_delivery(db,DeliveryCommand(organization_id=principal.organization_id,recipient=str(payload.recipient),reply_to_email=str(payload.reply_to_email),reply_to_name=payload.reply_to_name,subject="Transactional email test",body="This is a transactional email configuration test.",resource_type="email_test",resource_id=uuid.uuid4(),idempotency_key=key,operation="email.config.test",created_by=principal.user_id,trace_id=request.state.trace_id),cipher=request.app.state.email_secret_cipher,sender_policy=_sender_policy(request))
                 return 202,{"data":_delivery_view(delivery)}
-            status,body=persisted_idempotent(db,principal.organization_id,principal.user_id,"email.config.test",key,{"recipient":str(payload.recipient),"reply_to_email":str(payload.reply_to_email),"reply_to_name":payload.reply_to_name},action); db.commit()
-        except IdempotencyConflict: db.rollback(); return _error(request,409,"idempotency_conflict")
+            semantic={"recipient":str(payload.recipient),"reply_to_email":str(payload.reply_to_email),"reply_to_name":payload.reply_to_name}
+            status,body=persisted_idempotent(db,principal.organization_id,principal.user_id,"email.config.test",key,_email_idempotency_body(request,"email.config.test",semantic),action); db.commit()
+        except (IdempotencyConflict,DeliveryIdempotencyConflict): db.rollback(); return _error(request,409,"idempotency_conflict")
         except ValueError as error: db.rollback(); return _error(request,409,str(error))
     response=JSONResponse(body,status_code=status); response.headers["Cache-Control"]="no-store"; return response
 
@@ -161,20 +177,25 @@ def delivery_history(request: Request, limit: int=Query(50,ge=1,le=100), status:
 
 
 @router.post("/api/v1/email-deliveries/{delivery_id}/resend")
-def resend_delivery(delivery_id: uuid.UUID,request:Request,idempotency_key:str|None=Header(None)):
-    principal,key=_principal(request),_idempotency(request,idempotency_key)
+def resend_delivery(delivery_id: uuid.UUID,request:Request,if_match:str|None=Header(None),idempotency_key:str|None=Header(None)):
+    principal,key,expected=_principal(request),_idempotency(request,idempotency_key),_version(request,if_match)
     if isinstance(principal,JSONResponse): return principal
     if not _recruiting_admin(principal): return _error(request,404,"resource_not_found")
     if isinstance(key,JSONResponse): return key
+    if isinstance(expected,JSONResponse): return expected
     with request.app.state.identity_store.sync_session() as db:
         try:
             def action():
-                original=db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id==principal.organization_id,EmailDelivery.id==delivery_id))
+                original=db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id==principal.organization_id,EmailDelivery.id==delivery_id).with_for_update())
                 if original is None: raise LookupError
-                recipient=request.app.state.email_secret_cipher.decrypt(original.recipient_ciphertext)
-                delivery=enqueue_delivery(db,DeliveryCommand(organization_id=principal.organization_id,recipient=recipient,sender_email=original.sender_email,sender_name=original.sender_name,reply_to_email=original.reply_to_email,reply_to_name=original.reply_to_name,subject=original.rendered_subject,body=original.rendered_body,resource_type=original.resource_type,resource_id=original.resource_id,idempotency_key=f"resend:{delivery_id}:{key}",created_by=principal.user_id,template_id=original.template_id,template_version=original.template_version,parent_delivery_id=original.id,trace_id=request.state.trace_id),cipher=request.app.state.email_secret_cipher)
+                if original.version != expected: raise RuntimeError("version")
+                recipient=request.app.state.email_secret_cipher.decrypt_recipient(original.recipient_ciphertext)
+                delivery=enqueue_delivery(db,DeliveryCommand(organization_id=principal.organization_id,recipient=recipient,reply_to_email=original.reply_to_email,reply_to_name=original.reply_to_name,subject=original.rendered_subject,body=original.rendered_body,resource_type=original.resource_type,resource_id=original.resource_id,idempotency_key=key,operation=f"email.delivery.resend:{delivery_id}",created_by=principal.user_id,template_id=original.template_id,template_version=original.template_version,parent_delivery_id=original.id,trace_id=request.state.trace_id),cipher=request.app.state.email_secret_cipher,sender_policy=_sender_policy(request))
+                original.version += 1
                 return 202,{"data":_delivery_view(delivery)}
-            status,body=persisted_idempotent(db,principal.organization_id,principal.user_id,f"email.delivery.resend:{delivery_id}",key,{"delivery_id":str(delivery_id)},action); db.commit()
-        except IdempotencyConflict: db.rollback(); return _error(request,409,"idempotency_conflict")
+            semantic={"delivery_id":str(delivery_id),"expected_version":expected}
+            status,body=persisted_idempotent(db,principal.organization_id,principal.user_id,f"email.delivery.resend:{delivery_id}",key,_email_idempotency_body(request,"email.delivery.resend",semantic),action); db.commit()
+        except (IdempotencyConflict,DeliveryIdempotencyConflict): db.rollback(); return _error(request,409,"idempotency_conflict")
+        except RuntimeError: db.rollback(); return _error(request,409,"resource_version_conflict")
         except (LookupError,ValueError): db.rollback(); return _error(request,404,"resource_not_found")
     response=JSONResponse(body,status_code=status); response.headers["Cache-Control"]="no-store"; return response
