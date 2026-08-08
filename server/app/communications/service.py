@@ -1,5 +1,6 @@
 import html
 import hmac
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from server.app.queue.service import normalize_safe_code
 
 VARIABLE = re.compile(r"{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}")
 EMAIL_JOB_PAYLOAD = PayloadSchema({"organization_id": OpaqueIdField(), "delivery_id": OpaqueIdField()})
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -133,7 +135,7 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
     return delivery
 
 
-def _responsible_notification_user_id(db, delivery: EmailDelivery) -> uuid.UUID:
+def _responsible_notification_user_id(db, delivery: EmailDelivery) -> uuid.UUID | None:
     if delivery.created_by is not None:
         creator = db.scalar(select(User).where(
             User.organization_id == delivery.organization_id,
@@ -153,24 +155,24 @@ def _responsible_notification_user_id(db, delivery: EmailDelivery) -> uuid.UUID:
         .order_by(User.created_at.asc(), User.id.asc())
         .limit(1)
     )
-    if fallback is None:
-        raise ValueError("email_notification_recipient_unavailable")
     return fallback
 
 
-def mark_delivery_failed(db, delivery: EmailDelivery, safe_code: str, now: datetime | None = None) -> None:
+def mark_delivery_failed(db, delivery: EmailDelivery, safe_code: str, now: datetime | None = None) -> str:
     if delivery.status in {"sent", "failed"}:
-        return
+        return delivery.safe_error_code or normalize_safe_code(safe_code)
     responsible_user_id = _responsible_notification_user_id(db, delivery)
+    effective_safe_code = normalize_safe_code(safe_code) if responsible_user_id is not None else "email_notification_recipient_unavailable"
     delivery.status = "failed"
-    delivery.safe_error_code = normalize_safe_code(safe_code)
+    delivery.safe_error_code = effective_safe_code
     delivery.failed_at = now or datetime.now(timezone.utc)
     delivery.version += 1
-    create_user_notification(
-        db, organization_id=delivery.organization_id, user_id=responsible_user_id,
-        event_type="email_delivery_failed", resource_type="email_delivery", resource_id=delivery.id,
-        recipient_masked=delivery.recipient_masked, safe_error_code=delivery.safe_error_code,
-    )
+    if responsible_user_id is not None:
+        create_user_notification(
+            db, organization_id=delivery.organization_id, user_id=responsible_user_id,
+            event_type="email_delivery_failed", resource_type="email_delivery", resource_id=delivery.id,
+            recipient_masked=delivery.recipient_masked, safe_error_code=delivery.safe_error_code,
+        )
     db.add(AuditLog(
         organization_id=delivery.organization_id, actor_user_id=delivery.created_by,
         category="recruiting", event_type="email.delivery_failed", outcome="failure",
@@ -178,11 +180,29 @@ def mark_delivery_failed(db, delivery: EmailDelivery, safe_code: str, now: datet
         trace_id=f"email-{str(delivery.id)[:8]}",
         metadata_json={"delivery_id": str(delivery.id), "recipient": delivery.recipient_masked, "safe_error_code": delivery.safe_error_code},
     ))
-    from server.app.integrations.feishu.notifications import schedule_feishu_notification
-    schedule_feishu_notification(
-        db, organization_id=delivery.organization_id, event_type="email_delivery_failed",
-        recipient_user_ids=[responsible_user_id], email_delivery_id=delivery.id,
-    )
+    if responsible_user_id is None:
+        db.add(AuditLog(
+            organization_id=delivery.organization_id, actor_user_id=None, category="system",
+            event_type="email.notification_recipient_unavailable", outcome="failure",
+            resource_type="email_delivery", resource_id=delivery.id,
+            trace_id=f"email-{str(delivery.id)[:8]}",
+            metadata_json={"delivery_id": str(delivery.id), "safe_error_code": effective_safe_code},
+        ))
+    db.flush()
+    if responsible_user_id is not None:
+        try:
+            with db.begin_nested():
+                from server.app.integrations.feishu.notifications import schedule_feishu_notification
+                schedule_feishu_notification(
+                    db, organization_id=delivery.organization_id, event_type="email_delivery_failed",
+                    recipient_user_ids=[responsible_user_id], email_delivery_id=delivery.id,
+                )
+        except Exception:
+            logger.error(
+                "email_failure_adapter_scheduling_failed",
+                extra={"context": {"delivery_id": str(delivery.id), "adapter": "feishu"}},
+            )
+    return effective_safe_code
 
 
 def email_delivery_terminal_callback(db, job, safe_code, now) -> None:
@@ -195,7 +215,9 @@ def email_delivery_terminal_callback(db, job, safe_code, now) -> None:
         return
     delivery = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == organization_id, EmailDelivery.id == delivery_id).with_for_update())
     if delivery is not None:
-        mark_delivery_failed(db, delivery, safe_code, now)
+        terminal_code = mark_delivery_failed(db, delivery, safe_code, now)
+        if terminal_code == "email_notification_recipient_unavailable":
+            job.last_error_code = terminal_code
 
 
 def communications_terminal_callbacks():

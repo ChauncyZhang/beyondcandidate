@@ -53,6 +53,15 @@ def delivery_store(tmp_path, *, feishu_state="enabled", automated=False, admin_r
     return sessions, cipher, delivery.id, job
 
 
+def _make_delivery_job_terminal(sessions, job):
+    with sessions.begin() as db:
+        stored_job = db.get(BackgroundJob, job.id)
+        now = QueueRepository(db).database_now()
+        stored_job.status = "running"; stored_job.attempts = 3; stored_job.max_attempts = 3
+        stored_job.lease_owner = "worker-1"; stored_job.lease_expires_at = now.replace(year=2099)
+        db.add(JobAttempt(organization_id=stored_job.organization_id, job_id=stored_job.id, attempt_no=3, started_at=now, worker_id="worker-1"))
+
+
 def test_email_cipher_separates_smtp_recipient_and_idempotency_purposes():
     cipher = EmailSecretCipher(b"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
     password_token = cipher.encrypt_smtp_password("same-value")
@@ -135,12 +144,7 @@ def test_permanent_failure_is_safe_and_contains_no_raw_secret_log(tmp_path, capl
 
 def test_terminal_callback_marks_retry_exhaustion_failed(tmp_path):
     sessions, _, delivery_id, job = delivery_store(tmp_path)
-    with sessions.begin() as db:
-        stored_job = db.get(BackgroundJob, job.id)
-        now = QueueRepository(db).database_now()
-        stored_job.status = "running"; stored_job.attempts = 3; stored_job.max_attempts = 3
-        stored_job.lease_owner = "worker-1"; stored_job.lease_expires_at = now.replace(year=2099)
-        db.add(JobAttempt(organization_id=stored_job.organization_id, job_id=stored_job.id, attempt_no=3, started_at=now, worker_id="worker-1"))
+    _make_delivery_job_terminal(sessions, job)
     with sessions.begin() as db:
         QueueRepository(db, terminal_callbacks={"communications.send_email": email_delivery_terminal_callback}).fail(job.organization_id, job.id, "worker-1", safe_code="smtp_timeout", retryable=True)
     with sessions() as db:
@@ -188,15 +192,50 @@ def test_automated_delivery_falls_back_to_deterministic_recruiting_admin(tmp_pat
         assert notification.user_id == expected_user_id
 
 
-def test_automated_delivery_without_authorized_fallback_fails_explicitly(tmp_path):
+def test_raising_feishu_adapter_cannot_rollback_terminal_core_rows(tmp_path, monkeypatch, caplog):
+    from server.app.notifications.models import UserNotification
+    from server.app.integrations.feishu import notifications as feishu_notifications
+
+    sessions, _, delivery_id, job = delivery_store(tmp_path, feishu_state="enabled")
+    _make_delivery_job_terminal(sessions, job)
+    monkeypatch.setattr(feishu_notifications, "schedule_feishu_notification", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("adapter failed")))
+    callbacks = {"communications.send_email": email_delivery_terminal_callback}
+    with caplog.at_level(logging.ERROR), sessions.begin() as db:
+        QueueRepository(db, terminal_callbacks=callbacks).fail(job.organization_id, job.id, "worker-1", safe_code="smtp_timeout", retryable=True)
+    with sessions.begin() as db:
+        stored_job = db.get(BackgroundJob, job.id)
+        email_delivery_terminal_callback(db, stored_job, "smtp_timeout", QueueRepository(db).database_now())
+    with sessions() as db:
+        assert db.get(BackgroundJob, job.id).status == "dead_letter"
+        assert db.get(EmailDelivery, delivery_id).status == "failed"
+        assert len(db.scalars(select(AuditLog).where(AuditLog.event_type == "email.delivery_failed")).all()) == 1
+        assert len(db.scalars(select(UserNotification).where(UserNotification.resource_id == delivery_id)).all()) == 1
+        assert db.scalar(select(OutboxEvent).where(OutboxEvent.topic == "feishu.notification.send")) is None
+    assert "email_failure_adapter_scheduling_failed" in caplog.text
+    assert "adapter failed" not in caplog.text
+
+
+def test_no_responsible_user_dead_letters_with_one_operator_incident_and_replay_is_idempotent(tmp_path):
     from server.app.notifications.models import UserNotification
 
     sessions, _, delivery_id, job = delivery_store(tmp_path, automated=True, admin_role=False, feishu_state="absent")
-    with pytest.raises(ValueError, match="email_notification_recipient_unavailable"):
-        with sessions.begin() as db:
-            email_delivery_terminal_callback(db, job, "smtp_timeout", QueueRepository(db).database_now())
+    _make_delivery_job_terminal(sessions, job)
+    callbacks = {"communications.send_email": email_delivery_terminal_callback}
+    with sessions.begin() as db:
+        QueueRepository(db, terminal_callbacks=callbacks).fail(job.organization_id, job.id, "worker-1", safe_code="smtp_timeout", retryable=True)
+    with sessions.begin() as db:
+        stored_job = db.get(BackgroundJob, job.id)
+        email_delivery_terminal_callback(db, stored_job, "smtp_timeout", QueueRepository(db).database_now())
     with sessions() as db:
-        assert db.get(EmailDelivery, delivery_id).status == "queued"
+        stored_job = db.get(BackgroundJob, job.id)
+        delivery = db.get(EmailDelivery, delivery_id)
+        assert stored_job.status == "dead_letter"
+        assert stored_job.last_error_code == "email_notification_recipient_unavailable"
+        assert delivery.status == "failed"
+        assert delivery.safe_error_code == "email_notification_recipient_unavailable"
+        assert len(db.scalars(select(AuditLog).where(AuditLog.event_type == "email.delivery_failed")).all()) == 1
+        incidents = db.scalars(select(AuditLog).where(AuditLog.event_type == "email.notification_recipient_unavailable")).all()
+        assert len(incidents) == 1 and incidents[0].category == "system"
         assert db.scalar(select(UserNotification).where(UserNotification.resource_id == delivery_id)) is None
 
 
