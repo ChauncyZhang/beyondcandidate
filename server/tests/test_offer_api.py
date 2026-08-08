@@ -38,6 +38,7 @@ def test_offer_api_registers_internal_routes_and_marks_responses_no_store(tmp_pa
     with TestClient(app) as client:
         schema = client.get("/openapi.json").json()
         response = client.get("/api/v1/offers")
+        template_response = client.get("/api/v1/offer-templates")
 
     assert {"post", "get"} <= set(schema["paths"]["/api/v1/offers"])
     assert "get" in schema["paths"]["/api/v1/offers/{offer_id}"]
@@ -45,6 +46,8 @@ def test_offer_api_registers_internal_routes_and_marks_responses_no_store(tmp_pa
     assert "post" in schema["paths"]["/api/v1/offer-approvals/{approval_id}/decisions"]
     assert response.status_code == 401
     assert response.headers["Cache-Control"] == "no-store"
+    assert template_response.status_code == 401
+    assert template_response.headers["Cache-Control"] == "no-store"
 
 
 def seed_offer_application(app):
