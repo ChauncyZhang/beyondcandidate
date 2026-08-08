@@ -18,7 +18,29 @@ TABLES = {"organizations", "departments", "workflow_templates", "users", "user_r
 def test_latest_migration_revision_is_current() -> None:
     script_directory = ScriptDirectory.from_config(Config("server/alembic.ini"))
 
-    assert script_directory.get_current_head() == "0029_separate_job_owners"
+    assert script_directory.get_current_head() == "0030_candidate_contact_confirmation"
+
+
+@pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")
+def test_0030_backfills_existing_candidate_contacts_as_legacy_unconfirmed() -> None:
+    url = os.environ["POSTGRES_SMOKE_URL"]
+    env = {**os.environ, "DATABASE_URL": url}
+    engine = create_engine(url.replace("+asyncpg", "+psycopg"))
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "downgrade", "base"], check=True, env=env)
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "0029_separate_job_owners"], check=True, env=env)
+    ids = {name: uuid.uuid4() for name in ("organization", "user", "candidate", "contact")}
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO organizations(id,slug,name,status,created_at,updated_at) VALUES(:organization,'contact-0030','Contact migration','active',now(),now())"), ids)
+        connection.execute(text("INSERT INTO users(id,organization_id,email,normalized_email,display_name,password_hash,status,authorization_version,created_at,updated_at) VALUES(:user,:organization,'contact-0030@example.test','contact-0030@example.test','Contact migration','x','active',1,now(),now())"), ids)
+        connection.execute(text("INSERT INTO candidates(id,organization_id,display_name,version,created_at,updated_at) VALUES(:candidate,:organization,'Candidate',1,now(),now())"), ids)
+        connection.execute(text("INSERT INTO candidate_contacts(id,organization_id,candidate_id,kind,ciphertext,lookup_hash,masked_value,created_at) VALUES(:contact,:organization,:candidate,'email',decode('00','hex'),repeat('0',64),'c***@example.test',now())"), ids)
+
+    subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "0030_candidate_contact_confirmation"], check=True, env=env)
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT source,confirmation_status,confirmed_by,confirmed_at,version FROM candidate_contacts WHERE id=:contact"), ids).one() == ("legacy", "unconfirmed", None, None, 1)
+        constraints = {item["name"] for item in inspect(engine).get_check_constraints("candidate_contacts")}
+        assert {"ck_candidate_contacts_source", "ck_candidate_contacts_confirmation_status"} <= constraints
+    engine.dispose()
 
 
 @pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")

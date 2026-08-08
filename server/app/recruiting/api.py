@@ -9,7 +9,8 @@ from uuid import UUID
 from fastapi import APIRouter, Header, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from sqlalchemy import and_, exists, func, literal, or_, select, update
+from sqlalchemy import and_, exists, func, literal, or_, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from server.app.governance.retention import recalculate_candidate_retention
@@ -22,7 +23,7 @@ from server.app.recruiting.cursor import CursorCodec, InvalidCursor
 from server.app.recruiting.authorization import RecruitingAction, RecruitingAuthorizationService
 from server.app.recruiting.models import (
     Application, ApplicationReviewTask, ApplicationStageEvent, Candidate, CandidateContact, CandidateEvent, CandidateNote,
-    DownloadTicket, JobJdVersion, Resume, ResumeProfile, ScreeningRuleVersion,
+    DownloadTicket, IdempotencyRecord, JobJdVersion, Resume, ResumeProfile, ScreeningRuleVersion,
 )
 from server.app.recruiting.review_assignments import explicit_review_manager_user_ids, review_manager_user_ids
 from server.app.screening.models import ScreeningItem, ScreeningResult
@@ -74,6 +75,10 @@ WORKBENCH_TASK_ACTIONS = {
 }
 
 
+class CandidateEmailConflict(Exception):
+    pass
+
+
 def _job_permission_projection(principal: Principal, action: RecruitingAction, label: str):
     predicate = AUTH.job_predicate(principal, action, Job)
     return literal(predicate).label(label) if isinstance(predicate, bool) else predicate.label(label)
@@ -122,6 +127,10 @@ class VersionCreate(StrictModel):
 
 class ContactInput(StrictModel):
     kind: str
+    value: str = Field(min_length=1, max_length=320)
+
+
+class CandidateEmailConfirmation(StrictModel):
     value: str = Field(min_length=1, max_length=320)
 
 
@@ -187,6 +196,7 @@ def _problem_for(request: Request, error: Exception) -> JSONResponse:
         ResourceVersionConflict: (409, "resource_version_conflict"),
         InvalidStateTransition: (409, "invalid_state_transition"),
         IdempotencyConflict: (409, "idempotency_conflict"),
+        CandidateEmailConflict: (409, "candidate_email_conflict"),
         ActiveApplicationExists: (409, "active_application_exists"),
         InvalidAggregateRelationship: (422, "validation_failed"),
         CandidateUnavailable: (404, "resource_not_found"),
@@ -329,6 +339,80 @@ def _job_definition_response(request: Request, body: dict[str, Any], status: int
 def _candidate_data(db, candidate: Candidate, principal: Principal) -> dict[str, Any]:
     contacts = db.scalars(select(CandidateContact).where(CandidateContact.organization_id == candidate.organization_id, CandidateContact.candidate_id == candidate.id)).all()
     return {"id": str(candidate.id), "display_name": candidate.display_name, "current_title": candidate.current_title, "location": candidate.location, "owner_id": str(candidate.owner_id) if candidate.owner_id else None, "version": candidate.version, "updated_at": candidate.updated_at.isoformat(), "contacts": [{"kind": item.kind, "value": item.masked_value} for item in contacts]}
+
+
+def _primary_email_contact(db, organization_id: UUID, candidate_id: UUID, *, lock: bool = False) -> CandidateContact | None:
+    query = select(CandidateContact).where(
+        CandidateContact.organization_id == organization_id,
+        CandidateContact.candidate_id == candidate_id,
+        CandidateContact.kind == "email",
+    ).order_by(
+        (CandidateContact.confirmation_status == "confirmed").desc(),
+        CandidateContact.confirmed_at.desc(),
+        CandidateContact.created_at.desc(),
+    ).limit(1)
+    return db.scalar(query.with_for_update() if lock else query)
+
+
+def _candidate_email_data(request: Request, contact: CandidateContact | None) -> dict[str, Any]:
+    if contact is None:
+        return {"masked_value": None, "value": None, "source": None, "confirmation_status": "unconfirmed", "confirmed_at": None, "version": 1}
+    confirmed_at = contact.confirmed_at
+    if confirmed_at is not None and confirmed_at.tzinfo is None:
+        confirmed_at = confirmed_at.replace(tzinfo=timezone.utc)
+    return {
+        "masked_value": contact.masked_value,
+        "value": request.app.state.contact_cipher.decrypt(contact.ciphertext),
+        "source": contact.source,
+        "confirmation_status": contact.confirmation_status,
+        "confirmed_at": confirmed_at.isoformat() if confirmed_at else None,
+        "version": contact.version,
+    }
+
+
+def _candidate_email_response(request: Request, contact: CandidateContact | None, status: int = 200) -> JSONResponse:
+    response = JSONResponse({"data": _candidate_email_data(request, contact)}, status_code=status)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["ETag"] = f'"{contact.version if contact else 1}"'
+    return response
+
+
+def _email_confirmation_idempotent(db, organization_id: UUID, user_id: UUID, candidate_id: UUID, key: str, fingerprint: dict[str, Any], action):
+    request_hash = hashlib.sha256(json.dumps(fingerprint, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    operation = f"candidate.email_confirm:{candidate_id}"
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("select pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"), {"lock_key": f"{organization_id}:{user_id}:{operation}:{key}"})
+    record = db.scalar(select(IdempotencyRecord).where(
+        IdempotencyRecord.organization_id == organization_id,
+        IdempotencyRecord.user_id == user_id,
+        IdempotencyRecord.operation == operation,
+        IdempotencyRecord.idempotency_key == key,
+    ).with_for_update())
+    if record:
+        if record.request_hash != request_hash:
+            raise IdempotencyConflict
+        contact_id = UUID(record.response_json["contact_id"])
+        contact = db.scalar(select(CandidateContact).where(
+            CandidateContact.organization_id == organization_id,
+            CandidateContact.candidate_id == candidate_id,
+            CandidateContact.id == contact_id,
+            CandidateContact.kind == "email",
+        ))
+        if contact is None:
+            raise CandidateUnavailable
+        return contact
+    contact = action()
+    db.add(IdempotencyRecord(
+        organization_id=organization_id,
+        user_id=user_id,
+        operation=operation,
+        idempotency_key=key,
+        request_hash=request_hash,
+        status_code=200,
+        response_json={"contact_id": str(contact.id)},
+    ))
+    db.flush()
+    return contact
 
 
 def _latest_screening_results(organization_id: UUID):
@@ -1505,6 +1589,70 @@ def get_candidate(candidate_id: UUID, request: Request):
     with request.app.state.identity_store.sync_session() as db:
         candidate = _load_candidate(db, principal, candidate_id)
         return _denied(request) if candidate is None else _resource(_candidate_data(db, candidate, principal))
+
+
+@router.get("/candidates/{candidate_id}/email")
+def get_candidate_email(candidate_id: UUID, request: Request):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse): return principal
+    with request.app.state.identity_store.sync_session() as db:
+        candidate = _load_candidate(db, principal, candidate_id, RecruitingAction.MANAGE_CANDIDATE)
+        if candidate is None: return _denied(request)
+        contact = _primary_email_contact(db, principal.organization_id, candidate_id)
+        db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, event_type="candidate.email_read", outcome="success", trace_id=request.state.trace_id, metadata_json={"candidate_id": str(candidate_id), "contact_id": str(contact.id) if contact else None}))
+        db.commit()
+        return _candidate_email_response(request, contact)
+
+
+@router.put("/candidates/{candidate_id}/email")
+def confirm_candidate_email(candidate_id: UUID, payload: CandidateEmailConfirmation, request: Request, if_match: str | None = Header(None), idempotency_key: str | None = Header(None)):
+    principal = _principal(request); expected = _expected_version(request, if_match); key = _idempotency(request, idempotency_key)
+    for value in (principal, expected, key):
+        if isinstance(value, JSONResponse): return value
+    with request.app.state.identity_store.sync_session() as db:
+        candidate = _load_candidate(db, principal, candidate_id, RecruitingAction.MANAGE_CANDIDATE)
+        if candidate is None: return _denied(request)
+        try:
+            protected = request.app.state.contact_cipher.protect("email", payload.value)
+
+            def action():
+                current = _primary_email_contact(db, principal.organization_id, candidate_id, lock=True)
+                current_version = current.version if current else 1
+                if current_version != expected:
+                    raise ResourceVersionConflict
+                matching = db.scalar(select(CandidateContact).where(
+                    CandidateContact.organization_id == principal.organization_id,
+                    CandidateContact.kind == "email",
+                    CandidateContact.lookup_hash == protected.lookup_hash,
+                ))
+                if matching is not None and matching.candidate_id != candidate_id:
+                    raise CandidateEmailConflict
+                contact = matching or current
+                if contact is None:
+                    contact = CandidateContact(organization_id=principal.organization_id, candidate_id=candidate_id, kind="email", ciphertext=protected.ciphertext, lookup_hash=protected.lookup_hash, masked_value=protected.masked_value, source="manual", confirmation_status="confirmed", confirmed_by=principal.user_id, confirmed_at=datetime.now(timezone.utc), version=2)
+                    db.add(contact)
+                else:
+                    contact.ciphertext = protected.ciphertext
+                    contact.lookup_hash = protected.lookup_hash
+                    contact.masked_value = protected.masked_value
+                    contact.source = "manual"
+                    contact.confirmation_status = "confirmed"
+                    contact.confirmed_by = principal.user_id
+                    contact.confirmed_at = datetime.now(timezone.utc)
+                    contact.version = current_version + 1
+                db.flush()
+                db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, event_type="candidate.email_confirmed", outcome="success", trace_id=request.state.trace_id, metadata_json={"candidate_id": str(candidate_id), "contact_id": str(contact.id), "version": contact.version}))
+                return contact
+
+            contact = _email_confirmation_idempotent(db, principal.organization_id, principal.user_id, candidate_id, key, {"candidate_id": candidate_id, "expected_version": expected, "lookup_hash": protected.lookup_hash}, action)
+            db.commit()
+            return _candidate_email_response(request, contact)
+        except (IdempotencyConflict, ResourceVersionConflict, CandidateEmailConflict, CandidateUnavailable) as error:
+            db.rollback()
+            return _problem_for(request, error)
+        except IntegrityError:
+            db.rollback()
+            return problem(request, 409, "candidate_email_conflict", "The request could not be completed.")
 
 
 @router.patch("/candidates/{candidate_id}", response_model=CandidateResource)

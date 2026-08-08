@@ -36,7 +36,18 @@ class CandidateContact(Record, Base):
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
     lookup_hash: Mapped[str] = mapped_column(String(64))
     masked_value: Mapped[str] = mapped_column(String(320))
-    __table_args__ = (UniqueConstraint("organization_id", "kind", "lookup_hash"), ForeignKeyConstraint(["organization_id", "candidate_id"], ["candidates.organization_id", "candidates.id"], ondelete="CASCADE"))
+    source: Mapped[str] = mapped_column(String(32), default="manual")
+    confirmation_status: Mapped[str] = mapped_column(String(16), default="unconfirmed")
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    __table_args__ = (
+        UniqueConstraint("organization_id", "kind", "lookup_hash"),
+        ForeignKeyConstraint(["organization_id", "candidate_id"], ["candidates.organization_id", "candidates.id"], ondelete="CASCADE"),
+        ForeignKeyConstraint(["organization_id", "confirmed_by"], ["users.organization_id", "users.id"]),
+        CheckConstraint("source in ('legacy','manual','extracted')", name="ck_candidate_contacts_source"),
+        CheckConstraint("confirmation_status in ('unconfirmed','confirmed')", name="ck_candidate_contacts_confirmation_status"),
+    )
 
 
 class FileObject(Record, Base):

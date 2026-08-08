@@ -16,7 +16,7 @@ from server.app.identity.security import PasswordService
 from server.app.main import create_app
 from server.app.llm.models import LlmInvocation, LlmProviderConfig, LlmScreeningEvaluation, PromptVersion
 from server.app.recruiting import api as recruiting_api
-from server.app.recruiting.models import Application, ApplicationReviewTask, ApplicationStageEvent, Candidate, CandidateEvent, CandidateNote, DownloadTicket, FileObject, IdempotencyRecord, JobJdVersion, Resume, ScreeningRuleVersion
+from server.app.recruiting.models import Application, ApplicationReviewTask, ApplicationStageEvent, Candidate, CandidateContact, CandidateEvent, CandidateNote, DownloadTicket, FileObject, IdempotencyRecord, JobJdVersion, Resume, ScreeningRuleVersion
 from server.app.screening.models import ScreeningItem, ScreeningResult, ScreeningRun
 from server.app.identity.models import AuditLog
 from server.app.recruiting.storage import StorageReadFailed
@@ -376,6 +376,77 @@ def test_admin_happy_path_preconditions_idempotency_and_private_download(tmp_pat
         assert client.post("/api/v1/download-tickets/consume", json={"token": raw}, headers=headers).status_code == 404
         with app.state.identity_store.sync_session() as db:
             assert raw not in repr([row.metadata_json for row in db.query(AuditLog).all()])
+
+
+def test_candidate_email_confirmation_is_hr_only_audited_no_store_and_idempotent(tmp_path) -> None:
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "email-admin@example.test")
+    seed_user(app, "hiring_manager", "email-manager@example.test")
+    with TestClient(app) as client:
+        admin_headers = login(client, "email-admin@example.test")
+        candidate = client.post(
+            "/api/v1/candidates",
+            json={"display_name": "Email Candidate", "contacts": [{"kind": "email", "value": "legacy@example.com"}]},
+            headers=admin_headers,
+        )
+        assert candidate.status_code == 201
+        candidate_id = candidate.json()["data"]["id"]
+
+        manager_headers = login(client, "email-manager@example.test")
+        denied = client.get(f"/api/v1/candidates/{candidate_id}/email", headers=manager_headers)
+        admin_headers = login(client, "email-admin@example.test")
+        initial = client.get(f"/api/v1/candidates/{candidate_id}/email", headers=admin_headers)
+        assert denied.status_code == 404
+        assert initial.status_code == 200
+        assert initial.headers["cache-control"] == "no-store"
+        assert initial.json()["data"] == {
+            "masked_value": "l***@example.com",
+            "value": "legacy@example.com",
+            "source": "manual",
+            "confirmation_status": "unconfirmed",
+            "confirmed_at": None,
+            "version": 1,
+        }
+
+        headers = {**admin_headers, "If-Match": '"1"', "Idempotency-Key": "confirm-email"}
+        confirmed = client.put(
+            f"/api/v1/candidates/{candidate_id}/email",
+            json={"value": "candidate@example.com"},
+            headers=headers,
+        )
+        replay = client.put(
+            f"/api/v1/candidates/{candidate_id}/email",
+            json={"value": "candidate@example.com"},
+            headers=headers,
+        )
+        conflict = client.put(
+            f"/api/v1/candidates/{candidate_id}/email",
+            json={"value": "other@example.com"},
+            headers=headers,
+        )
+        stale = client.put(
+            f"/api/v1/candidates/{candidate_id}/email",
+            json={"value": "candidate@example.com"},
+            headers={**admin_headers, "If-Match": '"1"', "Idempotency-Key": "stale-email"},
+        )
+        assert confirmed.status_code == replay.status_code == 200
+        assert confirmed.headers["cache-control"] == "no-store"
+        assert confirmed.headers["etag"] == '"2"'
+        assert confirmed.json() == replay.json()
+        assert confirmed.json()["data"]["value"] == "candidate@example.com"
+        assert confirmed.json()["data"]["source"] == "manual"
+        assert confirmed.json()["data"]["confirmation_status"] == "confirmed"
+        assert confirmed.json()["data"]["version"] == 2
+        assert conflict.status_code == 409 and conflict.json()["code"] == "idempotency_conflict"
+        assert stale.status_code == 409 and stale.json()["code"] == "resource_version_conflict"
+        assert "candidate@example.com" not in client.get(f"/api/v1/candidates/{candidate_id}", headers=admin_headers).text
+
+    with app.state.identity_store.sync_session() as db:
+        contact = db.query(CandidateContact).filter_by(candidate_id=UUID(candidate_id), kind="email").one()
+        assert contact.ciphertext != b"candidate@example.com"
+        assert db.query(AuditLog).filter_by(event_type="candidate.email_read").count() == 1
+        assert db.query(AuditLog).filter_by(event_type="candidate.email_confirmed").count() == 1
+        assert db.query(IdempotencyRecord).filter_by(operation=f"candidate.email_confirm:{candidate_id}").count() == 1
 
 
 def test_candidate_application_detail_includes_open_review_task_assignee(tmp_path) -> None:
