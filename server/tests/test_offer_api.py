@@ -7,7 +7,7 @@ from sqlalchemy import select
 from server.app.core.settings import Settings
 from server.app.identity.models import Job, JobCollaborator, User
 from server.app.main import create_app
-from server.app.offers.models import OfferApproval
+from server.app.offers.models import OfferApproval, OfferTemplate
 from server.app.recruiting.models import Application, Candidate, FileObject, Resume
 from server.tests.test_recruiting_api import login, seed_user
 
@@ -56,7 +56,9 @@ def seed_offer_application(app):
     viewer_id = seed_user(app, "recruiter", "offer-viewer@example.test")
     with app.state.identity_store.sync_session() as db:
         admin = db.get(User, admin_id)
-        job = Job(organization_id=admin.organization_id, title="Offer role", owner_id=admin_id, status="open", offer_approver_id=approver_id)
+        template = OfferTemplate(organization_id=admin.organization_id, name="职位默认 Offer", content={"body": "默认正文"}, status="active")
+        db.add(template); db.flush()
+        job = Job(organization_id=admin.organization_id, title="Offer role", owner_id=admin_id, status="open", offer_approver_id=approver_id, offer_template_id=template.id)
         candidate = Candidate(organization_id=admin.organization_id, display_name="Candidate")
         file = FileObject(organization_id=admin.organization_id, storage_key="private/resume", original_filename="resume.pdf", mime_type="application/pdf", size_bytes=1, sha256="0" * 64, uploaded_by=admin_id)
         db.add_all([job, candidate, file]); db.flush()
@@ -65,7 +67,7 @@ def seed_offer_application(app):
         application = Application(organization_id=admin.organization_id, candidate_id=candidate.id, job_id=job.id, resume_id=resume.id, owner_id=admin_id, stage="passed", source="manual")
         db.add_all([application, JobCollaborator(organization_id=admin.organization_id, job_id=job.id, user_id=viewer_id, access_role="job_recruiter")])
         db.commit()
-        return {"application_id": str(application.id), "admin": "offer-admin@example.test", "approver": "offer-approver@example.test", "viewer": "offer-viewer@example.test"}
+        return {"application_id": str(application.id), "template_id": str(template.id), "admin": "offer-admin@example.test", "approver": "offer-approver@example.test", "viewer": "offer-viewer@example.test"}
 
 
 def test_offer_lifecycle_is_idempotent_versioned_and_never_auto_sends(tmp_path) -> None:
@@ -93,6 +95,10 @@ def test_offer_lifecycle_is_idempotent_versioned_and_never_auto_sends(tmp_path) 
         send = client.post(f"/api/v1/offers/{offer_id}/send", headers={**login(client, seed["admin"]), "Idempotency-Key": "send", "If-Match": '"3"'})
 
     assert missing.status_code == 428
+    assert created.json()["data"]["template_id"] == seed["template_id"]
+    assert created.json()["data"]["candidate_name"] == "Candidate"
+    assert created.json()["data"]["job_title"] == "Offer role"
+    assert created.json()["data"]["allowed_actions"]["send"] is False
     assert submitted.status_code == 200
     assert denied.status_code == 404
     assert approver_offer.status_code == 200
@@ -142,9 +148,14 @@ def test_offer_template_and_ordered_special_approver_settings_are_tenant_admin_o
         with app.state.identity_store.sync_session() as db:
             approver_id = db.scalar(select(User.id).where(User.email == seed["approver"]))
         configured = client.put("/api/v1/settings/offer-special-approvers", json={"approver_ids": [str(approver_id)]}, headers={**admin, "Idempotency-Key": "special", "If-Match": '"0"'})
+        recruiter_templates = client.get("/api/v1/offer-templates", headers=login(client, seed["viewer"]))
+        recruiter_create = client.post("/api/v1/offer-templates", json={"name": "越权模板", "content": {"body": "x"}}, headers={**login(client, seed["viewer"]), "Idempotency-Key": "denied-template-create"})
 
     assert created.status_code == 201 and created.headers["ETag"] == '"1"'
     assert updated.status_code == 200 and updated.headers["ETag"] == '"2"'
     assert special.status_code == 422
     assert configured.status_code == 200
     assert configured.json()["data"]["approver_ids"] == [str(approver_id)]
+    assert recruiter_templates.status_code == 200
+    assert {item["name"] for item in recruiter_templates.json()["data"]} >= {"职位默认 Offer", "标准 Offer"}
+    assert recruiter_create.status_code == 404

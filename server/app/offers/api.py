@@ -61,6 +61,10 @@ def _admin(principal):
     return principal.active and "recruiting_admin" in principal.roles
 
 
+def _can_use_offer_templates(principal):
+    return principal.active and bool(principal.roles.intersection({"recruiting_admin", "recruiter"}))
+
+
 def _application(db, principal, application_id, action=RecruitingAction.READ):
     return db.scalar(select(Application).join(Job, (Job.organization_id == Application.organization_id) & (Job.id == Application.job_id)).where(
         Application.organization_id == principal.organization_id,
@@ -107,12 +111,19 @@ def _is_approval_participant(db, principal, offer):
 
 def _offer_view(db, offer, principal):
     current = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == offer.organization_id, OfferVersion.id == offer.current_version_id))
+    application = db.scalar(select(Application).where(Application.organization_id == offer.organization_id, Application.id == offer.application_id))
+    candidate = db.scalar(select(Candidate).where(Candidate.organization_id == offer.organization_id, Candidate.id == application.candidate_id)) if application else None
+    job = db.scalar(select(Job).where(Job.organization_id == offer.organization_id, Job.id == offer.job_id))
     can_manage = _can_manage(db, principal, offer)
     can_view_sensitive = can_manage or _is_approval_participant(db, principal, offer)
     is_assignee = db.scalar(select(OfferApproval.id).where(OfferApproval.organization_id == offer.organization_id, OfferApproval.offer_id == offer.id, OfferApproval.assignee_id == principal.user_id, OfferApproval.status == "pending")) is not None
     content = current.content if current and can_view_sensitive else {"redacted": True}
     return {
         "id": str(offer.id), "application_id": str(offer.application_id), "job_id": str(offer.job_id),
+        "candidate_id": str(candidate.id) if candidate else None,
+        "candidate_name": candidate.display_name if candidate else None,
+        "job_title": job.title if job else None,
+        "template_id": str(current.template_id) if current and current.template_id else None,
         "status": offer.status, "version": offer.version, "current_version_id": str(offer.current_version_id),
         "current_version_number": current.version_number if current else None,
         "candidate_response_deadline": offer.candidate_response_deadline.isoformat(), "is_special": offer.is_special,
@@ -123,7 +134,7 @@ def _offer_view(db, offer, principal):
             "update": can_manage and offer.status in {"draft", "changes_requested", "ready_to_send", "sent"},
             "submit": can_manage and offer.status in {"draft", "changes_requested"},
             "withdraw": can_manage and offer.status not in {"withdrawn", "expired"},
-            "send": can_manage and offer.status == "ready_to_send",
+            "send": False,
             "decide": is_assignee and offer.status == "pending_approval",
         },
     }
@@ -333,7 +344,7 @@ def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(N
 def list_offer_templates(request: Request):
     principal = _principal(request)
     if isinstance(principal, JSONResponse): return principal
-    if not _admin(principal): return _error(request, 404, "resource_not_found")
+    if not _can_use_offer_templates(principal): return _error(request, 404, "resource_not_found")
     with request.app.state.identity_store.sync_session() as db:
         rows = db.scalars(select(OfferTemplate).where(OfferTemplate.organization_id == principal.organization_id).order_by(OfferTemplate.name)).all()
         return _response([_template_view(row) for row in rows])
