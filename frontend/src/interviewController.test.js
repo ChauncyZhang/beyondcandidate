@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createInterviewController, deriveCandidateInterviews, getInterviewEmailActions, requiresCandidateEmailCorrection, selectSchedulableCandidates } from "./interviewController.js";
+import { candidateEmailCorrectionContext, createInterviewController, deriveCandidateInterviews, getInterviewEmailActions, requiresCandidateEmailCorrection, selectSchedulableCandidates } from "./interviewController.js";
 
 const INTERVIEW_ID = "11111111-1111-4111-8111-111111111111";
 const APPLICATION_ID = "22222222-2222-4222-8222-222222222222";
@@ -149,14 +149,35 @@ test("never projects an unmasked recipient or raw delivery error text", async ()
   assert.doesNotMatch(JSON.stringify(delivery), /candidate@example\.com|raw-provider-secret-detail/);
 });
 
-test("candidate email correction and resend actions require explicit authorization", () => {
+test("recruiter scheduling capability shows resend while interviewer capability keeps it hidden", () => {
   const record = { candidateId: CANDIDATE_ID, emailDelivery: { id: "delivery", status: "failed" } };
+  const recruiterCanSchedule = true;
+  const interviewerCanSchedule = false;
 
   assert.deepEqual(getInterviewEmailActions(record, { correctionRequired: true }), { correct: false, resend: false });
   assert.deepEqual(getInterviewEmailActions(record, { canCorrect: true, correctionRequired: true }), { correct: true, resend: false });
-  assert.deepEqual(getInterviewEmailActions(record, { canResend: true }), { correct: false, resend: true });
+  assert.deepEqual(getInterviewEmailActions(record, { canResend: recruiterCanSchedule }), { correct: false, resend: true });
+  assert.deepEqual(getInterviewEmailActions(record, { canResend: interviewerCanSchedule }), { correct: false, resend: false });
   assert.equal(requiresCandidateEmailCorrection({ code: "candidate_email_unconfirmed" }), true);
   assert.equal(requiresCandidateEmailCorrection({ code: "email_not_configured" }), false);
+});
+
+test("unconfirmed resend recovery preserves candidate application and interview context", () => {
+  const context = candidateEmailCorrectionContext({
+    id: INTERVIEW_ID,
+    candidateId: CANDIDATE_ID,
+    applicationId: APPLICATION_ID,
+    candidate: "赵宁",
+  }, "resend");
+
+  assert.deepEqual(context, {
+    id: CANDIDATE_ID,
+    name: "赵宁",
+    applicationId: APPLICATION_ID,
+    interviewId: INTERVIEW_ID,
+    operation: "resend",
+  });
+  assert.equal(candidateEmailCorrectionContext({ id: INTERVIEW_ID }, "resend"), null);
 });
 
 test("loads every interview page in a requested calendar range", async () => {

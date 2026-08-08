@@ -21,7 +21,7 @@ import { InterviewCalendar } from "./InterviewCalendar.jsx";
 import { InterviewFeedbackWorkspace } from "./InterviewFeedbackWorkspace.jsx";
 import { ScheduleWorkspace } from "./ScheduleWorkspace.jsx";
 import { CandidateEmailDialog } from "./CandidateViews.jsx";
-import { getInterviewEmailActions, requiresCandidateEmailCorrection } from "./interviewController.js";
+import { candidateEmailCorrectionContext, getInterviewEmailActions, requiresCandidateEmailCorrection } from "./interviewController.js";
 import { feedbackRatingDimensions, formatSubmittedFeedbackRatings } from "./feedbackRatings.js";
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { interviewStatusLabel } from "./recruitingTerminology.js";
@@ -131,7 +131,7 @@ function InterviewDeliveryState({ record }) {
   </span>;
 }
 
-function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor, loadingMore, onLoadMore, onLoadRange, onSchedule, onFeedback, onDownload, onTransition, onResendEmail, resendState, canResendCandidateEmail = false, canSchedule = true, interviewerId, pageActionHost }) {
+function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor, loadingMore, onLoadMore, onLoadRange, onSchedule, onFeedback, onDownload, onTransition, onResendEmail, resendState, canSchedule = true, interviewerId, pageActionHost }) {
   const [view, setView] = useState("list");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("全部状态");
@@ -186,7 +186,7 @@ function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor
         <div className="interview-table-head"><span>候选人</span><span>职位与轮次</span><span>时间与方式</span><span>面试官</span><span>面试状态</span><span>邮件 / 日历 / 反馈</span><span>待办</span></div>
         {filtered.map((record) => {
           const primaryAction = getInterviewPrimaryAction(record, { canSchedule, userId: interviewerId });
-          const emailActions = getInterviewEmailActions(record, { canResend: canResendCandidateEmail });
+          const emailActions = getInterviewEmailActions(record, { canResend: canSchedule });
           const emailAction = resendState?.[record.id];
           return <div className="interview-table-row" key={record.id}>
             <button className="interview-person" type="button" aria-label={`查看${record.candidate}的面试材料与评价`} onClick={() => onFeedback(record)}><span>{record.candidate.slice(-1)}</span><span><strong>{record.candidate}</strong><small>{record.role}</small></span></button>
@@ -360,7 +360,7 @@ function FeedbackForm({ record, onBack, backLabel, onSaved, onNotify, actorName 
       <section className="feedback-form-section"><header><h3>结构化评价</h3><p>仅当前面试官可编辑自己的草稿和反馈。</p></header>{feedbackRatingDimensions.map(([key, label]) => <div className="rating-row" key={key}><strong>{label}<span>*</span></strong><div>{ratingOptions.slice(1).map((option) => <button type="button" disabled={!editing || submitting} className={form.ratings[key] === option ? "active" : ""} key={option} onClick={() => rate(key, option)}>{option}</button>)}</div>{errors[key] && <small className="field-error">{errors[key]}</small>}</div>)}<label>候选人优点 <span>*</span><textarea disabled={!editing || submitting} rows="4" value={form.strengths} onChange={(event) => update("strengths", event.target.value)} placeholder="记录与岗位相关的优势和证据" />{errors.strengths && <small className="field-error">{errors.strengths}</small>}</label><label>风险与待确认项 <span>*</span><textarea disabled={!editing || submitting} rows="4" value={form.risks} onChange={(event) => update("risks", event.target.value)} placeholder="记录风险、信息缺口或后续建议" />{errors.risks && <small className="field-error">{errors.risks}</small>}</label><div className="feedback-conclusion"><strong>面试结论 <span>*</span></strong><div>{["强烈推荐", "推荐", "待补充评估", "不推荐"].map((option) => <button type="button" disabled={!editing || submitting} className={form.conclusion === option ? "active" : ""} key={option} onClick={() => update("conclusion", option)}>{option}</button>)}</div>{errors.conclusion && <small className="field-error">{errors.conclusion}</small>}</div><label>补充说明<textarea disabled={!editing || submitting} rows="3" value={form.notes} onChange={(event) => update("notes", event.target.value)} placeholder="可选：给 HR 或下一轮面试官的建议" /></label>{existing && editing && <label className="edit-reason">修改原因 <span>*</span><input disabled={submitting} value={editReason} onChange={(event) => { setEditReason(event.target.value); setErrors((current) => ({ ...current, editReason: "" })); }} placeholder="说明为什么需要修改已提交反馈" />{errors.editReason && <small className="field-error">{errors.editReason}</small>}</label>}{submitError && <div className="feedback-submit-error" role="alert"><CircleAlert size={18} /><div><strong>反馈请求失败</strong><p>{submitError}</p></div><button type="button" disabled={submitting || loading} onClick={() => void submit()}><RefreshCw size={14} />重试提交</button></div>}{editing && <footer><span><Check size={14} />{draftState}</span><button className="button primary" type="button" disabled={submitting || loading || !ownsFeedback} onClick={() => void submit()}><Send size={16} />{submitting ? "正在提交" : "提交反馈"}</button></footer>}</section></main><aside className="feedback-aside"><section><h3>面试信息</h3><dl><div><dt>方式</dt><dd>{record.method}</dd></div><div><dt>时长</dt><dd>{record.duration} 分钟</dd></div><div><dt>面试官</dt><dd>{record.interviewers.join("、")}</dd></div><div><dt>面试安排负责人</dt><dd>{record.owner}</dd></div></dl></section><section><h3>提交后</h3><p>HR 将汇总本轮反馈，并决定推进、追加面试、淘汰或加入人才库。</p></section>{!ownsFeedback && <section className="permission-note"><AlertTriangle size={17} /><div><strong>只读反馈</strong><p>你不是该面试的反馈参与人。</p></div></section>}</aside></div></InterviewFeedbackWorkspace></div>;
 }
 
-export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSelectedInterviewId, scheduleCandidateId, records, status, error, onRetry, nextCursor, loadingMore, onLoadMore, candidates, onNotify, onBack, backLabel = "返回面试列表", onOpenSubView, onRecordsChanged, canSchedule = true, canCorrectCandidateEmail = false, canResendCandidateEmail = false, candidateEmailController, actorName = "张小北", actorId, controller, pageActionHost }) {
+export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSelectedInterviewId, scheduleCandidateId, records, status, error, onRetry, nextCursor, loadingMore, onLoadMore, candidates, onNotify, onBack, backLabel = "返回面试列表", onOpenSubView, onRecordsChanged, canSchedule = true, canCorrectCandidateEmail = false, candidateEmailController, actorName = "张小北", actorId, controller, pageActionHost }) {
   const selectedInterview = records.find((item) => item.id === selectedInterviewId) || null;
   const scheduleCandidate = candidates.find((item) => item.id === scheduleCandidateId || item.candidateId === scheduleCandidateId) || candidates[0] || null;
   const participantApplicationId = selectedInterview?.applicationId || scheduleCandidate?.applicationId || scheduleCandidate?.application?.id || "";
@@ -409,7 +409,7 @@ export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSel
       backToList();
     } catch (error) {
       if (requiresCandidateEmailCorrection(error) && canCorrectCandidateEmail) {
-        setEmailCorrection({ id: selectedInterview?.candidateId || scheduleCandidate?.candidateId || scheduleCandidate?.id, name: selectedInterview?.candidate || scheduleCandidate?.name || "候选人" });
+        setEmailCorrection(candidateEmailCorrectionContext({ id: selectedInterview?.id, candidateId: selectedInterview?.candidateId || scheduleCandidate?.candidateId || scheduleCandidate?.id, applicationId: selectedInterview?.applicationId || scheduleCandidate?.applicationId, candidate: selectedInterview?.candidate || scheduleCandidate?.name }));
       }
       throw error;
     }
@@ -443,7 +443,7 @@ export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSel
       return true;
     } catch (error) {
       if (requiresCandidateEmailCorrection(error) && canCorrectCandidateEmail) {
-        setEmailCorrection({ id: record.candidateId, name: record.candidate });
+        setEmailCorrection(candidateEmailCorrectionContext(record));
         onNotify("候选人邮箱尚未确认，当前操作未保存");
       } else if (error?.name !== "AbortError") onNotify("面试状态更新失败，请刷新后重试");
       return false;
@@ -458,7 +458,11 @@ export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSel
       setResendState((current) => ({ ...current, [record.id]: { status: "ready", error: "" } }));
       onNotify("候选人邮件已加入发送队列");
     } catch (error) {
-      if (error?.latestInterview) {
+      if (requiresCandidateEmailCorrection(error) && canCorrectCandidateEmail) {
+        setEmailCorrection(candidateEmailCorrectionContext(record, "resend"));
+        setResendState((current) => ({ ...current, [record.id]: { status: "ready", error: "候选人邮箱尚未确认，请先修正邮箱。" } }));
+        onNotify("候选人邮箱尚未确认，邮件未重新发送");
+      } else if (error?.latestInterview) {
         await onRecordsChanged(error.latestInterview);
         setResendState((current) => ({ ...current, [record.id]: { status: "ready", error: "状态已刷新，请核对后重试。" } }));
         onNotify("邮件状态已变化，已刷新最新状态");
@@ -469,10 +473,11 @@ export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSel
   }
 
   const correctionActions = getInterviewEmailActions({ candidateId: emailCorrection?.id }, { canCorrect: canCorrectCandidateEmail, correctionRequired: Boolean(emailCorrection) });
-  const correctionNotice = emailCorrection && correctionActions.correct && <div className="interview-email-correction" role="alert"><CircleAlert size={18} /><div><strong>候选人邮箱尚未确认</strong><p>本次操作未保存；当前排期内容已保留。修正并确认邮箱后，请再次提交。</p></div><button className="button secondary" type="button" onClick={() => setEmailDialogOpen(true)}>修正邮箱</button></div>;
-  const correctionDialog = emailDialogOpen && emailCorrection && candidateEmailController && <CandidateEmailDialog candidate={{ id: emailCorrection.id, name: emailCorrection.name, serverBacked: true }} controller={candidateEmailController} onClose={() => setEmailDialogOpen(false)} onConfirmed={() => { setEmailDialogOpen(false); setEmailCorrection(null); onNotify("候选人邮箱已确认，当前排期内容仍已保留，请再次提交"); }} />;
+  const resendCorrection = emailCorrection?.operation === "resend";
+  const correctionNotice = emailCorrection && correctionActions.correct && <div className="interview-email-correction" role="alert"><CircleAlert size={18} /><div><strong>候选人邮箱尚未确认</strong><p>{resendCorrection ? "邮件未重新发送，面试记录和失败状态保持不变。修正并确认邮箱后，请再次点击重新发送。" : "本次操作未保存；当前排期内容已保留。修正并确认邮箱后，请再次提交。"}</p></div><button className="button secondary" type="button" onClick={() => setEmailDialogOpen(true)}>修正邮箱</button></div>;
+  const correctionDialog = emailDialogOpen && emailCorrection && candidateEmailController && <CandidateEmailDialog candidate={{ id: emailCorrection.id, name: emailCorrection.name, applicationId: emailCorrection.applicationId, serverBacked: true }} controller={candidateEmailController} onClose={() => setEmailDialogOpen(false)} onConfirmed={() => { if (resendCorrection && emailCorrection.interviewId) setResendState((current) => ({ ...current, [emailCorrection.interviewId]: { status: "ready", error: "" } })); setEmailDialogOpen(false); setEmailCorrection(null); onNotify(resendCorrection ? "候选人邮箱已确认，请再次点击重新发送" : "候选人邮箱已确认，当前排期内容仍已保留，请再次提交"); }} />;
 
   if (mode === "schedule" && canSchedule) return <div className="interview-schedule-recovery">{correctionNotice}<ScheduleWorkspace key={selectedInterview?.id || scheduleCandidateId || "new-interview"} record={selectedInterview} candidateId={scheduleCandidateId} candidates={candidates} participantOptions={participantOptions} participantStatus={participantStatus} onBack={backToList} backLabel={backLabel} onSave={saveRecord} onCheckConflicts={(record, form) => controller.checkConflicts(record?.id, form)} onGetAvailability={(filters, options) => controller.availability(filters, options)} onNotify={onNotify} />{correctionDialog}</div>;
   if (mode === "feedback" && selectedInterview) return <FeedbackForm record={selectedInterview} onBack={backToList} backLabel={backLabel} onSaved={async (_record, feedback) => { await onRecordsChanged({ ...selectedInterview, feedback, feedbackStatus: "已提交" }); }} onNotify={onNotify} actorName={actorName} userId={actorId} controller={controller} />;
-  return <>{correctionNotice}<InterviewList records={records} status={status} error={error} onRetry={onRetry} nextCursor={nextCursor} loadingMore={loadingMore} onLoadMore={onLoadMore} onLoadRange={(range, options) => controller.listRange({ ...range, timezone: "Asia/Shanghai" }, options)} onSchedule={openSchedule} onFeedback={openFeedback} onDownload={(record) => void downloadCalendar(record)} onTransition={transitionRecord} onResendEmail={resendCandidateEmail} resendState={resendState} canResendCandidateEmail={canResendCandidateEmail} canSchedule={canSchedule} interviewerId={actorId} pageActionHost={pageActionHost} />{correctionDialog}</>;
+  return <>{correctionNotice}<InterviewList records={records} status={status} error={error} onRetry={onRetry} nextCursor={nextCursor} loadingMore={loadingMore} onLoadMore={onLoadMore} onLoadRange={(range, options) => controller.listRange({ ...range, timezone: "Asia/Shanghai" }, options)} onSchedule={openSchedule} onFeedback={openFeedback} onDownload={(record) => void downloadCalendar(record)} onTransition={transitionRecord} onResendEmail={resendCandidateEmail} resendState={resendState} canSchedule={canSchedule} interviewerId={actorId} pageActionHost={pageActionHost} />{correctionDialog}</>;
 }

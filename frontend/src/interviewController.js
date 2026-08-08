@@ -147,6 +147,18 @@ export function requiresCandidateEmailCorrection(error) {
   return error?.code === "candidate_email_unconfirmed";
 }
 
+export function candidateEmailCorrectionContext(record, operation = "command") {
+  const id = safeString(record?.candidateId);
+  if (!id) return null;
+  return {
+    id,
+    name: safeString(record?.candidate).trim() || "候选人",
+    applicationId: safeString(record?.applicationId),
+    interviewId: safeString(record?.id),
+    operation: operation === "resend" ? "resend" : "command",
+  };
+}
+
 export function normalizeInterview(value) {
   const id = safeString(value?.id);
   if (!id) return null;

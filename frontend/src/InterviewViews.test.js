@@ -148,10 +148,20 @@ test("unconfirmed candidate email keeps the schedule workspace mounted and reuse
   assert.match(source, /<ScheduleWorkspace key=\{selectedInterview\?\.id \|\| scheduleCandidateId \|\| "new-interview"\}/);
 });
 
-test("failed delivery resend is role-gated and does not add reminder or candidate-account controls", () => {
+test("failed delivery resend reuses scheduling capability for recruiter visibility and interviewer denial", () => {
   assert.match(source, /emailActions\.resend && <button/);
   assert.match(source, /"重新发送"/);
-  assert.match(appSource, /canResendCandidateEmail=\{\["招聘管理员", "recruiting_admin"\]\.includes\(currentRole\)\}/);
+  assert.match(source, /getInterviewEmailActions\(record, \{ canResend: canSchedule \}\)/);
+  assert.match(appSource, /canSchedule=\{canPerformAction\(currentRole, "安排面试"\)\} canCorrectCandidateEmail=\{canPerformAction\(currentRole, "安排面试"\)\}/);
+  assert.doesNotMatch(source, /canResendCandidateEmail/);
   assert.match(appSource, /candidateEmailController=\{candidateController\}/);
   assert.doesNotMatch(source, /候选人提醒|发送提醒|候选人账号/);
+});
+
+test("unconfirmed resend enters correction recovery without replacing the failed row", () => {
+  assert.match(source, /requiresCandidateEmailCorrection\(error\) && canCorrectCandidateEmail/);
+  assert.match(source, /candidateEmailCorrectionContext\(record, "resend"\)/);
+  assert.match(source, /面试记录和失败状态保持不变/);
+  assert.match(source, /请再次点击重新发送/);
+  assert.doesNotMatch(source, /requiresCandidateEmailCorrection\(error\)[\s\S]{0,240}onRecordsChanged/);
 });
