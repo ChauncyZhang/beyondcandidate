@@ -68,6 +68,8 @@ def test_0030_backfills_existing_candidate_contacts_as_legacy_unconfirmed() -> N
 
     subprocess.run(["python", "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "0030_candidate_contact_confirmation"], check=True, env=env)
     with engine.connect() as connection:
+        version_column = next(column for column in inspect(engine).get_columns("alembic_version") if column["name"] == "version_num")
+        assert version_column["type"].length >= len("0030_candidate_contact_confirmation")
         assert connection.execute(text("SELECT source,confirmation_status,confirmed_by,confirmed_at,version FROM candidate_contacts WHERE id=:contact"), ids).one() == ("legacy", "unconfirmed", None, None, 1)
         constraints = {item["name"] for item in inspect(engine).get_check_constraints("candidate_contacts")}
         assert {"ck_candidate_contacts_source", "ck_candidate_contacts_confirmation_status"} <= constraints

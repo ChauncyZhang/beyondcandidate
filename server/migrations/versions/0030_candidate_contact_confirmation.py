@@ -11,6 +11,13 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.alter_column(
+        "alembic_version",
+        "version_num",
+        existing_type=sa.String(length=32),
+        type_=sa.String(length=128),
+        existing_nullable=False,
+    )
     op.add_column("candidate_contacts", sa.Column("source", sa.String(length=32), nullable=True))
     op.add_column("candidate_contacts", sa.Column("confirmation_status", sa.String(length=16), nullable=True))
     op.add_column("candidate_contacts", sa.Column("confirmed_by", sa.Uuid(), nullable=True))
