@@ -79,6 +79,7 @@ class OfferSecurityConfigTests(unittest.TestCase):
             "add_header Content-Security-Policy",
             "default-src 'self'",
             "connect-src 'self' blob:",
+            "frame-src 'self' blob:",
             "object-src 'none'",
             "frame-ancestors 'none'",
         ):

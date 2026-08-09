@@ -85,8 +85,10 @@ try {
     $env:CONTACT_LOOKUP_SECRET = [Guid]::NewGuid().ToString("N")
     $env:LLM_CONFIG_ENCRYPTION_KEY = New-Base64UrlKey
     $env:FEISHU_CONFIG_ENCRYPTION_KEY = New-Base64UrlKey
+    $env:EMAIL_ENCRYPTION_KEY = New-Base64UrlKey
     $env:LLM_PROVIDER_ALLOWLIST_JSON = "{}"
     $env:CORS_ORIGINS = "[`"http://localhost:$WebPort`"]"
+    $env:OFFER_PUBLIC_BASE_URL = "http://localhost:$WebPort"
     $env:VITE_API_PROXY_TARGET = "http://localhost:$ApiPort"
     $env:NODE_PATH = Join-Path $PrototypeRoot "node_modules"
 

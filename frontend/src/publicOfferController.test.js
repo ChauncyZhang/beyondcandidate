@@ -18,9 +18,17 @@ test("public offer requests use the path token and omit credentials", async () =
 
 test("public projection normalizes safe offer fields and response state", () => {
   const controller = createPublicOfferController();
-  assert.deepEqual(controller.normalize({ data: { status: "accepted", job_title: "平台工程师", company_name: "示例公司", candidate_response_deadline: "2026-09-01T00:00:00Z", content: { summary: "Offer 摘要" } } }), {
-    status: "accepted", jobTitle: "平台工程师", companyName: "示例公司", deadline: "2026-09-01T00:00:00Z", summary: "Offer 摘要", location: "", contact: "", response: null,
+  assert.deepEqual(controller.normalize({ data: { status: "accepted", candidate_name: "林候选人", job_title: "平台工程师", company_name: "示例公司", candidate_response_deadline: "2026-09-01T00:00:00Z", pdf_available: false, content: { summary: "Offer 摘要" } } }), {
+    status: "accepted", candidateName: "林候选人", jobTitle: "平台工程师", companyName: "示例公司", deadline: "2026-09-01T00:00:00Z", summary: "Offer 摘要", location: "", contact: "", pdfAvailable: false, response: null,
   });
+});
+
+test("public display_status is accepted for compatibility and an empty token stays local", async () => {
+  let calls = 0;
+  const controller = createPublicOfferController({ fetchImpl: async () => { calls += 1; throw new Error("unexpected request"); } });
+  assert.equal(controller.normalize({ display_status: "expired" }).status, "expired");
+  assert.equal((await controller.load("")).status, "invalid");
+  assert.equal(calls, 0);
 });
 
 test("responses send accepted and declined JSON exactly once per in-flight token", async () => {

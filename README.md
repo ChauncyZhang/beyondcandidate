@@ -8,6 +8,7 @@ BeyondCandidate 是一个开源的 AI 招聘协作平台，覆盖简历导入与
 - 结构化解析、扫描件 OCR 和 LLM 补全组成的多层简历处理链路。
 - 使用 OpenAI-compatible Provider 进行多维度 AI 评估与宽松流转。
 - 候选人、职位、招聘流程模板、面试轮次和反馈统一管理。
+- Offer 审批、邮件发送、候选人免登录确认，以及 HR 代候选人记录确认结果。
 - 飞书账号绑定、日历忙闲查询和面试日程同步。
 - 基于角色和组织的数据隔离、审计日志、删除审批与法律保留。
 - PostgreSQL、MinIO、ClamAV、FastAPI、React 和 Docker Compose 部署。
@@ -67,6 +68,7 @@ docker run --rm beyondcandidate-server-test
 - 独立域名、HTTPS 证书和受控反向代理。
 - 外部密钥管理、数据库和对象存储备份。
 - `APP_ENVIRONMENT=production`、明确的 HTTPS CORS 和独立高强度凭据。
+- SMTP 发信配置、独立的 `EMAIL_ENCRYPTION_KEY`，以及指向候选人页面的 HTTPS `OFFER_PUBLIC_BASE_URL`。
 - 可用的 LLM/OCR Provider，以及对简历外发范围的合规评估。
 - 监控、告警、容量评估和恢复演练。
 

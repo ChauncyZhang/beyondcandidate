@@ -100,6 +100,7 @@ def main() -> None:
         "CONTACT_LOOKUP_SECRET": _secret(48),
         "LLM_CONFIG_ENCRYPTION_KEY": _fernet_key(),
         "FEISHU_CONFIG_ENCRYPTION_KEY": _fernet_key(),
+        "EMAIL_ENCRYPTION_KEY": _fernet_key(),
     }
     for key, value in generated.items():
         if first_run or not values.get(key) or values[key].startswith(("change-me", "replace-me", "placeholder")):
@@ -110,6 +111,7 @@ def main() -> None:
         "DEFAULT_ORGANIZATION_NAME": args.organization_name,
         "HTTP_PORT": str(args.port),
         "CORS_ORIGINS": json.dumps([f"http://localhost:{args.port}"], ensure_ascii=False, separators=(",", ":")),
+        "OFFER_PUBLIC_BASE_URL": f"http://localhost:{args.port}",
     })
     _write_env(values)
 

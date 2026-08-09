@@ -197,7 +197,7 @@ export function App({ controller = sessionController, screeningController = defa
   }, [controller, navigate]);
 
   useEffect(() => {
-    if (publicRoute.kind === "public-offer") return undefined;
+    if (!shouldBootstrapSession(publicRoute)) return undefined;
     void controller.bootstrap();
     return undefined;
   }, [controller, publicRoute.kind]);
@@ -219,6 +219,7 @@ export function App({ controller = sessionController, screeningController = defa
   }
   return <AuthenticatedApp session={session} onLogout={() => controller.logout()} accountClient={accountClient} screeningController={screeningController} candidateController={candidateController} jobController={jobController} workbenchController={workbenchController} offerController={offerController} interviewController={interviewController} talentController={talentController} reportController={reportController} />;
 }
+export function shouldBootstrapSession(route) { return route?.kind !== "public-offer"; }
 
 function AuthenticatedApp({ session, onLogout, accountClient, screeningController, candidateController, jobController, workbenchController, offerController, interviewController, talentController, reportController }) {
   const currentRole = session.role || "未知角色";

@@ -28,6 +28,26 @@ docker run --rm ux09-server-test
 When a local Python 3.12 interpreter is available, installing
 `server/requirements-dev.txt` and running `python -m pytest server/tests` is equivalent.
 
+## Screening document parsing and OCR
+
+Scope: resume upload, parsing, OCR rendering, and screening/profile enrichment in the
+public product repository.
+
+- Symptom: image resumes or image-only PDFs upload successfully but later produce empty
+  parsed text, skip OCR, or fail with a generic parse/render error.
+- Cause: the document pipeline has several separate contracts: upload preflight type
+  detection, parser `parser_version`/quality classification, the isolated OCR renderer,
+  enrichment routing, resume/profile persistence, and the frontend MIME/display states.
+  Updating only one layer can leave later workers with no safe OCR path.
+- Working fix: for JPG/PNG support or scanned-PDF changes, update the parser and
+  `validate_upload_preflight` together, keep PDFium as the renderability authority for
+  damaged but renderable image PDFs, route image inputs through
+  `IsolatedOcrRenderer.render_image`, and keep `used_ocr` plus
+  `ocr_rules`/`ocr_llm` profile source persistence in sync.
+- Verification method: run the focused tests for the changed layer first, including
+  `python -m pytest server/tests/test_screening.py server/tests/test_ocr_rendering.py server/tests/test_resume_enrichment.py server/tests/test_screening_api.py server/tests/test_migrations.py -q`,
+  then run the normal backend gate described above before publishing.
+
 ## Migrations
 
 From the repository root, set `DATABASE_URL` to the async PostgreSQL URL for the
@@ -108,6 +128,11 @@ Copy `deploy/.env.example` to `deploy/.env`, replace every `change-me` value, th
 docker compose --env-file deploy/.env -f deploy/compose.yaml up --build -d
 ```
 
+Offer 邮件链路还要求 `EMAIL_ENCRYPTION_KEY` 使用独立的 32 字节 padded base64url 密钥，
+并将 `OFFER_PUBLIC_BASE_URL` 设置为候选人实际访问的站点 origin。生产环境必须使用 HTTPS，
+例如 `https://recruiting.example.com`，不能包含路径、查询参数或账号信息。SMTP 主机、账号和
+密码由系统管理员在网页的邮件设置中保存；Compose 环境只固定发件人、加密密钥和公开地址。
+
 Compose first runs the one-shot `minio-provision` service. MinIO root credentials exist only in
 the MinIO server and that provisioner; API and worker runtime use the ordinary application object
 credential. The deletion credential can list/delete only configured resume/export prefixes and
@@ -118,6 +143,13 @@ prefix must remain `exports/` unless the report storage contract changes with it
 All configured governance prefixes are non-empty relative paths ending in `/`. Retired MinIO
 users are ignored only when `mc` explicitly reports that the user does not exist; authentication,
 network, or CLI failures stop provisioning without printing the retired key or command output.
+
+The baseline Compose file must keep service logs bounded. A repeated production risk is that
+long-running API, worker, PostgreSQL, MinIO, ClamAV, or backup containers use Docker's default
+unbounded `json-file` logs until the host disk fills and the stack fails in unrelated ways. Keep the
+shared `x-bounded-logging` anchor on runtime and one-shot services, and verify changes with
+`docker compose --env-file deploy/.env.example -f deploy/compose.yaml config --quiet` plus a config
+readback that each service still resolves `logging.options.max-size` and `max-file`.
 
 `server.app.governance.storage` provides the delete-only adapter and canonical signed ledger v1/v2.
 V1 remains readable only for B2B2 completion/redelivery. New deletions write v2, which adds the

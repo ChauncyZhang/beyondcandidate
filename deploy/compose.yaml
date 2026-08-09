@@ -1,5 +1,11 @@
 name: ux09
 
+x-bounded-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
 x-app-environment: &app-environment
   APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}
   DATABASE_URL: postgresql+asyncpg://${APP_DB_USER}:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -11,6 +17,11 @@ x-app-environment: &app-environment
   CONTACT_LOOKUP_SECRET: ${CONTACT_LOOKUP_SECRET}
   LLM_CONFIG_ENCRYPTION_KEY: ${LLM_CONFIG_ENCRYPTION_KEY}
   FEISHU_CONFIG_ENCRYPTION_KEY: ${FEISHU_CONFIG_ENCRYPTION_KEY}
+  EMAIL_ENCRYPTION_KEY: ${EMAIL_ENCRYPTION_KEY}
+  EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-careers@beyondcandidate.com}
+  EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-BeyondCandidate}
+  EMAIL_SMTP_TIMEOUT_SECONDS: ${EMAIL_SMTP_TIMEOUT_SECONDS:-10}
+  OFFER_PUBLIC_BASE_URL: ${OFFER_PUBLIC_BASE_URL:-http://localhost:8080}
   LLM_PROVIDER_ALLOWLIST_JSON: ${LLM_PROVIDER_ALLOWLIST_JSON:-{}}
   OBJECT_STORAGE_CONNECT_TIMEOUT_SECONDS: ${OBJECT_STORAGE_CONNECT_TIMEOUT_SECONDS:-1}
   OBJECT_STORAGE_READ_TIMEOUT_SECONDS: ${OBJECT_STORAGE_READ_TIMEOUT_SECONDS:-3}
@@ -44,6 +55,7 @@ x-app-service: &app-service
     clamav:
       condition: service_healthy
   restart: unless-stopped
+  logging: *bounded-logging
   networks: [private, provider-egress]
 
 services:
@@ -65,6 +77,7 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    logging: *bounded-logging
     networks: [edge, private]
 
   api:
@@ -127,6 +140,7 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *bounded-logging
     networks: [private]
 
   minio:
@@ -143,6 +157,7 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *bounded-logging
     networks: [private]
 
   minio-provision:
@@ -172,6 +187,7 @@ services:
       minio:
         condition: service_healthy
     restart: "no"
+    logging: *bounded-logging
     networks: [private]
 
   clamav:
@@ -182,6 +198,7 @@ services:
       timeout: 10s
       retries: 10
     restart: unless-stopped
+    logging: *bounded-logging
     networks: [private]
 
   backup:
@@ -214,6 +231,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    logging: *bounded-logging
     restart: unless-stopped
     networks: [private]
 
