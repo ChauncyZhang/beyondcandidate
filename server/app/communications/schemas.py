@@ -11,11 +11,13 @@ class EmailConfigUpdate(ApiModel):
     tls_mode: str = Field(pattern=r"^(starttls|tls)$")
     username: str = Field(min_length=1, max_length=320)
     password: str | None = Field(default=None, min_length=1, max_length=4096)
+    sender_address: EmailStr
+    sender_name: str = Field(min_length=1, max_length=200)
     default_reply_to_email: EmailStr | None = None
     default_reply_to_name: str | None = Field(default=None, min_length=1, max_length=200)
     enabled: bool = False
 
-    @field_validator("host", "username", "default_reply_to_name")
+    @field_validator("host", "username", "sender_name", "default_reply_to_name")
     @classmethod
     def strip_value(cls, value: str | None) -> str | None:
         if value is None:

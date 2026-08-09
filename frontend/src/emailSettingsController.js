@@ -21,6 +21,7 @@ function normalizeConfig(value) {
     version: Number.isInteger(value?.version) ? value.version : 0,
     senderName: safeString(value?.sender_name),
     senderAddress: safeString(value?.sender_address),
+    senderSource: safeString(value?.sender_source),
     defaultReplyToEmail: safeString(value?.default_reply_to_email),
     defaultReplyToName: safeString(value?.default_reply_to_name),
   };
@@ -41,6 +42,8 @@ export function createEmailSettingsController({ client = apiClient, idempotencyK
       port: Number(settings?.port),
       tls_mode: settings?.tlsMode === "tls" ? "tls" : "starttls",
       username: safeString(settings?.username).trim(),
+      sender_name: safeString(settings?.senderName).trim(),
+      sender_address: safeString(settings?.senderAddress).trim(),
       enabled: settings?.enabled === true,
       default_reply_to_email: safeString(settings?.defaultReplyToEmail).trim(),
       default_reply_to_name: safeString(settings?.defaultReplyToName).trim(),

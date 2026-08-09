@@ -1325,7 +1325,7 @@ def test_invalid_iana_timezone_is_rejected_without_interview_mutation(tmp_path) 
         assert len(database.scalars(select(EmailDelivery)).all()) == 1
 
 
-def test_latest_disabled_email_provider_rejects_create_without_partial_mutation(tmp_path) -> None:
+def test_latest_disabled_email_provider_allows_create_with_manual_notification_state(tmp_path) -> None:
     app = make_app(tmp_path)
     seed = seed_application(app)
     with app.state.identity_store.sync_session() as database:
@@ -1346,6 +1346,10 @@ def test_latest_disabled_email_provider_rejects_create_without_partial_mutation(
                 updated_by=current.updated_by,
             )
         )
+        contact = database.scalar(select(CandidateContact).where(CandidateContact.kind == "email"))
+        contact.confirmation_status = "unconfirmed"
+        contact.confirmed_by = None
+        contact.confirmed_at = None
         database.commit()
 
     with TestClient(app) as client:
@@ -1355,10 +1359,26 @@ def test_latest_disabled_email_provider_rejects_create_without_partial_mutation(
             headers={**login(client, "interview-admin@example.test"), "Idempotency-Key": "disabled-provider-create"},
         )
 
-    assert (response.status_code, response.json()["code"]) == (409, "email_not_configured")
+    assert response.status_code == 201
+    assert response.json()["data"]["email_delivery"] == {
+        "id": None,
+        "recipient": None,
+        "status": "not_sent",
+        "version": None,
+        "safe_error_code": "email_not_configured",
+    }
     with app.state.identity_store.sync_session() as database:
-        assert database.scalar(select(Interview)) is None
+        interview = database.scalar(select(Interview))
+        assert interview is not None
         assert database.scalar(select(EmailDelivery)) is None
+        dispatch = database.scalar(
+            select(InterviewEvent).where(InterviewEvent.event_type == "interview.email_dispatch")
+        )
+        assert dispatch.payload == {
+            "kind": "interview_invitation",
+            "status": "not_sent",
+            "safe_error_code": "email_not_configured",
+        }
 
 
 def test_interview_delivery_snapshots_latest_enabled_provider_version(tmp_path) -> None:
@@ -1395,7 +1415,7 @@ def test_interview_delivery_snapshots_latest_enabled_provider_version(tmp_path) 
         assert (delivery.provider_config_id, delivery.provider_config_version) == (latest_id, 2)
 
 
-def test_latest_disabled_email_provider_rolls_back_reschedule_and_cancel(tmp_path) -> None:
+def test_latest_disabled_email_provider_allows_reschedule_and_cancel_with_manual_notification_state(tmp_path) -> None:
     app = make_app(tmp_path)
     seed = seed_application(app)
     with TestClient(app) as client:
@@ -1432,15 +1452,37 @@ def test_latest_disabled_email_provider_rolls_back_reschedule_and_cancel(tmp_pat
         cancelled = client.post(
             f"/api/v1/interviews/{interview_id}/transitions",
             json={"target": "cancelled", "reason": "Provider disabled"},
-            headers={**headers, "If-Match": '"1"', "Idempotency-Key": "disabled-provider-cancel"},
+            headers={**headers, "If-Match": '"2"', "Idempotency-Key": "disabled-provider-cancel"},
         )
 
-    assert (rescheduled.status_code, rescheduled.json()["code"]) == (409, "email_not_configured")
-    assert (cancelled.status_code, cancelled.json()["code"]) == (409, "email_not_configured")
+    assert rescheduled.status_code == 200
+    assert cancelled.status_code == 200
+    assert rescheduled.json()["data"]["email_delivery"]["status"] == "not_sent"
+    assert cancelled.json()["data"]["email_delivery"] == {
+        "id": None,
+        "recipient": None,
+        "status": "not_sent",
+        "version": None,
+        "safe_error_code": "email_not_configured",
+    }
     with app.state.identity_store.sync_session() as database:
         interview = database.get(Interview, UUID(interview_id))
-        assert (interview.status, interview.version, interview.calendar_sequence) == ("scheduled", 1, 0)
+        assert (interview.status, interview.version, interview.calendar_sequence) == ("cancelled", 3, 2)
         assert len(database.scalars(select(EmailDelivery).where(EmailDelivery.resource_id == interview.id)).all()) == 1
+        skipped = database.scalars(
+            select(InterviewEvent)
+            .where(
+                InterviewEvent.interview_id == interview.id,
+                InterviewEvent.event_type == "interview.email_dispatch",
+            )
+            .order_by(InterviewEvent.created_at, InterviewEvent.id)
+        ).all()
+        assert [event.payload["kind"] for event in skipped] == [
+            "interview_invitation",
+            "interview_rescheduled",
+            "interview_cancelled",
+        ]
+        assert [event.payload["status"] for event in skipped] == ["queued", "not_sent", "not_sent"]
 
 
 def test_terminal_smtp_failure_does_not_rollback_saved_interview(tmp_path) -> None:

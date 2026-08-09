@@ -39,7 +39,7 @@ class FakeMailProvider:
         return ProviderReceipt("receipt-123")
 
 
-def delivery_store(tmp_path, *, feishu_state="enabled", automated=False, admin_role=True):
+def delivery_store(tmp_path, *, feishu_state="enabled", automated=False, admin_role=True, sender_address=None, sender_name=None):
     engine = create_engine(f"sqlite:///{tmp_path / 'email-worker.db'}")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine, expire_on_commit=False)
@@ -50,7 +50,7 @@ def delivery_store(tmp_path, *, feishu_state="enabled", automated=False, admin_r
         if admin_role:
             user.roles.append(UserRole(role="recruiting_admin"))
         db.add_all([organization, user]); db.flush()
-        db.add(EmailProviderConfig(organization_id=organization.id, host="smtp.example.test", port=587, tls_mode="starttls", username="mailer@example.test", encrypted_password=cipher.encrypt_smtp_password("smtp-private"), default_reply_to_email="default-hr@example.com", default_reply_to_name="Default HR", enabled=True, version=1, created_by=user.id, updated_by=user.id))
+        db.add(EmailProviderConfig(organization_id=organization.id, host="smtp.example.test", port=587, tls_mode="starttls", username="mailer@example.test", encrypted_password=cipher.encrypt_smtp_password("smtp-private"), sender_address=sender_address, sender_name=sender_name, default_reply_to_email="default-hr@example.com", default_reply_to_name="Default HR", enabled=True, version=1, created_by=user.id, updated_by=user.id))
         if feishu_state != "absent":
             db.add(FeishuOrganizationConfig(organization_id=organization.id, app_id="app", encrypted_app_secret=b"opaque", redirect_uri="https://hr.example.test/callback", calendar_id="primary", enabled=feishu_state == "enabled", version=1, created_by=user.id, updated_by=user.id))
         delivery = enqueue_delivery(db, DeliveryCommand(organization_id=organization.id, recipient="candidate@example.com", reply_to_email="hr@example.com", reply_to_name="Responsible HR", subject="Interview invitation", body="Hello Candidate", resource_type="test", resource_id=uuid.uuid4(), idempotency_key="worker-delivery", operation="test.worker", created_by=None if automated else user.id), cipher=cipher, sender_policy=SenderPolicy("careers@example.com", "BeyondCandidate"))
@@ -132,6 +132,26 @@ def test_worker_uses_fixed_sender_hr_reply_to_and_immutable_snapshots(tmp_path):
     with sessions() as db:
         stored = db.get(EmailDelivery, delivery_id)
         assert (stored.status, stored.provider_receipt_id) == ("sent", "receipt-123")
+
+
+def test_worker_uses_organization_sender_snapshot_when_configured(tmp_path):
+    sessions, cipher, delivery_id, job = delivery_store(
+        tmp_path,
+        sender_address="talent@example.com",
+        sender_name="Acme Talent",
+    )
+    provider = FakeMailProvider()
+    asyncio.run(EmailDeliveryJobHandler(sessions, provider, cipher)(job))
+    assert (provider.messages[0].sender_email, provider.messages[0].sender_name) == (
+        "talent@example.com",
+        "Acme Talent",
+    )
+    with sessions() as db:
+        delivery = db.get(EmailDelivery, delivery_id)
+        assert (delivery.sender_email, delivery.sender_name) == (
+            "talent@example.com",
+            "Acme Talent",
+        )
 
 
 def test_worker_uses_exact_saved_provider_snapshot_when_newer_config_exists(tmp_path, monkeypatch):
@@ -275,8 +295,11 @@ def test_enqueue_delivery_is_transaction_friendly_and_business_idempotent(tmp_pa
     sessions, cipher, delivery_id, _ = delivery_store(tmp_path)
     with sessions.begin() as db:
         original = db.get(EmailDelivery, delivery_id)
-        replay = enqueue_delivery(db, DeliveryCommand(organization_id=original.organization_id, recipient="candidate@example.com", reply_to_email=original.reply_to_email, reply_to_name=original.reply_to_name, subject=original.rendered_subject, body=original.rendered_body, resource_type=original.resource_type, resource_id=original.resource_id, idempotency_key="worker-delivery", operation="test.worker", created_by=original.created_by), cipher=cipher, sender_policy=SenderPolicy(original.sender_email, original.sender_name))
+        config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.version == 1))
+        db.add(EmailProviderConfig(organization_id=config.organization_id, host=config.host, port=config.port, tls_mode=config.tls_mode, username=config.username, encrypted_password=config.encrypted_password, sender_address="new-sender@example.com", sender_name="New Sender", default_reply_to_email=config.default_reply_to_email, default_reply_to_name=config.default_reply_to_name, enabled=True, version=2, created_by=config.created_by, updated_by=config.updated_by))
+        replay = enqueue_delivery(db, DeliveryCommand(organization_id=original.organization_id, recipient="candidate@example.com", reply_to_email=original.reply_to_email, reply_to_name=original.reply_to_name, subject=original.rendered_subject, body=original.rendered_body, resource_type=original.resource_type, resource_id=original.resource_id, idempotency_key="worker-delivery", operation="test.worker", created_by=original.created_by), cipher=cipher, sender_policy=SenderPolicy("process-default@example.com", "Process Default"))
         assert replay.id == original.id
+        assert (replay.sender_email, replay.sender_name) == ("careers@example.com", "BeyondCandidate")
     with sessions() as db:
         assert len(db.scalars(select(EmailDelivery)).all()) == 1
         assert len(db.scalars(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email")).all()) == 1

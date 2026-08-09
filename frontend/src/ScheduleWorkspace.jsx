@@ -10,12 +10,12 @@ export function getScheduleConflictType(result, allowSoftConflict) {
   return null;
 }
 
-export function getScheduleSavedMessage(record, availabilityUnconfirmed = false) {
+export function getScheduleSavedMessage(record, availabilityUnconfirmed = false, manualNotificationRequired = false) {
   const saved = record ? "面试改期已保存" : "面试安排已保存";
   const invitation = record ? "新的邀请文件可下载" : "邀请文件可下载";
-  return availabilityUnconfirmed
-    ? `${saved}；飞书忙闲暂未确认，请留意后续日历同步结果`
-    : `${saved}；${invitation}；面试邀请尚未发送`;
+  const email = manualNotificationRequired ? "邮件未发送，请人工通知候选人" : "候选人邮件已进入发送队列";
+  const availability = availabilityUnconfirmed ? "；飞书忙闲暂未确认，请留意后续日历同步结果" : "";
+  return `${saved}；${email}；${invitation}${availability}`;
 }
 
 export async function copyInterviewText(text, clipboard) {
@@ -169,8 +169,8 @@ export function ScheduleWorkspace({ record, candidateId, candidates, participant
       const finalConflict = await onCheckConflicts(record, { ...form, applicationId: candidate?.applicationId || candidate?.application?.id || record?.applicationId || "", participantIds: form.interviewerIds });
       const conflictType = getScheduleConflictType(finalConflict, false);
       if (conflictType) { setSubmitError(conflictType === "hard" ? "保存前检查发现该时段已有冲突，请重新选择时间。" : "保存前检查发现缓冲不足，请重新选择时间。"); return; }
-      await onSave(record, { ...form, applicationId: candidate?.applicationId || candidate?.application?.id || "", participants: selectedInterviewers.map((item) => ({ id: item.id, role: "interviewer", requiredFeedback: true })), allowSoftConflict: false });
-      onNotify(getScheduleSavedMessage(record, Boolean(finalConflict?.unconfirmed?.length)));
+      const saved = await onSave(record, { ...form, applicationId: candidate?.applicationId || candidate?.application?.id || "", participants: selectedInterviewers.map((item) => ({ id: item.id, role: "interviewer", requiredFeedback: true })), allowSoftConflict: false });
+      onNotify(getScheduleSavedMessage(record, Boolean(finalConflict?.unconfirmed?.length), saved?.emailDelivery?.manualNotificationRequired));
     } catch (error) {
       if (error?.name !== "AbortError") setSubmitError(error?.code === "schedule_hard_conflict" ? "该时段存在面试冲突，请调整后重试。" : "无法完成权威冲突检查或保存，当前内容已保留。请重试。");
     } finally { setSubmitting(false); }

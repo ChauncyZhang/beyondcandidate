@@ -49,7 +49,16 @@ def _version(request, value):
 
 
 def _config_view(config, sender_policy: SenderPolicy):
-    sender = {"sender_address": sender_policy.email, "sender_name": sender_policy.name, "sender_source": "process"}
+    has_organization_sender = (
+        config is not None
+        and config.sender_address is not None
+        and config.sender_name is not None
+    )
+    sender = {
+        "sender_address": config.sender_address if has_organization_sender else sender_policy.email,
+        "sender_name": config.sender_name if has_organization_sender else sender_policy.name,
+        "sender_source": "organization" if has_organization_sender else "process",
+    }
     if config is None:
         return {"configured": False, "host": None, "port": None, "tls_mode": None, "username": None, "password_masked": None, "default_reply_to_email": None, "default_reply_to_name": None, "enabled": False, "version": 0, **sender}
     return {"configured": True, "host": config.host, "port": config.port, "tls_mode": config.tls_mode, "username": config.username, "password_masked": "********", "default_reply_to_email": config.default_reply_to_email, "default_reply_to_name": config.default_reply_to_name, "enabled": config.enabled, "version": config.version, **sender}
@@ -98,18 +107,21 @@ def put_email_config(payload: EmailConfigUpdate, request: Request, if_match: str
                     raise ValueError("password_required")
                 encrypted = request.app.state.email_secret_cipher.encrypt_smtp_password(payload.password) if payload.password is not None else current.encrypted_password
                 sender_policy = _sender_policy(request)
-                default_reply_to_email = str(payload.default_reply_to_email) if payload.default_reply_to_email is not None else (current.default_reply_to_email if current is not None else sender_policy.email)
-                default_reply_to_name = payload.default_reply_to_name if payload.default_reply_to_name is not None else (current.default_reply_to_name if current is not None else sender_policy.name)
+                sender_address = request.app.state.email_secret_cipher.normalize_email(str(payload.sender_address))
+                sender_name = payload.sender_name
+                default_reply_to_email = str(payload.default_reply_to_email) if payload.default_reply_to_email is not None else (current.default_reply_to_email if current is not None else sender_address)
+                default_reply_to_name = payload.default_reply_to_name if payload.default_reply_to_name is not None else (current.default_reply_to_name if current is not None else sender_name)
                 default_reply_to_email = request.app.state.email_secret_cipher.normalize_email(default_reply_to_email)
                 config = EmailProviderConfig(
                     organization_id=principal.organization_id, host=payload.host, port=payload.port,
                     tls_mode=payload.tls_mode, username=payload.username, encrypted_password=encrypted,
+                    sender_address=sender_address, sender_name=sender_name,
                     default_reply_to_email=default_reply_to_email, default_reply_to_name=default_reply_to_name,
                     enabled=payload.enabled, version=expected + 1, created_by=principal.user_id,
                     updated_by=principal.user_id,
                 )
                 db.add(config)
-                db.flush(); db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, category="system", event_type="email.config_updated", outcome="success", resource_type="email_provider_config", resource_id=config.id, trace_id=request.state.trace_id, metadata_json={"enabled": config.enabled, "tls_mode": config.tls_mode, "sender_source": "process", "default_reply_to_configured": True}))
+                db.flush(); db.add(AuditLog(organization_id=principal.organization_id, actor_user_id=principal.user_id, category="system", event_type="email.config_updated", outcome="success", resource_type="email_provider_config", resource_id=config.id, trace_id=request.state.trace_id, metadata_json={"enabled": config.enabled, "tls_mode": config.tls_mode, "sender_source": "organization", "default_reply_to_configured": True}))
                 return 200, {"data": _config_view(config, sender_policy)}
             semantic = {"expected_version": expected, **payload.model_dump()}
             status, body = persisted_idempotent(db, principal.organization_id, principal.user_id, "email.config.put", key, _email_idempotency_body(request, "email.config.put", semantic), action); db.commit()

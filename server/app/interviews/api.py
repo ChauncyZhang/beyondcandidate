@@ -482,13 +482,32 @@ def _interview_data(db, interview: Interview) -> dict:
         .order_by(EmailDelivery.created_at.desc(), EmailDelivery.id.desc())
         .limit(1)
     )
-    delivery_data = None if delivery is None else {
-        "id": str(delivery.id),
-        "recipient": delivery.recipient_masked,
-        "status": delivery.status,
-        "version": delivery.version,
-        "safe_error_code": delivery.safe_error_code,
-    }
+    email_dispatch = db.scalar(
+        select(InterviewEvent)
+        .where(
+            InterviewEvent.organization_id == interview.organization_id,
+            InterviewEvent.interview_id == interview.id,
+            InterviewEvent.event_type == "interview.email_dispatch",
+        )
+        .order_by(InterviewEvent.created_at.desc(), InterviewEvent.id.desc())
+        .limit(1)
+    )
+    if email_dispatch is not None and email_dispatch.payload.get("status") == "not_sent":
+        delivery_data = {
+            "id": None,
+            "recipient": None,
+            "status": "not_sent",
+            "version": None,
+            "safe_error_code": email_dispatch.payload.get("safe_error_code"),
+        }
+    else:
+        delivery_data = None if delivery is None else {
+            "id": str(delivery.id),
+            "recipient": delivery.recipient_masked,
+            "status": delivery.status,
+            "version": delivery.version,
+            "safe_error_code": delivery.safe_error_code,
+        }
     return {
         "id": str(interview.id),
         "application_id": str(interview.application_id),
@@ -538,19 +557,46 @@ def _schedule_snapshot(interview: Interview) -> dict:
     }
 
 
-def _enqueue_candidate_interview_email(request: Request, db, interview: Interview, kind: str):
-    return enqueue_interview_message(
-        db,
-        interview=interview,
-        kind=kind,
-        trace_id=request.state.trace_id,
-        contact_cipher=request.app.state.contact_cipher,
-        email_cipher=request.app.state.email_secret_cipher,
-        sender_policy=SenderPolicy(
-            request.app.state.settings.email_from_address,
-            request.app.state.settings.email_from_name,
-        ),
+def _enqueue_candidate_interview_email(
+    request: Request,
+    db,
+    interview: Interview,
+    kind: str,
+    *,
+    actor_user_id: UUID,
+):
+    try:
+        delivery = enqueue_interview_message(
+            db,
+            interview=interview,
+            kind=kind,
+            trace_id=request.state.trace_id,
+            contact_cipher=request.app.state.contact_cipher,
+            email_cipher=request.app.state.email_secret_cipher,
+            sender_policy=SenderPolicy(
+                request.app.state.settings.email_from_address,
+                request.app.state.settings.email_from_name,
+            ),
+        )
+        payload = {"kind": kind, "status": "queued", "delivery_id": str(delivery.id)}
+    except EmailConfigurationUnavailable:
+        delivery = None
+        payload = {
+            "kind": kind,
+            "status": "not_sent",
+            "safe_error_code": "email_not_configured",
+        }
+    db.add(
+        InterviewEvent(
+            organization_id=interview.organization_id,
+            interview_id=interview.id,
+            actor_user_id=actor_user_id,
+            event_type="interview.email_dispatch",
+            payload=payload,
+        )
     )
+    db.flush()
+    return delivery
 
 
 def _advance_application_if_interviews_complete(
@@ -1142,6 +1188,7 @@ def create_interview(payload: InterviewCreate, request: Request, idempotency_key
                     db,
                     interview,
                     "interview_invitation",
+                    actor_user_id=principal.user_id,
                 )
                 recalculate_candidate_retention(
                     db, principal.organization_id, candidate_id
@@ -1178,9 +1225,6 @@ def create_interview(payload: InterviewCreate, request: Request, idempotency_key
         except CandidateEmailUnavailable:
             db.rollback()
             return problem(request, 409, "candidate_email_unconfirmed", "Confirm the candidate email before scheduling the interview.")
-        except EmailConfigurationUnavailable:
-            db.rollback()
-            return problem(request, 409, "email_not_configured", "Configure transactional email before scheduling the interview.")
         except InterviewMessageValidationError as error:
             db.rollback()
             return problem(request, 409, str(error), "The interview email could not be prepared.")
@@ -1376,6 +1420,7 @@ def patch_interview(interview_id: UUID, payload: InterviewPatch, request: Reques
                 db,
                 interview,
                 "interview_rescheduled",
+                actor_user_id=principal.user_id,
             )
             recalculate_candidate_retention(
                 db, principal.organization_id, candidate_id
@@ -1410,9 +1455,6 @@ def patch_interview(interview_id: UUID, payload: InterviewPatch, request: Reques
         except CandidateEmailUnavailable:
             db.rollback()
             return problem(request, 409, "candidate_email_unconfirmed", "Confirm the candidate email before rescheduling the interview.")
-        except EmailConfigurationUnavailable:
-            db.rollback()
-            return problem(request, 409, "email_not_configured", "Configure transactional email before rescheduling the interview.")
         except InterviewMessageValidationError as error:
             db.rollback()
             return problem(request, 409, str(error), "The interview email could not be prepared.")
@@ -1622,6 +1664,7 @@ def transition_interview(
                         db,
                         locked,
                         "interview_cancelled",
+                        actor_user_id=principal.user_id,
                     )
                     schedule_interview_sync(db, locked, "cancel")
                     schedule_feishu_notification(
@@ -1674,9 +1717,6 @@ def transition_interview(
         except CandidateEmailUnavailable:
             db.rollback()
             return problem(request, 409, "candidate_email_unconfirmed", "Confirm the candidate email before cancelling the interview.")
-        except EmailConfigurationUnavailable:
-            db.rollback()
-            return problem(request, 409, "email_not_configured", "Configure transactional email before cancelling the interview.")
         except InterviewMessageValidationError as error:
             db.rollback()
             return problem(request, 409, str(error), "The interview email could not be prepared.")

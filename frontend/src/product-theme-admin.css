@@ -1361,14 +1361,10 @@
 
 .settings-page .email-settings { margin-top: 16px; }
 .email-settings .settings-section-heading h2 { display: flex; align-items: center; gap: 8px; }
-.email-server-policy { margin: 16px 0; padding: 14px; border: 1px solid #d7e0e8; border-radius: 8px; background: #f6f8fa; display: flex; align-items: flex-start; gap: 11px; }
-.email-server-policy > div { min-width: 0; display: grid; gap: 4px; }
-.email-server-policy p, .email-server-policy small { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
-.email-server-policy dl { margin: 4px 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; }
-.email-server-policy dl div { min-width: 0; }
-.email-server-policy dt { color: var(--muted); font-size: 12px; }
-.email-server-policy dd { margin: 2px 0 0; overflow-wrap: anywhere; font-weight: 600; }
 .email-settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.email-form-section { grid-column: 1 / -1; padding-top: 4px; display: grid; gap: 3px; }
+.email-form-section:not(:first-child) { margin-top: 4px; padding-top: 16px; border-top: 1px solid var(--line); }
+.email-form-section small { color: var(--muted); overflow-wrap: anywhere; }
 .email-settings-form label, .email-test-fields label { min-width: 0; display: grid; gap: 6px; }
 .email-settings-form input, .email-settings-form select, .email-test-fields input { width: 100%; min-width: 0; }
 .email-password-field, .email-settings-actions { grid-column: 1 / -1; }
@@ -1383,8 +1379,8 @@
 .email-test-fields { margin-top: 13px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; }
 
 @media (max-width: 720px) {
-  .email-settings-form, .email-test-fields, .email-server-policy dl { grid-template-columns: 1fr; }
-  .email-password-field, .email-enabled, .email-settings-actions { grid-column: auto; }
+  .email-settings-form, .email-test-fields { grid-template-columns: 1fr; }
+  .email-form-section, .email-password-field, .email-enabled, .email-settings-actions { grid-column: auto; }
   .email-settings-actions { align-items: stretch; flex-direction: column; }
   .email-settings-actions .button, .email-test-fields .button { width: 100%; justify-content: center; }
 }

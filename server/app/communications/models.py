@@ -20,6 +20,8 @@ class EmailProviderConfig(Base):
     tls_mode: Mapped[str] = mapped_column(String(16), nullable=False)
     username: Mapped[str] = mapped_column(String(320), nullable=False)
     encrypted_password: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sender_address: Mapped[str | None] = mapped_column(String(320))
+    sender_name: Mapped[str | None] = mapped_column(String(200))
     default_reply_to_email: Mapped[str] = mapped_column(String(320), nullable=False)
     default_reply_to_name: Mapped[str] = mapped_column(String(200), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -37,6 +39,11 @@ class EmailProviderConfig(Base):
         CheckConstraint("port between 1 and 65535", name="ck_email_provider_configs_port"),
         CheckConstraint("tls_mode in ('starttls','tls')", name="ck_email_provider_configs_tls_mode"),
         CheckConstraint("version >= 1", name="ck_email_provider_configs_version"),
+        CheckConstraint(
+            "(sender_address is null and sender_name is null) or "
+            "(sender_address is not null and sender_name is not null)",
+            name="ck_email_provider_configs_sender_pair",
+        ),
     )
 
 

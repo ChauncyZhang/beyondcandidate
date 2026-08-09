@@ -21,7 +21,7 @@ import { InterviewCalendar } from "./InterviewCalendar.jsx";
 import { InterviewFeedbackWorkspace } from "./InterviewFeedbackWorkspace.jsx";
 import { ScheduleWorkspace } from "./ScheduleWorkspace.jsx";
 import { CandidateEmailDialog } from "./CandidateViews.jsx";
-import { candidateEmailCorrectionContext, getInterviewEmailActions, requiresCandidateEmailCorrection } from "./interviewController.js";
+import { candidateEmailCorrectionContext, getInterviewEmailActions, requiresCandidateEmailCorrection, requiresManualCandidateNotice } from "./interviewController.js";
 import { feedbackRatingDimensions, formatSubmittedFeedbackRatings } from "./feedbackRatings.js";
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { interviewStatusLabel } from "./recruitingTerminology.js";
@@ -118,14 +118,14 @@ export function getInterviewTerminalActions(record, canSchedule) {
 }
 
 function StatusTag({ status, title = "" }) {
-  const tone = status === "已完成" || status === "已提交" || status === "已发送" ? "success" : status === "发送失败" || status === "已取消" || status === "未到场" ? "danger" : status === "待反馈" || status === "待确认" ? "warning" : "info";
+  const tone = status === "已完成" || status === "已提交" || status === "已发送" ? "success" : status === "发送失败" || status === "已取消" || status === "未到场" ? "danger" : status === "待反馈" || status === "待确认" || status === "未发送" ? "warning" : "info";
   return <span className={`interview-status ${tone}`} title={title || undefined}>{interviewStatusLabel(status)}</span>;
 }
 
 function InterviewDeliveryState({ record }) {
   const delivery = record.emailDelivery;
   return <span className="interview-state-stack">
-    <span className="interview-email-delivery"><small>候选人邮件</small><StatusTag status={delivery?.statusLabel || "待发送"} title={delivery?.errorText} /><small className="interview-delivery-recipient">{delivery?.recipient || "收件人已隐藏"}</small></span>
+    <span className="interview-email-delivery"><small>候选人邮件</small><StatusTag status={delivery?.statusLabel || "未发送"} title={delivery?.errorText} /><small className="interview-delivery-recipient">{delivery?.recipient || "尚无邮件记录"}</small></span>
     <span className="interview-secondary-state"><small>日历通知</small><StatusTag status={record.notification} /></span>
     <span className="interview-secondary-state"><small>面试反馈</small><StatusTag status={record.feedbackStatus} /></span>
   </span>;
@@ -407,6 +407,7 @@ export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSel
       setEmailCorrection(null);
       await onRecordsChanged(saved);
       backToList();
+      return saved;
     } catch (error) {
       if (requiresCandidateEmailCorrection(error) && canCorrectCandidateEmail) {
         setEmailCorrection(candidateEmailCorrectionContext({ id: selectedInterview?.id, candidateId: selectedInterview?.candidateId || scheduleCandidate?.candidateId || scheduleCandidate?.id, applicationId: selectedInterview?.applicationId || scheduleCandidate?.applicationId, candidate: selectedInterview?.candidate || scheduleCandidate?.name }));
@@ -439,7 +440,9 @@ export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSel
         cancelled: "面试已取消，请下载更新后的日历文件",
         no_show: "已标记候选人未到场",
       };
-      onNotify(messages[target] || "面试状态已更新");
+      onNotify(requiresManualCandidateNotice(updated)
+        ? target === "cancelled" ? "面试已取消，邮件未发送，请人工通知候选人" : "面试状态已更新，邮件未发送，请人工通知候选人"
+        : messages[target] || "面试状态已更新");
       return true;
     } catch (error) {
       if (requiresCandidateEmailCorrection(error) && canCorrectCandidateEmail) {

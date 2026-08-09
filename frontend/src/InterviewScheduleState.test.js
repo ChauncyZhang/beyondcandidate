@@ -29,13 +29,13 @@ test("unconfirmed Feishu availability remains selectable while known busy window
   assert.match(source, /飞书未绑定或查询失败，可继续安排/);
 });
 
-test("saved schedule message describes downloadable invitation and pending notifications", () => {
+test("saved schedule message distinguishes queued email from manual candidate notice", () => {
   assert.ok(helpersSource, "InterviewViews.jsx must expose the interview schedule helper block");
   const { getScheduleSavedMessage } = vm.runInNewContext(`(() => { ${helpersSource.replaceAll("export ", "")} return { getScheduleSavedMessage }; })()`);
 
-  assert.equal(getScheduleSavedMessage(null), "面试安排已保存；邀请文件可下载；面试邀请尚未发送");
-  assert.equal(getScheduleSavedMessage({ id: "INT-1" }), "面试改期已保存；新的邀请文件可下载；面试邀请尚未发送");
-  assert.match(source, /onNotify\(getScheduleSavedMessage\(record, Boolean\(finalConflict\?\.unconfirmed\?\.length\)\)\)/);
+  assert.equal(getScheduleSavedMessage(null), "面试安排已保存；候选人邮件已进入发送队列；邀请文件可下载");
+  assert.equal(getScheduleSavedMessage({ id: "INT-1" }, false, true), "面试改期已保存；邮件未发送，请人工通知候选人；新的邀请文件可下载");
+  assert.match(source, /onNotify\(getScheduleSavedMessage\(record, Boolean\(finalConflict\?\.unconfirmed\?\.length\), saved\?\.emailDelivery\?\.manualNotificationRequired\)\)/);
   assert.doesNotMatch(source, /通知已发送/);
 });
 

@@ -14,8 +14,9 @@ const API_TO_UI_STATUS = {
   no_show: "未到场",
 };
 const API_TO_UI_NOTIFICATION = { sent: "已发送", failed: "发送失败", queued: "待发送", not_sent: "待发送" };
-const API_TO_UI_EMAIL_DELIVERY = { queued: "待发送", sending: "待发送", sent: "已发送", failed: "发送失败" };
+const API_TO_UI_EMAIL_DELIVERY = { queued: "待发送", sending: "待发送", sent: "已发送", failed: "发送失败", not_sent: "未发送" };
 const EMAIL_DELIVERY_ERROR_TEXT = {
+  email_not_configured: "邮件服务尚未配置，请人工通知候选人。",
   email_configuration_unavailable: "邮件服务配置不可用，请联系系统管理员。",
   smtp_authentication_failed: "邮件服务认证失败，请联系系统管理员。",
   smtp_recipient_rejected: "收件地址被邮件服务拒收，请先核对候选人邮箱。",
@@ -123,17 +124,23 @@ function maskedRecipient(value) {
 
 export function normalizeEmailDelivery(value) {
   const id = safeString(value?.id);
-  if (!id) return null;
   const status = safeString(value?.status);
+  if (!id && status !== "not_sent") return null;
   const safeErrorCode = safeString(value?.safe_error_code) || null;
+  const manualNotificationRequired = status === "not_sent" && safeErrorCode === "email_not_configured";
   return {
     id,
-    recipient: maskedRecipient(value?.recipient),
+    recipient: manualNotificationRequired ? "请人工通知候选人" : maskedRecipient(value?.recipient),
     status,
     statusLabel: API_TO_UI_EMAIL_DELIVERY[status] || "待发送",
     version: Number.isInteger(value?.version) ? value.version : null,
     errorText: safeErrorCode ? EMAIL_DELIVERY_ERROR_TEXT[safeErrorCode] || "邮件发送失败，请联系系统管理员后重试。" : "",
+    ...(manualNotificationRequired ? { manualNotificationRequired: true } : {}),
   };
+}
+
+export function requiresManualCandidateNotice(record) {
+  return record?.emailDelivery?.manualNotificationRequired === true;
 }
 
 export function getInterviewEmailActions(record, { canCorrect = false, canResend = false, correctionRequired = false } = {}) {

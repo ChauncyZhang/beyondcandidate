@@ -202,6 +202,9 @@ def enqueue_interview_message(
     )
     if candidate is None or job is None:
         raise ValueError("interview_context_unavailable")
+    provider_config = latest_email_provider_config(db, interview.organization_id)
+    if provider_config is None or not provider_config.enabled:
+        raise EmailConfigurationUnavailable
     candidate_email = resolve_confirmed_candidate_email(
         db,
         organization_id=interview.organization_id,
@@ -209,9 +212,6 @@ def enqueue_interview_message(
         contact_cipher=contact_cipher,
     )
 
-    provider_config = latest_email_provider_config(db, interview.organization_id)
-    if provider_config is None or not provider_config.enabled:
-        raise EmailConfigurationUnavailable
     try:
         organizer = CalendarContact(
             name=interview.calendar_organizer["name"],

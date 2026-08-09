@@ -126,7 +126,7 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
     ):
         raise ValueError("attachment_triplet_required")
 
-    def fingerprint(reply_to_email: str, reply_to_name: str) -> str:
+    def fingerprint(reply_to_email: str, reply_to_name: str, effective_sender: SenderPolicy) -> str:
         return cipher.fingerprint("delivery-request", {
             "recipient": command.recipient,
             "recipient_ciphertext": command.recipient_ciphertext.hex() if command.recipient_ciphertext else None,
@@ -136,7 +136,7 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
             "resource_type": command.resource_type, "resource_id": str(command.resource_id),
             "template_id": str(command.template_id) if command.template_id else None,
             "template_version": command.template_version, "parent_delivery_id": str(command.parent_delivery_id) if command.parent_delivery_id else None,
-            "sender_email": sender_policy.email, "sender_name": sender_policy.name,
+            "sender_email": effective_sender.email, "sender_name": effective_sender.name,
             "attachment_filename": command.attachment_filename,
             "attachment_content_type": command.attachment_content_type,
             "attachment_snapshot": attachment_snapshot.hex() if attachment_snapshot is not None else None,
@@ -144,18 +144,26 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
 
     existing = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == command.organization_id, EmailDelivery.business_dedupe_key == business_dedupe_key))
     if existing is not None:
-        request_fingerprint = fingerprint(command.reply_to_email or existing.reply_to_email, command.reply_to_name or existing.reply_to_name)
+        request_fingerprint = fingerprint(
+            command.reply_to_email or existing.reply_to_email,
+            command.reply_to_name or existing.reply_to_name,
+            SenderPolicy(existing.sender_email, existing.sender_name),
+        )
         if not hmac.compare_digest(existing.request_fingerprint, request_fingerprint):
             raise DeliveryIdempotencyConflict("idempotency_conflict")
         return existing
     config = latest_email_provider_config(db, command.organization_id)
     if config is None or not config.enabled:
         raise EmailConfigurationUnavailable("email_not_configured")
+    effective_sender = SenderPolicy(
+        config.sender_address or sender_policy.email,
+        config.sender_name or sender_policy.name,
+    )
     reply_to_email = command.reply_to_email or config.default_reply_to_email
     reply_to_name = command.reply_to_name or config.default_reply_to_name
-    request_fingerprint = fingerprint(reply_to_email, reply_to_name)
+    request_fingerprint = fingerprint(reply_to_email, reply_to_name, effective_sender)
     recipient = cipher.normalize_email(command.recipient) if command.recipient is not None else None
-    sender = cipher.normalize_email(_safe_header(sender_policy.email))
+    sender = cipher.normalize_email(_safe_header(effective_sender.email))
     reply_to = cipher.normalize_email(_safe_header(reply_to_email))
     delivery = EmailDelivery(
         organization_id=command.organization_id, provider_config_id=config.id, provider_config_version=config.version,
@@ -170,7 +178,7 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
             if recipient is not None
             else command.recipient_masked
         ),
-        sender_email=sender, sender_name=_safe_header(sender_policy.name), reply_to_email=reply_to,
+        sender_email=sender, sender_name=_safe_header(effective_sender.name), reply_to_email=reply_to,
         reply_to_name=_safe_header(reply_to_name), rendered_subject=_safe_header(command.subject),
         rendered_body=command.body, resource_type=command.resource_type, resource_id=command.resource_id,
         attachment_filename=_safe_header(command.attachment_filename) if command.attachment_filename else None,

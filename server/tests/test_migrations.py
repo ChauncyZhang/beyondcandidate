@@ -20,7 +20,7 @@ TABLES = {"organizations", "departments", "workflow_templates", "users", "user_r
 def test_latest_migration_revision_is_current() -> None:
     script_directory = ScriptDirectory.from_config(Config("server/alembic.ini"))
 
-    assert script_directory.get_current_head() == "0035_offer_access_tokens"
+    assert script_directory.get_current_head() == "0036_email_sender_identity"
 
 
 def test_email_delivery_schema_has_versioned_provider_and_dedupe_guards() -> None:
@@ -32,7 +32,13 @@ def test_email_delivery_schema_has_versioned_provider_and_dedupe_guards() -> Non
         if constraint.__class__.__name__ == "UniqueConstraint"
     }
     assert ("organization_id", "version") in provider_unique_columns
-    assert {"default_reply_to_email", "default_reply_to_name"} <= set(EmailProviderConfig.__table__.columns.keys())
+    assert {"sender_address", "sender_name", "default_reply_to_email", "default_reply_to_name"} <= set(EmailProviderConfig.__table__.columns.keys())
+    provider_check_names = {
+        constraint.name
+        for constraint in EmailProviderConfig.__table__.constraints
+        if constraint.__class__.__name__ == "CheckConstraint"
+    }
+    assert "ck_email_provider_configs_sender_pair" in provider_check_names
     assert {
         "request_fingerprint",
         "version",
@@ -50,6 +56,15 @@ def test_email_delivery_schema_has_versioned_provider_and_dedupe_guards() -> Non
         "ck_email_deliveries_template_version_pair",
         "ck_email_deliveries_attachment_triplet",
     } <= check_names
+
+
+def test_0036_sender_identity_migration_preserves_legacy_provider_fallback() -> None:
+    migration = Path("server/migrations/versions/0036_email_sender_identity.py").read_text(encoding="utf-8")
+
+    assert 'sa.Column("sender_address", sa.String(320))' in migration
+    assert 'sa.Column("sender_name", sa.String(200))' in migration
+    assert "server_default" not in migration
+    assert "ck_email_provider_configs_sender_pair" in migration
 
 
 @pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")

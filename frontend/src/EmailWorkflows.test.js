@@ -136,12 +136,15 @@ async function openCandidate({ role = "recruiter", conflictOnce = false, conflic
   return { context, page, requests };
 }
 
-test("system administrator sees fixed sender, saves reply-to, tests saved config, and recovers a stale version", { timeout: 60_000 }, async () => {
+test("system administrator edits sender without replacing the SMTP password, saves reply-to, tests saved config, and recovers a stale version", { timeout: 60_000 }, async () => {
   const { context, page, requests } = await openSettings({ conflictOnce: true, startPath: "settings/ai" });
   try {
     await page.getByRole("heading", { name: "邮件发送设置", exact: true }).waitFor();
-    assert.match(await page.locator(".email-server-policy").textContent(), /星河招聘.*jobs@example\.test/s);
+    assert.equal(await page.getByLabel("发件人名称").inputValue(), "星河招聘");
+    assert.equal(await page.getByLabel("发件地址").inputValue(), "jobs@example.test");
     assert.equal(await page.getByLabel("替换 SMTP 密码").inputValue(), "");
+    await page.getByLabel("发件人名称").fill("星河人才团队");
+    await page.getByLabel("发件地址").fill("talent@example.test");
     await page.getByLabel("默认回复地址").fill("talent@example.test");
     await page.getByLabel("默认回复名称").fill("人才招聘团队");
     assert.equal(await page.getByRole("button", { name: "发送测试邮件" }).isDisabled(), true);
@@ -152,9 +155,14 @@ test("system administrator sees fixed sender, saves reply-to, tests saved config
     await page.getByText("已保存版本 4", { exact: true }).waitFor();
     assert.equal(requests.get, getsBeforeReload + 1);
     await page.getByLabel("默认回复名称").fill("人才招聘团队");
+    await page.getByLabel("发件人名称").fill("星河人才团队");
+    await page.getByLabel("发件地址").fill("talent@example.test");
     await page.getByRole("button", { name: "保存邮件设置" }).click();
     await page.getByText("已保存版本 5", { exact: true }).waitFor();
     assert.equal(requests.put.at(-1).body.default_reply_to_name, "人才招聘团队");
+    assert.equal(requests.put.at(-1).body.sender_name, "星河人才团队");
+    assert.equal(requests.put.at(-1).body.sender_address, "talent@example.test");
+    assert.equal(Object.hasOwn(requests.put.at(-1).body, "password"), false);
     await page.getByLabel("测试收件人").fill("admin@example.test");
     await page.getByRole("button", { name: "发送测试邮件" }).click();
     await page.getByText("测试邮件已使用已保存配置进入发送队列", { exact: true }).waitFor();

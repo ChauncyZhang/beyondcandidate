@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { candidateEmailCorrectionContext, createInterviewController, deriveCandidateInterviews, getInterviewEmailActions, requiresCandidateEmailCorrection, selectSchedulableCandidates } from "./interviewController.js";
+import { candidateEmailCorrectionContext, createInterviewController, deriveCandidateInterviews, getInterviewEmailActions, requiresCandidateEmailCorrection, requiresManualCandidateNotice, selectSchedulableCandidates } from "./interviewController.js";
 
 const INTERVIEW_ID = "11111111-1111-4111-8111-111111111111";
 const APPLICATION_ID = "22222222-2222-4222-8222-222222222222";
@@ -147,6 +147,31 @@ test("never projects an unmasked recipient or raw delivery error text", async ()
   assert.equal(delivery.recipient, "收件人已隐藏");
   assert.equal(delivery.errorText, "邮件发送失败，请联系系统管理员后重试。");
   assert.doesNotMatch(JSON.stringify(delivery), /candidate@example\.com|raw-provider-secret-detail/);
+});
+
+test("projects an unconfigured provider as a durable manual candidate notice", async () => {
+  const { client } = queuedClient([{ data: [apiInterview({
+    email_delivery: {
+      id: null,
+      recipient: null,
+      status: "not_sent",
+      version: null,
+      safe_error_code: "email_not_configured",
+    },
+  })] }]);
+
+  const record = (await createInterviewController({ client }).list()).records[0];
+
+  assert.deepEqual(record.emailDelivery, {
+    id: "",
+    recipient: "请人工通知候选人",
+    status: "not_sent",
+    statusLabel: "未发送",
+    version: null,
+    errorText: "邮件服务尚未配置，请人工通知候选人。",
+    manualNotificationRequired: true,
+  });
+  assert.equal(requiresManualCandidateNotice(record), true);
 });
 
 test("recruiter scheduling capability shows resend while interviewer capability keeps it hidden", () => {
