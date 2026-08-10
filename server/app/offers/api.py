@@ -15,6 +15,7 @@ from server.app.offers.service import (
     OfferApprovalError,
     OfferNotFound,
     OfferVersionConflict,
+    _audit,
     create_offer,
     decide_approval,
     submit_offer,
@@ -38,6 +39,10 @@ from server.app.notifications.service import create_user_notification
 router = APIRouter()
 AUTH = RecruitingAuthorizationService()
 ETAG = re.compile(r'^"(0|[1-9][0-9]*)"$')
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def _response(data, status=200, *, meta=None, etag=None):
@@ -159,7 +164,7 @@ def _offer_view(db, offer, principal):
             "update": can_manage and offer.status in {"draft", "changes_requested", "ready_to_send", "sent"},
             "submit": can_manage and offer.status in {"draft", "changes_requested"},
             "withdraw": can_manage and offer.status not in {"withdrawn", "expired"},
-            "send": False,
+            "send": can_manage and offer.status == "ready_to_send" and current is not None,
             "decide": is_assignee and offer.status == "pending_approval",
             "proxy_response": can_manage and offer.status == "sent" and current is not None and current.id == offer.current_version_id,
         },
@@ -439,12 +444,17 @@ def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(N
                 if offer.version != expected: raise OfferVersionConflict
                 current = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == offer.organization_id, OfferVersion.id == offer.current_version_id).with_for_update())
                 now = datetime.now(timezone.utc)
-                if offer.status != "ready_to_send" or current is None or any(getattr(current, field) is None for field in ("pdf_object_key", "pdf_sha256", "pdf_size_bytes", "pdf_rendered_at")) or current.candidate_response_deadline <= now:
+                if offer.status != "ready_to_send" or current is None or _utc(current.candidate_response_deadline) <= now:
                     raise OfferApprovalError
                 if request.app.state.settings.offer_public_base_url is None:
                     raise RuntimeError("offer public base URL is not configured")
                 application = db.scalar(select(Application).where(Application.organization_id == offer.organization_id, Application.id == offer.application_id).with_for_update())
                 if application is None:
+                    raise OfferNotFound
+                candidate = db.scalar(select(Candidate).where(Candidate.organization_id == offer.organization_id, Candidate.id == application.candidate_id))
+                job = db.scalar(select(Job).where(Job.organization_id == offer.organization_id, Job.id == offer.job_id))
+                organization = db.scalar(select(Organization).where(Organization.id == offer.organization_id))
+                if candidate is None or job is None:
                     raise OfferNotFound
                 active_token = db.scalar(select(OfferAccessToken.id).where(
                     OfferAccessToken.organization_id == offer.organization_id,
@@ -457,7 +467,16 @@ def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(N
                 recipient = resolve_confirmed_candidate_email(db, organization_id=offer.organization_id, candidate_id=application.candidate_id, contact_cipher=request.app.state.contact_cipher)
                 token, _ = issue_offer_access_token(db, offer.organization_id, offer, current, codec=request.app.state.offer_token_codec, now=now)
                 # The worker reconstructs the capability from token row ID.  Delivery storage holds no link or raw token.
-                enqueue_delivery(db, DeliveryCommand(organization_id=offer.organization_id, recipient=recipient, subject="Your offer is ready", body="Your secure offer link: {{offer_public_link}}", resource_type="offer_access_token", resource_id=token.id, idempotency_key=key, operation=f"offer.send:{offer.id}", created_by=principal.user_id, trace_id=request.state.trace_id), cipher=request.app.state.email_secret_cipher, sender_policy=SenderPolicy(request.app.state.settings.email_from_address, request.app.state.settings.email_from_name))
+                brand_name = organization.name if organization else request.app.state.settings.email_from_name
+                deadline = _utc(current.candidate_response_deadline).strftime("%Y-%m-%d %H:%M UTC")
+                message_body = (
+                    f"{candidate.display_name}，您好：\n\n"
+                    f"感谢您参与 {brand_name} 的招聘流程。经过综合评估，我们诚挚邀请您加入，担任 {job.title}。\n\n"
+                    f"回复截止：{deadline}\n\n"
+                    "请点击以下链接查看并确认 Offer：\n{{offer_public_link}}\n\n"
+                    "如对录用内容或入职安排有疑问，请联系招聘负责人。"
+                )
+                enqueue_delivery(db, DeliveryCommand(organization_id=offer.organization_id, recipient=recipient, subject=f"{brand_name} 录用通知｜{job.title}", body=message_body, resource_type="offer_access_token", resource_id=token.id, idempotency_key=key, operation=f"offer.send:{offer.id}", created_by=principal.user_id, trace_id=request.state.trace_id), cipher=request.app.state.email_secret_cipher, sender_policy=SenderPolicy(request.app.state.settings.email_from_address, request.app.state.settings.email_from_name))
                 _audit(db, offer, principal.user_id, "offer.send_queued", request.state.trace_id, {"version_number": current.version_number})
                 return 202, {"data": _offer_view(db, offer, principal)}
             status, body = persisted_idempotent(db, principal.organization_id, principal.user_id, f"offer.send:{offer_id}", key, {"expected_version": expected}, action)
@@ -510,7 +529,8 @@ def get_public_offer(token: str, request: Request):
         else: return _public_error(request)
         location = jd.content.get("location") if jd and isinstance(jd.content, dict) else None
         hr_contact = " · ".join(value for value in (hr.display_name if hr else None, hr.email if hr else None) if value)
-        return _public_response({"status": status, "company_name": organization.name if organization else None, "candidate_name": candidate.display_name if candidate else None, "job_title": job.title if job else None, "location": location, "hr_contact": hr_contact or None, "content": version.content, "candidate_response_deadline": version.candidate_response_deadline.isoformat(), "pdf_available": status == "sent"})
+        pdf_available = status == "sent" and all(getattr(version, field) is not None for field in ("pdf_object_key", "pdf_sha256", "pdf_size_bytes", "pdf_rendered_at"))
+        return _public_response({"status": status, "company_name": organization.name if organization else None, "candidate_name": candidate.display_name if candidate else None, "job_title": job.title if job else None, "location": location, "hr_contact": hr_contact or None, "content": version.content, "candidate_response_deadline": version.candidate_response_deadline.isoformat(), "pdf_available": pdf_available})
 
 
 @router.get("/api/public/v1/offers/{token}/pdf")

@@ -33,6 +33,7 @@ class MailMessage:
     attachment_filename: str | None = None
     attachment_content_type: str | None = None
     attachment_content: bytes | None = None
+    html_body: str | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,8 @@ class SmtpMailProvider:
         mail["Subject"] = _header(message.subject, "subject")
         mail["Message-ID"] = _header(message.message_id, "message id")
         mail.set_content(message.body)
+        if message.html_body is not None:
+            mail.add_alternative(message.html_body, subtype="html")
         attachment_values = (
             message.attachment_filename,
             message.attachment_content_type,

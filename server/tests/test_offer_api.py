@@ -24,6 +24,7 @@ def make_app(tmp_path):
             environment="test",
             database_url=f"sqlite+aiosqlite:///{tmp_path / 'offer-api.db'}",
             cors_origins=["https://hr.example.test"],
+            offer_public_base_url="https://hr.example.test",
         ),
         database_probe=Probe(),
         storage_probe=Probe(),
@@ -148,9 +149,12 @@ def test_proxy_response_requires_management_headers_and_projects_immutable_resul
         assert proxy_events.count("offer_accepted") == 0
 
 
-def test_offer_lifecycle_is_idempotent_versioned_and_never_auto_sends(tmp_path) -> None:
+def test_offer_lifecycle_is_idempotent_versioned_and_sends_html_without_pdf(tmp_path, monkeypatch) -> None:
     """Dropping preconditions, exact approval assignment, or ready_to_send breaks this flow."""
     app = make_app(tmp_path)
+    queued = []
+    monkeypatch.setattr("server.app.offers.api.resolve_confirmed_candidate_email", lambda *args, **kwargs: "candidate@example.test")
+    monkeypatch.setattr("server.app.offers.api.enqueue_delivery", lambda db, command, **kwargs: queued.append(command))
     seed = seed_offer_application(app)
     payload = {"application_id": seed["application_id"], "candidate_response_deadline": "2099-08-20T00:00:00Z", "content": {"compensation": "100000"}}
     with TestClient(app) as client:
@@ -168,6 +172,7 @@ def test_offer_lifecycle_is_idempotent_versioned_and_never_auto_sends(tmp_path) 
         approver_offer = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["approver"]))
         pending = client.get("/api/v1/offer-approvals/pending", headers=login(client, seed["approver"]))
         approved = client.post(f"/api/v1/offer-approvals/{approval_id}/decisions", json={"decision": "approved"}, headers={**login(client, seed["approver"]), "Idempotency-Key": "approve", "If-Match": '"2"'})
+        ready = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["admin"]))
         history = client.get(f"/api/v1/offers/{offer_id}/history", headers=login(client, seed["approver"]))
         redacted = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["viewer"]))
         send = client.post(f"/api/v1/offers/{offer_id}/send", headers={**login(client, seed["admin"]), "Idempotency-Key": "send", "If-Match": '"3"'})
@@ -200,6 +205,8 @@ def test_offer_lifecycle_is_idempotent_versioned_and_never_auto_sends(tmp_path) 
     }]
     assert approved.status_code == 200
     assert approved.json()["data"]["status"] == "ready_to_send"
+    assert approved.json()["data"]["allowed_actions"]["send"] is False
+    assert ready.json()["data"]["allowed_actions"]["send"] is True
     assert len(history.json()["data"]["versions"]) == 1
     assert history.json()["data"]["versions"][0]["content"] == {"compensation": "100000"}
     assert history.json()["data"]["approvals"][0]["status"] == "approved"
@@ -207,9 +214,12 @@ def test_offer_lifecycle_is_idempotent_versioned_and_never_auto_sends(tmp_path) 
         "offer.created", "offer.submitted", "offer.approval_approved"
     ]
     assert redacted.json()["data"]["content"] == {"redacted": True}
-    assert send.status_code == 409
-    assert send.json()["code"] == "offer_not_ready_to_send"
-    for response in (created, replay, missing, submitted, denied, approver_offer, pending, approved, history, redacted, send):
+    assert send.status_code == 202
+    assert len(queued) == 1
+    assert queued[0].resource_type == "offer_access_token"
+    assert "录用通知" in queued[0].subject and "Offer role" in queued[0].subject
+    assert "Candidate" in queued[0].body and "{{offer_public_link}}" in queued[0].body
+    for response in (created, replay, missing, submitted, denied, approver_offer, pending, approved, ready, history, redacted, send):
         assert response.headers["Cache-Control"] == "no-store"
 
 
