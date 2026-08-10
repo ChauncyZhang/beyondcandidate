@@ -251,7 +251,7 @@ def _template_view(template):
 
 def _special_version(rows):
     canonical = ",".join(str(row.approver_id) for row in sorted(rows, key=lambda item: item.position))
-    return int(hashlib.sha256(canonical.encode("ascii")).hexdigest()[:15], 16) if canonical else 0
+    return int(hashlib.sha256(canonical.encode("ascii")).hexdigest()[:13], 16) if canonical else 0
 
 
 def _audit_setting(db, principal, request, event_type, resource_type, resource_id, metadata):

@@ -745,28 +745,33 @@ test("definition keeps recruiting and hiring owner identities separate during fi
   assert.equal(calls.at(-1).options.body.recruiting_owner_id, OWNER_ID);
 });
 
-test("transition maps pause, resume, close, and archive targets with mutation headers", async () => {
+test("transition maps pause, resume, close, reopen, and archive targets with mutation headers", async () => {
   const { client, calls } = queuedClient([
     { data: apiJob({ status: "paused", version: 8 }) },
     { data: apiJob({ status: "open", version: 9 }) },
     { data: apiJob({ status: "closed", version: 10 }) },
+    { data: apiJob({ status: "open", version: 11 }) },
     { data: apiJob({ status: "archived", version: 11 }) },
   ]);
-  const keys = ["pause", "resume", "close", "archive"];
+  const keys = ["pause", "resume", "close", "reopen", "archive"];
   const controller = createJobController({ client, idempotencyKey: () => keys.shift() });
   const signal = new AbortController().signal;
 
   await controller.transition({ id: JOB_ID, version: 7, status: "招聘中" }, "已暂停", { signal });
   await controller.transition({ id: JOB_ID, version: 8, status: "已暂停" }, "招聘中", { signal });
   await controller.transition({ id: JOB_ID, version: 9, status: "招聘中" }, "已关闭", { signal });
+  const reopened = await controller.transition({ id: JOB_ID, version: 10, status: "已关闭" }, "招聘中", { signal });
   const archived = await controller.transition({ id: JOB_ID, version: 10, status: "已关闭" }, "已归档", { signal });
 
   assert.deepEqual(calls.map(({ path, options }) => ({ path, options })), [
     { path: `/api/v1/jobs/${JOB_ID}/transitions`, options: { method: "POST", body: { target: "paused" }, ifMatch: '"7"', idempotencyKey: "pause", signal } },
     { path: `/api/v1/jobs/${JOB_ID}/transitions`, options: { method: "POST", body: { target: "open" }, ifMatch: '"8"', idempotencyKey: "resume", signal } },
     { path: `/api/v1/jobs/${JOB_ID}/transitions`, options: { method: "POST", body: { target: "closed" }, ifMatch: '"9"', idempotencyKey: "close", signal } },
+    { path: `/api/v1/jobs/${JOB_ID}/transitions`, options: { method: "POST", body: { target: "open" }, ifMatch: '"10"', idempotencyKey: "reopen", signal } },
     { path: `/api/v1/jobs/${JOB_ID}/transitions`, options: { method: "POST", body: { target: "archived" }, ifMatch: '"10"', idempotencyKey: "archive", signal } },
   ]);
+  assert.equal(reopened.status, "招聘中");
+  assert.equal(reopened.version, 11);
   assert.equal(archived.status, "已归档");
   assert.equal(archived.version, 11);
 });

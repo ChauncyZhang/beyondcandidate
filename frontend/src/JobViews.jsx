@@ -68,7 +68,7 @@ const FUNNEL_STAGES = [
 const LIFECYCLE_ACTIONS = {
   招聘中: [["已暂停", "暂停招聘", CirclePause], ["已关闭", "关闭职位", X]],
   已暂停: [["招聘中", "恢复招聘", CirclePlay], ["已关闭", "关闭职位", X]],
-  已关闭: [["已归档", "归档职位", Check]],
+  已关闭: [["招聘中", "重新开放", CirclePlay], ["已归档", "归档职位", Check]],
 };
 
 function StatusTag({ children }) {

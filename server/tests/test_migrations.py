@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -20,7 +21,7 @@ TABLES = {"organizations", "departments", "workflow_templates", "users", "user_r
 def test_latest_migration_revision_is_current() -> None:
     script_directory = ScriptDirectory.from_config(Config("server/alembic.ini"))
 
-    assert script_directory.get_current_head() == "0036_email_sender_identity"
+    assert script_directory.get_current_head() == "0037_fix_offer_approver_status"
 
 
 def test_email_delivery_schema_has_versioned_provider_and_dedupe_guards() -> None:
@@ -65,6 +66,63 @@ def test_0036_sender_identity_migration_preserves_legacy_provider_fallback() -> 
     assert 'sa.Column("sender_name", sa.String(200))' in migration
     assert "server_default" not in migration
     assert "ck_email_provider_configs_sender_pair" in migration
+
+
+def test_0037_offer_approver_triggers_accept_persisted_active_status() -> None:
+    migration = Path("server/migrations/versions/0037_fix_offer_approver_status.py").read_text(encoding="utf-8")
+
+    assert 'down_revision = "0036_email_sender_identity"' in migration
+    assert "CREATE OR REPLACE FUNCTION validate_special_offer_approver" in migration
+    assert "CREATE OR REPLACE FUNCTION validate_job_offer_defaults" in migration
+    assert "lower(u.status) = 'active'" in migration
+
+
+@pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")
+def test_0037_offer_approver_triggers_accept_sqlalchemy_active_enum() -> None:
+    from sqlalchemy.orm import Session
+
+    from server.app.identity.models import Job, Organization, User, UserRole, UserStatus
+    from server.app.offers.models import OfferTemplate, OrganizationSpecialOfferApprover
+
+    url = os.environ["POSTGRES_SMOKE_URL"]
+    env = {**os.environ, "DATABASE_URL": url}
+    subprocess.run([sys.executable, "-m", "alembic", "-c", "server/alembic.ini", "upgrade", "head"], check=True, env=env)
+    engine = create_engine(url.replace("+asyncpg", "+psycopg"))
+    with engine.begin() as connection:
+        connection.execute(text("TRUNCATE organizations CASCADE"))
+    with Session(engine) as db:
+        organization = Organization(slug="offer-status-0037", name="Offer migration")
+        db.add(organization)
+        db.flush()
+        approver = User(
+            organization_id=organization.id,
+            email="approver-0037@example.test",
+            normalized_email="approver-0037@example.test",
+            display_name="Offer approver",
+            password_hash="x",
+            status=UserStatus.ACTIVE,
+        )
+        db.add(approver)
+        db.flush()
+        db.add(UserRole(user_id=approver.id, role="recruiting_admin"))
+        template = OfferTemplate(organization_id=organization.id, name="Standard", content={"body": "Welcome"})
+        db.add(template)
+        db.flush()
+        db.add(Job(
+            organization_id=organization.id,
+            title="Platform engineer",
+            owner_id=approver.id,
+            offer_approver_id=approver.id,
+            offer_template_id=template.id,
+        ))
+        db.add(OrganizationSpecialOfferApprover(
+            organization_id=organization.id,
+            approver_id=approver.id,
+            position=1,
+        ))
+        db.commit()
+
+    engine.dispose()
 
 
 @pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")

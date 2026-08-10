@@ -250,6 +250,12 @@ def test_offer_template_and_ordered_special_approver_settings_are_tenant_admin_o
         with app.state.identity_store.sync_session() as db:
             approver_id = db.scalar(select(User.id).where(User.email == seed["approver"]))
         configured = client.put("/api/v1/settings/offer-special-approvers", json={"approver_ids": [str(approver_id)]}, headers={**admin, "Idempotency-Key": "special", "If-Match": '"0"'})
+        configured_version = configured.json()["data"]["version"]
+        saved_again = client.put(
+            "/api/v1/settings/offer-special-approvers",
+            json={"approver_ids": [str(approver_id)]},
+            headers={**admin, "Idempotency-Key": "special-again", "If-Match": f'"{configured_version}"'},
+        )
         recruiter_templates = client.get("/api/v1/offer-templates", headers=login(client, seed["viewer"]))
         recruiter_create = client.post("/api/v1/offer-templates", json={"name": "越权模板", "content": {"body": "x"}}, headers={**login(client, seed["viewer"]), "Idempotency-Key": "denied-template-create"})
 
@@ -258,6 +264,8 @@ def test_offer_template_and_ordered_special_approver_settings_are_tenant_admin_o
     assert special.status_code == 422
     assert configured.status_code == 200
     assert configured.json()["data"]["approver_ids"] == [str(approver_id)]
+    assert configured_version <= 2**53 - 1
+    assert saved_again.status_code == 200
     assert recruiter_templates.status_code == 200
     assert {item["name"] for item in recruiter_templates.json()["data"]} >= {"职位默认 Offer", "标准 Offer"}
     assert recruiter_create.status_code == 404

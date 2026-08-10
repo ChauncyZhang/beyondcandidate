@@ -59,7 +59,7 @@ def test_job_state_machine_accepts_every_legal_edge_and_rejects_illegal_adjacenc
         "draft": {"open"},
         "open": {"paused", "closed"},
         "paused": {"open", "closed"},
-        "closed": {"archived"},
+        "closed": {"open", "archived"},
         "archived": set(),
     }
     for source, targets in legal.items():

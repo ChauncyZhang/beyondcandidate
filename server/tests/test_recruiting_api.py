@@ -1106,6 +1106,66 @@ def test_multi_role_manager_grant_cannot_be_crossed_with_recruiter_actions(tmp_p
         assert all(response.status_code == 404 for response in denied)
 
 
+def test_closed_job_can_reopen_idempotently_but_archived_job_cannot(tmp_path) -> None:
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "admin@example.test")
+    with app.state.identity_store.sync_session() as db:
+        admin = db.get(User, admin_id)
+        closed = Job(
+            organization_id=admin.organization_id,
+            title="Closed role",
+            owner_id=admin_id,
+            status="closed",
+            version=4,
+        )
+        archived = Job(
+            organization_id=admin.organization_id,
+            title="Archived role",
+            owner_id=admin_id,
+            status="archived",
+            version=2,
+        )
+        db.add_all([closed, archived])
+        db.commit()
+        closed_id, archived_id = str(closed.id), str(archived.id)
+
+    with TestClient(app) as client:
+        headers = login(client, "admin@example.test")
+        reopen_headers = {**headers, "If-Match": '"4"', "Idempotency-Key": "reopen-closed-job"}
+        reopened = client.post(
+            f"/api/v1/jobs/{closed_id}/transitions",
+            json={"target": "open"},
+            headers=reopen_headers,
+        )
+        replay = client.post(
+            f"/api/v1/jobs/{closed_id}/transitions",
+            json={"target": "open"},
+            headers=reopen_headers,
+        )
+        denied = client.post(
+            f"/api/v1/jobs/{archived_id}/transitions",
+            json={"target": "open"},
+            headers={**headers, "If-Match": '"2"', "Idempotency-Key": "reopen-archived-job"},
+        )
+
+    assert reopened.status_code == 200
+    assert reopened.json()["data"]["status"] == "open"
+    assert reopened.json()["data"]["version"] == 5
+    assert reopened.headers["ETag"] == '"5"'
+    assert replay.status_code == 200
+    assert replay.json() == reopened.json()
+    assert denied.status_code == 409
+    assert denied.json()["code"] == "invalid_state_transition"
+    with app.state.identity_store.sync_session() as db:
+        events = db.scalars(
+            select(AuditLog).where(
+                AuditLog.event_type == "job.stage_changed",
+                AuditLog.metadata_json["to_stage"].as_string() == "open",
+            )
+        ).all()
+        assert len(events) == 1
+
+
 @pytest.mark.parametrize("role", ["hiring_manager", "system_admin", "interviewer"])
 def test_non_recruiter_owner_id_never_grants_unassigned_candidate_access(tmp_path, role) -> None:
     app = make_app(tmp_path)

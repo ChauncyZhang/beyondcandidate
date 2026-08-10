@@ -22,7 +22,7 @@ const JOB_TRANSITIONS = new Map([
   ["draft", new Set(["open"])],
   ["open", new Set(["paused", "closed"])],
   ["paused", new Set(["open", "closed"])],
-  ["closed", new Set(["archived"])],
+  ["closed", new Set(["open", "archived"])],
   ["archived", new Set()],
 ]);
 

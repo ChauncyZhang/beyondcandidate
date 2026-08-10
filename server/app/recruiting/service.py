@@ -86,7 +86,7 @@ class SystemTokens:
 
 
 class RecruitingService:
-    JOB_EDGES = {"draft": {"open"}, "open": {"paused", "closed"}, "paused": {"open", "closed"}, "closed": {"archived"}, "archived": set()}
+    JOB_EDGES = {"draft": {"open"}, "open": {"paused", "closed"}, "paused": {"open", "closed"}, "closed": {"open", "archived"}, "archived": set()}
     APPLICATION_PATH = ["new", "review", "contact", "interview_pending", "interviewing", "decision", "passed", "hired"]
     TERMINAL = {"hired", "rejected", "withdrawn"}
 
