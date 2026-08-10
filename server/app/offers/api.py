@@ -45,6 +45,13 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
+def _offer_content_ready(content: dict | None) -> bool:
+    return isinstance(content, dict) and all(
+        isinstance(content.get(field), str) and content[field].strip()
+        for field in ("title", "body", "compensation")
+    )
+
+
 def _response(data, status=200, *, meta=None, etag=None):
     body = {"data": data}
     if meta is not None:
@@ -147,6 +154,13 @@ def _offer_view(db, offer, principal):
     is_assignee = db.scalar(select(OfferApproval.id).where(OfferApproval.organization_id == offer.organization_id, OfferApproval.offer_id == offer.id, OfferApproval.assignee_id == principal.user_id, OfferApproval.status == "pending")) is not None
     response = db.scalar(select(OfferResponse).where(OfferResponse.organization_id == offer.organization_id, OfferResponse.offer_id == offer.id))
     content = current.content if current and can_view_sensitive else {"redacted": True}
+    content_ready = bool(current and _offer_content_ready(current.content))
+    send_queued = bool(current and offer.status == "ready_to_send" and db.scalar(select(OfferAccessToken.id).where(
+        OfferAccessToken.organization_id == offer.organization_id,
+        OfferAccessToken.offer_id == offer.id,
+        OfferAccessToken.offer_version_id == current.id,
+        OfferAccessToken.revoked_at.is_(None),
+    )) is not None)
     return {
         "id": str(offer.id), "application_id": str(offer.application_id), "job_id": str(offer.job_id),
         "candidate_id": str(candidate.id) if candidate else None,
@@ -159,12 +173,13 @@ def _offer_view(db, offer, principal):
         "special_reason": offer.special_reason if can_view_sensitive else None, "content": content,
         "can_view_sensitive_content": can_view_sensitive,
         "pdf_ready": bool(current and current.pdf_object_key),
+        "content_ready": content_ready, "send_queued": send_queued,
         "response": _offer_response_view(response),
         "allowed_actions": {
             "update": can_manage and offer.status in {"draft", "changes_requested", "ready_to_send", "sent"},
             "submit": can_manage and offer.status in {"draft", "changes_requested"},
             "withdraw": can_manage and offer.status not in {"withdrawn", "expired"},
-            "send": can_manage and offer.status == "ready_to_send" and current is not None,
+            "send": can_manage and offer.status == "ready_to_send" and current is not None and content_ready and not send_queued,
             "decide": is_assignee and offer.status == "pending_approval",
             "proxy_response": can_manage and offer.status == "sent" and current is not None and current.id == offer.current_version_id,
         },
@@ -444,7 +459,7 @@ def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(N
                 if offer.version != expected: raise OfferVersionConflict
                 current = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == offer.organization_id, OfferVersion.id == offer.current_version_id).with_for_update())
                 now = datetime.now(timezone.utc)
-                if offer.status != "ready_to_send" or current is None or _utc(current.candidate_response_deadline) <= now:
+                if offer.status != "ready_to_send" or current is None or not _offer_content_ready(current.content) or _utc(current.candidate_response_deadline) <= now:
                     raise OfferApprovalError
                 if request.app.state.settings.offer_public_base_url is None:
                     raise RuntimeError("offer public base URL is not configured")

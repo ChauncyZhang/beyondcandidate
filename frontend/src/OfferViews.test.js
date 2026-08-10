@@ -22,6 +22,9 @@ test("approved Offer remains explicitly unsent until HR acts", () => {
   assert.match(source, /已加入发送队列/);
   assert.match(source, /HTML Offer 页面/);
   assert.match(source, /HTML Offer · PDF 可下载/);
+  assert.match(source, /发送请求已提交/);
+  assert.match(source, /邮件发送中/);
+  assert.match(source, /请先补全 Offer/);
   assert.doesNotMatch(source, /PDF 生成中/);
   assert.doesNotMatch(source, /disabled=\{Boolean\(action\) \|\| !\(offer\.pdfReady \?\? offer\.pdf_ready\)\}/);
   assert.doesNotMatch(source, /发送功能暂未开放|Task 9 安全令牌流程接入后开放|Offer 已发送/);

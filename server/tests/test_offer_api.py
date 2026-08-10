@@ -156,7 +156,8 @@ def test_offer_lifecycle_is_idempotent_versioned_and_sends_html_without_pdf(tmp_
     monkeypatch.setattr("server.app.offers.api.resolve_confirmed_candidate_email", lambda *args, **kwargs: "candidate@example.test")
     monkeypatch.setattr("server.app.offers.api.enqueue_delivery", lambda db, command, **kwargs: queued.append(command))
     seed = seed_offer_application(app)
-    payload = {"application_id": seed["application_id"], "candidate_response_deadline": "2099-08-20T00:00:00Z", "content": {"compensation": "100000"}}
+    content = {"title": "正式录用通知", "body": "欢迎加入团队", "compensation": "100000"}
+    payload = {"application_id": seed["application_id"], "candidate_response_deadline": "2099-08-20T00:00:00Z", "content": content}
     with TestClient(app) as client:
         admin_headers = {**login(client, seed["admin"]), "Idempotency-Key": "offer-create"}
         created = client.post("/api/v1/offers", json=payload, headers=admin_headers)
@@ -172,6 +173,14 @@ def test_offer_lifecycle_is_idempotent_versioned_and_sends_html_without_pdf(tmp_
         approver_offer = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["approver"]))
         pending = client.get("/api/v1/offer-approvals/pending", headers=login(client, seed["approver"]))
         approved = client.post(f"/api/v1/offer-approvals/{approval_id}/decisions", json={"decision": "approved"}, headers={**login(client, seed["approver"]), "Idempotency-Key": "approve", "If-Match": '"2"'})
+        with app.state.identity_store.sync_session() as db:
+            db.scalar(select(OfferVersion).where(OfferVersion.offer_id == UUID(offer_id))).content = {"compensation": "100000"}
+            db.commit()
+        incomplete = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["admin"]))
+        blocked_send = client.post(f"/api/v1/offers/{offer_id}/send", headers={**login(client, seed["admin"]), "Idempotency-Key": "send-incomplete", "If-Match": '"3"'})
+        with app.state.identity_store.sync_session() as db:
+            db.scalar(select(OfferVersion).where(OfferVersion.offer_id == UUID(offer_id))).content = content
+            db.commit()
         ready = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["admin"]))
         history = client.get(f"/api/v1/offers/{offer_id}/history", headers=login(client, seed["approver"]))
         redacted = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["viewer"]))
@@ -185,7 +194,7 @@ def test_offer_lifecycle_is_idempotent_versioned_and_sends_html_without_pdf(tmp_
     assert submitted.status_code == 200
     assert denied.status_code == 404
     assert approver_offer.status_code == 200
-    assert approver_offer.json()["data"]["content"] == {"compensation": "100000"}
+    assert approver_offer.json()["data"]["content"] == content
     assert approver_offer.json()["data"]["can_view_sensitive_content"] is True
     pending_item = pending.json()["data"][0]
     assert pending_item["candidate_response_deadline"].startswith("2099-08-20T00:00:00")
@@ -206,20 +215,25 @@ def test_offer_lifecycle_is_idempotent_versioned_and_sends_html_without_pdf(tmp_
     assert approved.status_code == 200
     assert approved.json()["data"]["status"] == "ready_to_send"
     assert approved.json()["data"]["allowed_actions"]["send"] is False
+    assert incomplete.json()["data"]["content_ready"] is False
+    assert incomplete.json()["data"]["allowed_actions"]["send"] is False
+    assert blocked_send.status_code == 409
     assert ready.json()["data"]["allowed_actions"]["send"] is True
     assert len(history.json()["data"]["versions"]) == 1
-    assert history.json()["data"]["versions"][0]["content"] == {"compensation": "100000"}
+    assert history.json()["data"]["versions"][0]["content"] == content
     assert history.json()["data"]["approvals"][0]["status"] == "approved"
     assert [event["event_type"] for event in history.json()["data"]["events"]] == [
         "offer.created", "offer.submitted", "offer.approval_approved"
     ]
     assert redacted.json()["data"]["content"] == {"redacted": True}
     assert send.status_code == 202
+    assert send.json()["data"]["send_queued"] is True
+    assert send.json()["data"]["allowed_actions"]["send"] is False
     assert len(queued) == 1
     assert queued[0].resource_type == "offer_access_token"
     assert "录用通知" in queued[0].subject and "Offer role" in queued[0].subject
     assert "Candidate" in queued[0].body and "{{offer_public_link}}" in queued[0].body
-    for response in (created, replay, missing, submitted, denied, approver_offer, pending, approved, ready, history, redacted, send):
+    for response in (created, replay, missing, submitted, denied, approver_offer, pending, approved, incomplete, blocked_send, ready, history, redacted, send):
         assert response.headers["Cache-Control"] == "no-store"
 
 

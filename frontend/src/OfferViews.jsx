@@ -366,6 +366,8 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
   if (!offer) return <div className="offer-workspace"><header className="offer-heading"><div><h3>Offer 管理</h3><p>为候选人创建版本化 Offer，并在审批通过后由 HR 明确发送。</p></div></header>{canPerformAction(role, "管理 Offer") ? <OfferDraftForm applicationId={applicationId} templates={state.templates} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} /> : <div className="offer-state"><FileText size={24} /><strong>暂无 Offer</strong><span>当前角色不能创建 Offer。</span></div>}</div>;
 
   const sensitive = Boolean(offer.canViewSensitiveContent ?? offer.can_view_sensitive_content);
+  const contentReady = Boolean(offer.contentReady ?? offer.content_ready);
+  const sendQueued = Boolean(offer.sendQueued ?? offer.send_queued);
   const decisionApprovalId = approvalId || offer.pendingApprovalId || offer.pending_approval_id;
   return <div className="offer-workspace">
     <header className="offer-heading"><div><h3>Offer 管理</h3><p>{[offer.candidateName, offer.jobTitle].filter(Boolean).join(" · ") || "Offer 版本、审批、发送和候选人招聘状态相互独立。"}</p></div><span className={`offer-status ${offer.status}`}>{offerStatusLabel(offer.status)}</span></header>
@@ -375,7 +377,7 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
       <span><Clock3 size={18} /><span><small>回复截止</small><strong>{new Date(offer.candidateResponseDeadline || offer.candidate_response_deadline).toLocaleString("zh-CN", { hour12: false })}</strong></span></span>
       <span><FileText size={18} /><span><small>候选人页面</small><strong>HTML Offer</strong></span></span>
     </div>
-    {offer.status === "ready_to_send" && <div className="offer-ready-notice" role="status"><CheckCircle2 size={20} /><span><strong>审批已完成，但尚未发送</strong><small>{canRenderOfferAction(role, offer, "send") ? "发送功能已开放。系统不会自动发送，请 HR 核对 HTML Offer 页面和候选人邮箱后明确点击发送。" : "发送功能已开放；当前账号无发送权限，请联系负责 HR 操作。"}</small></span></div>}
+    {offer.status === "ready_to_send" && <div className="offer-ready-notice" role="status"><CheckCircle2 size={20} /><span><strong>{sendQueued ? "发送请求已提交" : contentReady ? "审批已完成，但尚未发送" : "Offer 信息不完整"}</strong><small>{sendQueued ? "邮件正在投递，发送完成后状态会自动更新。" : !contentReady ? "请返回修改并补全 Offer 标题、正文和薪酬方案。" : canRenderOfferAction(role, offer, "send") ? "发送功能已开放。系统不会自动发送，请 HR 核对 HTML Offer 页面和候选人邮箱后明确点击发送。" : "当前账号无发送权限，请联系负责 HR 操作。"}</small></span></div>}
     {offer.status === "changes_requested" && <div className="offer-changes-notice"><Undo2 size={20} /><span><strong>审批人要求修改</strong><small>{state.history?.approvals?.slice().reverse().find((item) => item.status === "rejected")?.reason || "请查看下方审批历史。"}</small></span></div>}
     {["accepted", "declined"].includes(offer.status) && <section className="offer-result" aria-labelledby="offer-result-title"><h4 id="offer-result-title">最终确认结果</h4><OfferResponseRecord response={offer.response || state.history?.responses?.at(-1)} current /></section>}
     {!sensitive ? <div className="offer-redacted" role="status"><ShieldCheck size={22} /><strong>敏感内容已由服务端隐藏</strong><span>当前账号只能查看 Offer 状态，薪酬和正文不会在浏览器中展示。</span></div> : <>
@@ -387,7 +389,7 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
       {canRenderOfferAction(role, offer, "withdraw") && <button className="button secondary" type="button" disabled={Boolean(action)} onClick={() => void run("withdraw", () => controller.withdraw(offer), "Offer 已撤回")}><XCircle size={16} />{action === "withdraw" ? "撤回中…" : "撤回 Offer"}</button>}
       {canRenderOfferAction(role, offer, "send") && <button className="button primary" type="button" disabled={Boolean(action)} onClick={() => void run("send", () => controller.send(offer), "已加入发送队列")}><Send size={16} />{action === "send" ? "提交中…" : "确认并发送 Offer"}</button>}
       {offer.status === "sent" && canRenderOfferAction(role, offer, "proxy_response") && <button ref={proxyButtonRef} className="button primary" type="button" disabled={Boolean(action)} onClick={() => setProxyOpen(true)}><CheckCircle2 size={16} />代候选人确认</button>}
-      {offer.status === "ready_to_send" && !canRenderOfferAction(role, offer, "send") && <button className="button secondary" type="button" disabled aria-disabled="true"><Send size={16} />当前账号无发送权限</button>}
+      {offer.status === "ready_to_send" && !canRenderOfferAction(role, offer, "send") && <button className="button secondary" type="button" disabled aria-disabled="true"><Send size={16} />{sendQueued ? "邮件发送中" : contentReady ? "当前账号无发送权限" : "请先补全 Offer"}</button>}
     </div>
     <OfferHistory history={state.history} />
     {proxyOpen && <ProxyResponseDialog offer={offer} controller={controller} onClose={closeProxyDialog} onResolved={async (saved) => { setState((current) => ({ ...current, offer: saved, error: "" })); await load(); }} onNotify={onNotify} />}
