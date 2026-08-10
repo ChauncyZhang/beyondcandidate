@@ -15,7 +15,7 @@ from server.app.communications.provider import MailMessage, PermanentMailError, 
 from server.app.communications.security import EmailSecretCipher
 from server.app.communications.service import DeliveryCommand, DeliveryIdempotencyConflict, SenderPolicy, email_delivery_terminal_callback, enqueue_delivery, render_template
 from server.app.communications.worker import EmailDeliveryJobHandler
-from server.app.communications.worker import _render_offer_link
+from server.app.communications.worker import _offer_html_body, _render_offer_link
 from server.app.offers.service import OfferTokenCodec
 from server.app.identity.models import AuditLog, Base, Organization, User, UserRole
 from server.app.integrations.feishu.models import FeishuOrganizationConfig
@@ -95,6 +95,37 @@ def test_offer_capability_is_materialized_only_for_the_transient_worker_message(
     raw = codec.raw_token(token_id)
     assert raw not in stored_body
     assert transient_body == f"Your secure offer link: https://careers.example.test/offer/{raw}"
+
+
+def test_offer_html_email_is_branded_escaped_and_uses_one_secure_action_link():
+    link = "https://careers.example.test/offer/safe-token"
+    rendered = _offer_html_body(
+        brand_name="Example <Company>",
+        body="林候选人，您好：\n\n我们诚挚邀请您加入。\n\n请查看并确认 Offer：\n" + link,
+        offer_link=link,
+    )
+    assert "Example &lt;Company&gt;" in rendered
+    assert "林候选人" in rendered
+    assert rendered.count(f'href="{link}"') == 1
+    assert "查看并确认 Offer" in rendered
+
+
+def test_smtp_provider_adds_html_alternative_without_removing_plain_text(monkeypatch):
+    captured = {}
+
+    async def smtp_send(message, **kwargs):
+        captured["message"] = message
+
+    monkeypatch.setattr("server.app.communications.provider.aiosmtplib.send", smtp_send)
+    provider = SmtpMailProvider(host="smtp.example.com", port=587, tls_mode="starttls", username="mailer", password="private")
+    asyncio.run(provider.send(MailMessage(
+        "candidate@example.com", "careers@example.com", "Example Company",
+        "hr@example.com", "HR", "录用通知", "纯文本内容",
+        "<email-html@beyondcandidate.internal>", html_body="<strong>HTML 内容</strong>",
+    )))
+    message = captured["message"]
+    assert message.get_body(preferencelist=("plain",)).get_content().strip() == "纯文本内容"
+    assert "HTML 内容" in message.get_body(preferencelist=("html",)).get_content()
 
 
 def test_worker_retries_temporary_smtp_failure_without_marking_sent(tmp_path):

@@ -20,6 +20,10 @@ test("approved Offer remains explicitly unsent until HR acts", () => {
   assert.match(source, /发送功能已开放/);
   assert.match(source, /offer\.status === "ready_to_send" && !canRenderOfferAction\(role, offer, "send"\)/);
   assert.match(source, /已加入发送队列/);
+  assert.match(source, /HTML Offer 页面/);
+  assert.match(source, /HTML Offer · PDF 可下载/);
+  assert.doesNotMatch(source, /PDF 生成中/);
+  assert.doesNotMatch(source, /disabled=\{Boolean\(action\) \|\| !\(offer\.pdfReady \?\? offer\.pdf_ready\)\}/);
   assert.doesNotMatch(source, /发送功能暂未开放|Task 9 安全令牌流程接入后开放|Offer 已发送/);
 });
 
@@ -116,8 +120,10 @@ test("job form round-trips optional Offer defaults without blocking job save", (
   assert.match(jobSource, /offerApproverId: initialJob\?\.offerApproverId/);
   assert.match(jobSource, /offerTemplateId: initialJob\?\.offerTemplateId/);
   assert.match(jobSource, /aria-label="默认 Offer 审批人"/);
+  assert.match(jobSource, /默认 Offer 审批人（领导）/);
+  assert.match(jobSource, /不会自动使用用人经理/);
   assert.match(jobSource, /aria-label="默认 Offer 模板"/);
-  assert.match(jobSource, /职位可在未配置时保存；但 HR 提交 Offer 审批前必须配置默认审批人/);
+  assert.match(jobSource, /职位可暂不配置，但 HR 提交 Offer 审批前必须补充/);
   assert.doesNotMatch(jobSource, /reviewerSelectionInvalid \|\| !values\.offerApproverId/);
   assert.match(jobSource, /const offerApproverOptions = hiringManagers/);
   assert.doesNotMatch(jobSource, /offerApproverOptions = \[\.\.\.new Map\(\[\.\.\.recruiters/);
@@ -133,4 +139,5 @@ test("Offer settings preserve template conflict and ordered approver controls", 
   assert.match(source, /setApproverIds\(moveItem\(approverIds, index, -1\)\)/);
   assert.match(source, /setApproverIds\(moveItem\(approverIds, index, 1\)\)/);
   assert.match(source, /filterEligibleSpecialApprovers\(users\)/);
+  assert.match(source, /特殊 Offer 追加审批人（领导）/);
 });

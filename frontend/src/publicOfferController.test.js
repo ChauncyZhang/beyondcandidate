@@ -16,10 +16,10 @@ test("public offer requests use the path token and omit credentials", async () =
   ]);
 });
 
-test("public projection normalizes safe offer fields and response state", () => {
+test("public projection normalizes safe HTML Offer fields and response state", () => {
   const controller = createPublicOfferController();
-  assert.deepEqual(controller.normalize({ data: { status: "accepted", candidate_name: "林候选人", job_title: "平台工程师", company_name: "示例公司", candidate_response_deadline: "2026-09-01T00:00:00Z", pdf_available: false, content: { summary: "Offer 摘要" } } }), {
-    status: "accepted", candidateName: "林候选人", jobTitle: "平台工程师", companyName: "示例公司", deadline: "2026-09-01T00:00:00Z", summary: "Offer 摘要", location: "", contact: "", pdfAvailable: false, response: null,
+  assert.deepEqual(controller.normalize({ data: { status: "accepted", candidate_name: "林候选人", job_title: "平台工程师", company_name: "示例公司", candidate_response_deadline: "2026-09-01T00:00:00Z", pdf_available: false, content: { title: "正式录用通知", body: "欢迎加入", compensation: "30K", benefits: "年度体检" } } }), {
+    status: "accepted", candidateName: "林候选人", jobTitle: "平台工程师", companyName: "示例公司", deadline: "2026-09-01T00:00:00Z", title: "正式录用通知", body: "欢迎加入", compensation: "30K", benefits: "年度体检", location: "", contact: "", pdfAvailable: false, response: null,
   });
 });
 

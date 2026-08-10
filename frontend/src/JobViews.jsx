@@ -300,10 +300,10 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
               <div className="job-offer-defaults">
                 <div className="field-label-row"><strong>Offer 默认配置</strong><button type="button" onClick={onManageOfferSettings}>管理 Offer 设置</button></div>
                 <div className="job-fields two-columns">
-                  <label>默认 Offer 审批人<select aria-label="默认 Offer 审批人" value={values.offerApproverId} disabled={hiringManagersStatus === "loading"} onChange={(event) => change("offerApproverId", event.target.value)}><option value="">暂不配置</option>{offerApproverOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+                  <label>默认 Offer 审批人（领导）<select aria-label="默认 Offer 审批人" value={values.offerApproverId} disabled={hiringManagersStatus === "loading"} onChange={(event) => change("offerApproverId", event.target.value)}><option value="">暂不配置</option>{offerApproverOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
                   <label>默认 Offer 模板<select aria-label="默认 Offer 模板" value={values.offerTemplateId} disabled={offerTemplatesStatus === "loading"} onChange={(event) => change("offerTemplateId", event.target.value)}><option value="">暂不配置</option>{offerTemplates.map((item) => <option key={item.id} value={item.id} disabled={item.status === "inactive" && item.id !== values.offerTemplateId}>{item.name}{item.status === "inactive" ? "（已停用）" : ""}</option>)}</select></label>
                 </div>
-                <small className="field-state">职位可在未配置时保存；但 HR 提交 Offer 审批前必须配置默认审批人，模板也可在创建 Offer 时明确选择。</small>
+                <small className="field-state">请选择承担 Offer 审批职责的领导；不会自动使用用人经理。领导账号可配置为招聘管理员。职位可暂不配置，但 HR 提交 Offer 审批前必须补充。</small>
                 {offerTemplatesStatus === "error" && <small className="field-error" role="alert">Offer 模板加载失败，当前职位仍可保存。</small>}
               </div>
               <div className="toggle-row ai-evaluation-row"><span><Bot size={18} /><span><strong>AI 简历评估</strong><small>启用后由 LLM 生成评分、结论与依据，并自动转交默认评审人；其他负责人可查看评审。</small></span></span><label className="compact-switch"><input aria-label="AI 简历评估" type="checkbox" checked={values.llmEnabled} onChange={(event) => change("llmEnabled", event.target.checked)} /><span aria-hidden="true" /></label></div>
