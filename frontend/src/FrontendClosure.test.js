@@ -73,7 +73,7 @@ after(async () => {
   await vite?.close();
 });
 
-async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = false, roles = ["recruiting_admin"], workbench = null, candidates = null, onRequest } = {}) {
+async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = false, roles = ["recruiting_admin"], workbench = null, candidates = null, approvals = null, onRequest } = {}) {
   const context = await browser.newContext({ viewport });
   let departmentDetail = {
     ...departments[0],
@@ -106,6 +106,7 @@ async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = f
     if (pathname === "/api/v1/jobs") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [], meta: { departments: [], owners: [], status_counts: {}, next_cursor: null } }) });
     if (pathname === "/api/v1/candidates" && candidates) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: candidates, meta: { limit: 50, next_cursor: null, owners: [] } }) });
     if (pathname === "/api/v1/workbench" && workbench) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: workbench }) });
+    if (pathname === "/api/v1/offer-approvals/pending" && approvals) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: approvals }) });
     if (/^\/api\/v1\/notifications\/workbench\/[^/]+\/read$/.test(pathname) && request.method() === "PUT") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { application_id: pathname.split("/")[5], version: request.postDataJSON().version, read_at: "2026-07-22T01:00:00Z" } }) });
     if (pathname === "/api/v1/auth/invitations/accept") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { email: "invitee@example.test" } }) });
     if (pathname === "/api/v1/me/password") return route.fulfill({ status: 204, body: "" });
@@ -114,6 +115,23 @@ async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = f
   const page = await context.newPage();
   return { context, page };
 }
+
+test("empty Offer approval status stays compact and aligned across desktop and mobile", { timeout: 60_000 }, async () => {
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 760 }]) {
+    const { context, page } = await openPage({ viewport, workbench: notificationWorkbench(), approvals: [] });
+    try {
+      await page.goto(baseUrl);
+      const section = page.locator(".offer-task-section");
+      await section.getByText("当前没有需要你处理的 Offer", { exact: true }).waitFor();
+      const bounds = await section.boundingBox();
+      assert.ok(bounds);
+      assert.ok(bounds.height <= 90);
+      assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= viewport.width);
+      assert.equal(await section.locator(".offer-task-icon svg").count(), 1);
+      assert.equal(await section.getByRole("button", { name: "刷新 Offer 审批", exact: true }).count(), 1);
+    } finally { await context.close(); }
+  }
+});
 
 test("notification bell opens actionable tasks and candidate navigation", { timeout: 60_000 }, async () => {
   let readRequest;

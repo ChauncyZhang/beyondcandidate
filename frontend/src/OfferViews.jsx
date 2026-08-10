@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowUp,
   CheckCircle2,
+  ChevronRight,
   Clock3,
   FileCheck2,
   FileText,
@@ -403,7 +404,25 @@ export function OfferApprovalTasks({ role, controller, onOpenOffer }) {
   }
   useEffect(() => { void load(); }, [controller, role]);
   if (!canPerformAction(role, "审批 Offer")) return null;
-  return <section className="rail-section offer-task-section" aria-labelledby="offer-task-title"><header><h3 id="offer-task-title">待我审批的 Offer</h3><button type="button" onClick={() => void load()}>刷新</button></header>{state.status === "loading" && <p role="status">正在加载审批待办…</p>}{state.status === "error" && <p className="offer-error" role="alert">{state.error}</p>}{state.status === "ready" && state.records.length === 0 && <p>暂无待审批 Offer</p>}{state.records.map((task) => <button className="rail-item" type="button" key={task.id} onClick={() => onOpenOffer(task)}><strong>{task.candidateName || task.candidate_name}</strong><small>{task.jobTitle || task.job_title} · Offer v{task.versionNumber || task.version_number}</small><small>回复截止：{new Date(task.candidateResponseDeadline || task.candidate_response_deadline).toLocaleDateString("zh-CN")}</small></button>)}</section>;
+  const hasTasks = state.records.length > 0;
+  const statusClass = state.status === "loading" ? "is-loading" : state.status === "error" ? "is-error" : hasTasks ? "has-items" : "is-empty";
+  const statusText = state.status === "loading"
+    ? "正在读取最新审批任务"
+    : state.status === "error"
+      ? state.error
+      : hasTasks
+        ? String(state.records.length) + " 份 Offer 等待你的决定"
+        : "当前没有需要你处理的 Offer";
+  return <section className={"offer-task-section " + statusClass} aria-labelledby="offer-task-title" aria-busy={state.status === "loading"}>
+    <header>
+      <div className="offer-task-heading">
+        <span className="offer-task-icon" aria-hidden="true">{state.status === "loading" ? <LoaderCircle size={21} /> : state.status === "error" ? <AlertTriangle size={21} /> : hasTasks ? <FileCheck2 size={21} /> : <CheckCircle2 size={21} />}</span>
+        <div><h3 id="offer-task-title">待我审批的 Offer</h3><p role={state.status === "error" ? "alert" : "status"}>{statusText}</p></div>
+      </div>
+      <button className="icon-button offer-task-refresh" type="button" title="刷新 Offer 审批" aria-label="刷新 Offer 审批" disabled={state.status === "loading"} onClick={() => void load()}><RefreshCw size={17} /></button>
+    </header>
+    {hasTasks && <div className="offer-task-list">{state.records.map((task) => <button type="button" key={task.id} onClick={() => onOpenOffer(task)}><span className="offer-task-item-icon" aria-hidden="true"><FileText size={18} /></span><span className="offer-task-item-main"><strong>{task.candidateName || task.candidate_name}</strong><small>{task.jobTitle || task.job_title} · Offer v{task.versionNumber || task.version_number}</small></span><span className="offer-task-deadline"><small>回复截止</small><strong>{new Date(task.candidateResponseDeadline || task.candidate_response_deadline).toLocaleDateString("zh-CN")}</strong></span><ChevronRight size={18} aria-hidden="true" /></button>)}</div>}
+  </section>;
 }
 
 function moveItem(items, index, offset) {

@@ -447,9 +447,31 @@ input::placeholder, textarea::placeholder { color: #9b9ba1; }
 .offer-approval-workbench { padding: 0 28px 14px; }
 .offer-route-page { display: grid; gap: 16px; padding: 22px 28px 32px; min-width: 0; }
 .offer-approval-workbench:empty { display: none; }
-.offer-task-section { max-width: 520px; }
-.offer-task-section > header { display: flex; justify-content: space-between; }
-.offer-task-section > header button { border: 0; color: var(--blue); background: transparent; }
+.offer-task-section { overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; box-shadow: var(--shadow-card); }
+.offer-task-section > header { min-height: 78px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.offer-task-heading { min-width: 0; display: flex; align-items: center; gap: 12px; }
+.offer-task-heading > div { min-width: 0; display: grid; gap: 4px; }
+.offer-task-heading h3, .offer-task-heading p { margin: 0; }
+.offer-task-heading h3 { color: var(--ink); font-size: 16px; }
+.offer-task-heading p { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.offer-task-icon { width: 42px; height: 42px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; color: var(--blue); background: var(--blue-soft); }
+.offer-task-section.is-empty .offer-task-icon { color: #287a4b; background: #edf8f1; }
+.offer-task-section.is-error .offer-task-icon { color: #a34750; background: #fff0f1; }
+.offer-task-section.is-error .offer-task-heading p { color: #963f49; }
+.offer-task-section.is-loading .offer-task-icon svg { animation: spin 1s linear infinite; }
+.offer-task-refresh { width: 36px; height: 36px; flex: 0 0 auto; color: var(--muted); }
+.offer-task-refresh:hover:not(:disabled) { color: var(--blue); background: var(--blue-soft); }
+.offer-task-refresh:disabled { cursor: wait; opacity: .55; }
+.offer-task-list { border-top: 1px solid var(--line); }
+.offer-task-list > button { width: 100%; min-height: 70px; padding: 11px 16px; border: 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: 34px minmax(0, 1fr) auto 18px; align-items: center; gap: 12px; color: var(--ink-secondary); background: #fff; text-align: left; cursor: pointer; }
+.offer-task-list > button:first-child { border-top: 0; }
+.offer-task-list > button:hover { background: #f7f9fb; }
+.offer-task-item-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; color: var(--blue); background: var(--blue-soft); }
+.offer-task-item-main { min-width: 0; display: grid; gap: 4px; }
+.offer-task-item-main strong { color: var(--ink); overflow-wrap: anywhere; }
+.offer-task-item-main small, .offer-task-deadline small { color: var(--muted); }
+.offer-task-deadline { display: grid; justify-items: end; gap: 3px; white-space: nowrap; }
+.offer-task-deadline strong { color: var(--ink-secondary); font-size: 13px; font-weight: 600; }
 .offer-settings { display: grid; gap: 22px; }
 .offer-template-settings, .offer-approver-settings { display: grid; gap: 15px; padding-top: 20px; border-top: 1px solid var(--line); }
 .offer-approver-settings ol { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
@@ -507,6 +529,9 @@ input::placeholder, textarea::placeholder { color: #9b9ba1; }
   .offer-full-field { grid-column: auto; }
   .offer-form > footer > div, .offer-actions, .offer-decision > div { display: grid; grid-template-columns: 1fr; }
   .offer-form > footer .button, .offer-actions .button, .offer-decision .button { width: 100%; }
+  .offer-task-section > header { min-height: 72px; padding: 12px; }
+  .offer-task-list > button { grid-template-columns: 32px minmax(0, 1fr) 18px; padding: 11px 12px; }
+  .offer-task-deadline { display: none; }
   .offer-preview dl > div { grid-template-columns: 1fr; gap: 4px; }
   .offer-special-row { align-items: flex-start; }
   .offer-response-record > header { flex-direction: column; }

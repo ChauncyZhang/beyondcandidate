@@ -87,6 +87,10 @@ test("approval workbench loads independently and navigates to candidate Offer", 
   assert.doesNotMatch(handler, /loadServerCandidate|candidateDetailPath/);
   assert.match(source, /decisionApprovalId = approvalId \|\| offer\.pendingApprovalId/);
   assert.match(appSource, /<OfferApprovalTasks role=\{currentRole\} controller=\{offerController\}/);
+  assert.match(source, /className="offer-task-heading"/);
+  assert.match(source, /aria-label="刷新 Offer 审批"/);
+  assert.match(source, /当前没有需要你处理的 Offer/);
+  assert.match(source, /className="offer-task-list"/);
 });
 
 test("direct Offer route loads by offer id and renders server-projected names", () => {
