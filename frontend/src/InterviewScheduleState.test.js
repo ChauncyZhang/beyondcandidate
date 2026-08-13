@@ -7,10 +7,11 @@ const source = readFileSync(new URL("./ScheduleWorkspace.jsx", import.meta.url),
 const viewsSource = readFileSync(new URL("./InterviewViews.jsx", import.meta.url), "utf8");
 const helpersSource = source.match(/\/\* interview-schedule-helpers:start \*\/([\s\S]*?)\/\* interview-schedule-helpers:end \*\//)?.[1];
 
-test("new schedules run the same conflict check as reschedules", () => {
+test("schedule save relies on the authoritative create or update request instead of a duplicate preflight", () => {
   assert.doesNotMatch(source, /if \(!record\) \{ setStep\(3\); return; \}/);
-  assert.match(source, /await onCheckConflicts\(record,/);
-  assert.match(viewsSource, /controller\.checkConflicts\(record\?\.id, form\)/);
+  assert.doesNotMatch(source, /await onCheckConflicts\(record,/);
+  assert.doesNotMatch(viewsSource, /onCheckConflicts=/);
+  assert.match(source, /const saved = await onSave\(record,/);
 });
 
 test("hard conflicts block while soft conflicts require an explicit override", () => {
@@ -35,8 +36,18 @@ test("saved schedule message distinguishes queued email from manual candidate no
 
   assert.equal(getScheduleSavedMessage(null), "面试安排已保存；候选人邮件已进入发送队列；邀请文件可下载");
   assert.equal(getScheduleSavedMessage({ id: "INT-1" }, false, true), "面试改期已保存；邮件未发送，请人工通知候选人；新的邀请文件可下载");
-  assert.match(source, /onNotify\(getScheduleSavedMessage\(record, Boolean\(finalConflict\?\.unconfirmed\?\.length\), saved\?\.emailDelivery\?\.manualNotificationRequired\)\)/);
+  assert.match(source, /onNotify\(getScheduleSavedMessage\(record, isAvailabilityUnconfirmed\(availability, form\.interviewerIds\), saved\?\.emailDelivery\?\.manualNotificationRequired\)\)/);
   assert.doesNotMatch(source, /通知已发送/);
+});
+
+test("saved schedule message preserves the loaded Feishu confirmation state", () => {
+  assert.ok(helpersSource, "ScheduleWorkspace.jsx must expose the interview schedule helper block");
+  const { isAvailabilityUnconfirmed } = vm.runInNewContext(`(() => { ${helpersSource.replaceAll("export ", "")} return { isAvailabilityUnconfirmed }; })()`);
+  const ready = { status: "ready", data: { participants: [{ participantId: "USER-1", status: "confirmed" }, { participantId: "USER-2", status: "unconfirmed" }] } };
+
+  assert.equal(isAvailabilityUnconfirmed(ready, ["USER-1"]), false);
+  assert.equal(isAvailabilityUnconfirmed(ready, ["USER-2"]), true);
+  assert.equal(isAvailabilityUnconfirmed({ status: "loading" }, ["USER-1"]), true);
 });
 
 test("copy helper writes the invitation text to the clipboard", async () => {
@@ -60,9 +71,14 @@ test("copy helper rejects when clipboard access is unavailable or fails", async 
   await assert.rejects(copyInterviewText("邀请内容", { async writeText() { throw new Error("denied"); } }), /denied/);
 });
 
-test("final save does not override a newly detected soft conflict", () => {
+test("authoritative save does not override a newly detected soft conflict", () => {
   assert.match(source, /allowSoftConflict: false/);
-  assert.match(source, /const finalConflict = await onCheckConflicts/);
+  assert.doesNotMatch(source, /allowSoftConflict: true/);
+  const { getScheduleSaveError } = vm.runInNewContext(`(() => { ${helpersSource.replaceAll("export ", "")} return { getScheduleSaveError }; })()`);
+  assert.equal(getScheduleSaveError({ code: "schedule_hard_conflict" }), "该时段存在面试冲突，请调整后重试。");
+  assert.equal(getScheduleSaveError({ code: "schedule_soft_conflict" }), "该时段与已有安排间隔不足，请调整后重试。");
+  assert.equal(getScheduleSaveError({ code: "service_unavailable" }), "无法完成权威冲突检查或保存，当前内容已保留。请重试。");
+  assert.match(source, /setSubmitError\(getScheduleSaveError\(error\)\)/);
 });
 
 test("past slots on the current day are unavailable in the selected timezone", () => {
@@ -74,6 +90,12 @@ test("past slots on the current day are unavailable in the selected timezone", (
   assert.equal(isScheduleSlotInPast("2026-07-16", "23:40", "Asia/Shanghai", now), true);
   assert.equal(isScheduleSlotInPast("2026-07-16", "23:41", "Asia/Shanghai", now), false);
   assert.equal(isScheduleSlotInPast("2026-07-17", "09:00", "Asia/Shanghai", now), false);
+});
+
+test("disabled and past slots receive an explicit unavailable visual state", () => {
+  assert.match(source, /className=\{`\$\{state\}\$\{disabled \? " unavailable" : ""\}`\}/);
+  assert.match(source, /disabled=\{disabled\}/);
+  assert.match(source, /inPast \? "已过期" : slotLabels\[state\]/);
 });
 
 test("schedule defaults to the configured next round and recommends an extra round after the template", () => {

@@ -73,6 +73,20 @@ class FeishuIdentityBinding(Base):
     )
 
 
+class FeishuEventReceipt(Base):
+    __tablename__ = "feishu_event_receipts"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    event_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (
+        ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+        UniqueConstraint("organization_id", "event_id", name="uq_feishu_event_receipts_org_event"),
+        Index("ix_feishu_event_receipts_received", "received_at"),
+    )
+
+
 class FeishuInterviewSync(Base):
     __tablename__ = "feishu_interview_syncs"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)

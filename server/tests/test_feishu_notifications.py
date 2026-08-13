@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import select
 
 from server.app.communications.models import EmailDelivery, EmailProviderConfig
-from server.app.identity.models import User
+from server.app.identity.models import User, UserStatus
 from server.app.integrations.feishu.models import (
     FeishuIdentityBinding,
     FeishuOrganizationConfig,
@@ -34,7 +34,7 @@ from server.app.interviews.models import Interview, InterviewParticipant
 from server.app.notifications.models import UserNotification
 from server.app.queue.models import OutboxEvent
 from server.app.queue.payloads import DEFAULT_PAYLOAD_POLICIES, UnsafePayload
-from server.app.queue.service import RetryableJobError
+from server.app.queue.service import PermanentJobError, RetryableJobError
 from server.tests.test_interview_api import make_app, seed_application
 
 
@@ -281,20 +281,36 @@ def test_feedback_handler_sends_open_id_card_with_origin_and_outbox_idempotency(
     assert "@example.test" not in rendered
 
 
-def test_unbound_recipient_is_a_successful_noop(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("bind_recipient", "disable_recipient", "safe_code"),
+    [
+        (False, False, "feishu_recipient_unbound"),
+        (True, True, "feishu_recipient_inactive"),
+    ],
+)
+def test_unavailable_recipient_is_a_non_retryable_outbox_failure(
+    tmp_path, bind_recipient, disable_recipient, safe_code
+) -> None:
     app = make_app(tmp_path)
     seed = seed_application(app)
-    event, _ = _feedback_event(app, seed, bind_recipient=False)
+    event, _ = _feedback_event(app, seed, bind_recipient=bind_recipient)
+    if disable_recipient:
+        with app.state.identity_store.sync_session() as db:
+            recipient = db.get(User, seed["interviewer_id"])
+            recipient.status = UserStatus.DISABLED
+            db.commit()
     provider = FakeFeishuProvider()
 
-    asyncio.run(
-        FeishuNotificationOutboxHandler(
-            app.state.identity_store.sync_session,
-            provider,
-            app.state.feishu_secret_cipher,
-        )(event, event.id)
-    )
+    with pytest.raises(PermanentJobError, match=safe_code) as raised:
+        asyncio.run(
+            FeishuNotificationOutboxHandler(
+                app.state.identity_store.sync_session,
+                provider,
+                app.state.feishu_secret_cipher,
+            )(event, event.id)
+        )
 
+    assert raised.value.safe_code == safe_code
     assert provider.cards == []
 
 

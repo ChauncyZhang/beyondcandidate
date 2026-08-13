@@ -1,15 +1,21 @@
+import base64
+import hashlib
+import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import pytest
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from server.app.core.settings import Settings
-from server.app.identity.models import Organization, User, UserRole, UserStatus
+from server.app.identity.models import AuditLog, Organization, User, UserRole, UserStatus
 from server.app.identity.security import PasswordService
 from server.app.identity.service import Clock, TokenSource
-from server.app.integrations.feishu.models import FeishuIdentityBinding
-from server.app.integrations.feishu.provider import FakeFeishuProvider, OAuthIdentity
+from server.app.integrations.feishu.models import FeishuIdentityBinding, FeishuOrganizationConfig
+from server.app.integrations.feishu.provider import ConnectionResult, FakeFeishuProvider, OAuthIdentity
 from server.app.main import create_app
 
 
@@ -99,6 +105,55 @@ def config_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def configure_feishu(feishu_app, *, encrypt_key=None):
+    app, client = feishu_app
+    admin_id = seed_user(app)
+    csrf = login(client)
+    response = client.put(
+        "/api/v1/settings/integrations/feishu",
+        json=config_payload(encrypt_key=encrypt_key),
+        headers=write_headers(csrf),
+    )
+    assert response.status_code == 200
+    with app.state.identity_store.sync_session() as db:
+        admin = db.get(User, admin_id)
+        db.add(
+            FeishuIdentityBinding(
+                organization_id=admin.organization_id,
+                user_id=admin.id,
+                union_id="on_admin",
+                open_id="ou_admin",
+                tenant_key="tenant-key",
+            )
+        )
+        db.commit()
+        return admin.organization_id, csrf
+
+
+def encrypted_webhook(payload: dict, encrypt_key: str, *, signature_override: str | None = None):
+    plaintext = json.dumps(payload, separators=(",", ":")).encode()
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(plaintext) + padder.finalize()
+    iv = b"0123456789abcdef"
+    key = hashlib.sha256(encrypt_key.encode()).digest()
+    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+    encrypted = iv + encryptor.update(padded) + encryptor.finalize()
+    body = json.dumps(
+        {"encrypt": base64.b64encode(encrypted).decode()}, separators=(",", ":")
+    ).encode()
+    timestamp = "1720000000"
+    nonce = "nonce-value"
+    signature = hashlib.sha256(
+        timestamp.encode() + nonce.encode() + encrypt_key.encode() + body
+    ).hexdigest()
+    return body, {
+        "Content-Type": "application/json",
+        "X-Lark-Request-Timestamp": timestamp,
+        "X-Lark-Request-Nonce": nonce,
+        "X-Lark-Signature": signature_override or signature,
+    }
 
 
 def test_config_is_disabled_by_default_and_never_returns_plaintext(feishu_app) -> None:
@@ -319,3 +374,433 @@ def test_freebusy_api_chunks_provider_calls_without_real_network(feishu_app) -> 
     assert response.json()["data"] == []
     assert len(app.state.feishu_provider.freebusy_requests) == 4
     assert max(len(item.user_ids) for item in app.state.feishu_provider.freebusy_requests) == 10
+
+
+def test_connection_test_releases_database_session_before_provider_calls(
+    feishu_app, monkeypatch
+) -> None:
+    app, client = feishu_app
+    _, csrf = configure_feishu(feishu_app)
+    original_session = app.state.identity_store.sync_session
+    active_sessions = 0
+
+    @contextmanager
+    def tracked_session():
+        nonlocal active_sessions
+        with original_session() as db:
+            active_sessions += 1
+            try:
+                yield db
+            finally:
+                active_sessions -= 1
+
+    def test_connection(credentials):
+        assert active_sessions == 0
+        return ConnectionResult(True, 1)
+
+    def send_message(credentials, open_id, text, *, idempotency_key):
+        assert active_sessions == 0
+
+    monkeypatch.setattr(app.state.identity_store, "sync_session", tracked_session)
+    monkeypatch.setattr(app.state.feishu_provider, "test_connection", test_connection)
+    monkeypatch.setattr(app.state.feishu_provider, "send_message", send_message)
+
+    response = client.post(
+        "/api/v1/settings/integrations/feishu/test", headers=write_headers(csrf)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["last_test_status"] == "succeeded"
+
+
+def test_connection_test_does_not_persist_stale_result_after_concurrent_config_change(
+    feishu_app, monkeypatch
+) -> None:
+    app, client = feishu_app
+    organization_id, csrf = configure_feishu(feishu_app)
+
+    def change_config_during_request(credentials):
+        with app.state.identity_store.sync_session() as db:
+            config = db.scalar(
+                select(FeishuOrganizationConfig).where(
+                    FeishuOrganizationConfig.organization_id == organization_id
+                )
+            )
+            config.app_id = "cli_reconfigured"
+            config.version += 1
+            db.commit()
+        return ConnectionResult(True, 1)
+
+    monkeypatch.setattr(
+        app.state.feishu_provider, "test_connection", change_config_during_request
+    )
+
+    response = client.post(
+        "/api/v1/settings/integrations/feishu/test", headers=write_headers(csrf)
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "feishu_config_changed"
+    with app.state.identity_store.sync_session() as db:
+        config = db.scalar(
+            select(FeishuOrganizationConfig).where(
+                FeishuOrganizationConfig.organization_id == organization_id
+            )
+        )
+    assert config.app_id == "cli_reconfigured"
+    assert config.last_test_status is None
+
+
+def test_feishu_plaintext_url_verification_returns_challenge(feishu_app) -> None:
+    _, client = feishu_app
+    configure_feishu(feishu_app)
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events",
+        json={
+            "type": "url_verification",
+            "token": "verification-value",
+            "challenge": "challenge-value",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"challenge": "challenge-value"}
+
+
+def test_feishu_plaintext_webhook_rejects_invalid_verification_token(
+    feishu_app,
+) -> None:
+    _, client = feishu_app
+    configure_feishu(feishu_app)
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events",
+        json={
+            "type": "url_verification",
+            "token": "forged-token",
+            "challenge": "must-not-leak",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "feishu_event_verification_failed"
+
+
+def test_feishu_encrypted_url_verification_validates_signature_and_decrypts(
+    feishu_app,
+) -> None:
+    _, client = feishu_app
+    encrypt_key = "encrypt-key-value"
+    configure_feishu(feishu_app, encrypt_key=encrypt_key)
+    body, headers = encrypted_webhook(
+        {
+            "type": "url_verification",
+            "token": "verification-value",
+            "challenge": "encrypted-challenge",
+        },
+        encrypt_key,
+    )
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events", content=body, headers=headers
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"challenge": "encrypted-challenge"}
+
+
+def test_feishu_encrypted_url_verification_without_event_signature_headers(
+    feishu_app,
+) -> None:
+    _, client = feishu_app
+    configure_feishu(feishu_app, encrypt_key="encrypt-key-value")
+    body, headers = encrypted_webhook(
+        {
+            "type": "url_verification",
+            "token": "verification-value",
+            "challenge": "initial-encrypted-challenge",
+        },
+        "encrypt-key-value",
+    )
+    headers = {"Content-Type": headers["Content-Type"]}
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events",
+        content=body,
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"challenge": "initial-encrypted-challenge"}
+
+
+def test_feishu_encrypted_webhook_rejects_invalid_signature(feishu_app) -> None:
+    _, client = feishu_app
+    encrypt_key = "encrypt-key-value"
+    configure_feishu(feishu_app, encrypt_key=encrypt_key)
+    body, headers = encrypted_webhook(
+        {
+            "type": "url_verification",
+            "token": "verification-value",
+            "challenge": "must-not-leak",
+        },
+        encrypt_key,
+        signature_override="0" * 64,
+    )
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events", content=body, headers=headers
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "feishu_event_verification_failed"
+    assert "must-not-leak" not in response.text
+
+
+def test_feishu_encrypted_event_requires_signature_headers(feishu_app) -> None:
+    _, client = feishu_app
+    configure_feishu(feishu_app, encrypt_key="encrypt-key-value")
+    body, headers = encrypted_webhook(
+        {
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-unsigned",
+                "event_type": "calendar.calendar.event.changed_v4",
+                "token": "verification-value",
+                "app_id": "cli_test",
+                "tenant_key": "tenant-key",
+            },
+            "event": {"calendar_id": "primary", "user_id_list": []},
+        },
+        "encrypt-key-value",
+    )
+    headers = {"Content-Type": headers["Content-Type"]}
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events",
+        content=body,
+        headers=headers,
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "feishu_event_verification_failed"
+
+
+@pytest.mark.parametrize(
+    "signature_headers",
+    [
+        {"X-Lark-Signature": ""},
+        {
+            "X-Lark-Request-Timestamp": "",
+            "X-Lark-Request-Nonce": "",
+            "X-Lark-Signature": "",
+        },
+        {"X-Lark-Request-Timestamp": "1720000000"},
+        {
+            "X-Lark-Request-Timestamp": "1720000000",
+            "X-Lark-Request-Nonce": "nonce-value",
+        },
+    ],
+)
+def test_feishu_encrypted_url_verification_rejects_partial_or_empty_signature_headers(
+    feishu_app,
+    signature_headers,
+) -> None:
+    _, client = feishu_app
+    configure_feishu(feishu_app, encrypt_key="encrypt-key-value")
+    body, _ = encrypted_webhook(
+        {
+            "type": "url_verification",
+            "token": "verification-value",
+            "challenge": "must-not-leak",
+        },
+        "encrypt-key-value",
+    )
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events",
+        content=body,
+        headers={"Content-Type": "application/json", **signature_headers},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "feishu_event_verification_failed"
+    assert "must-not-leak" not in response.text
+
+
+def test_feishu_encrypt_key_configuration_rejects_plaintext_webhook(
+    feishu_app,
+) -> None:
+    _, client = feishu_app
+    configure_feishu(feishu_app, encrypt_key="encrypt-key-value")
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events",
+        json={
+            "type": "url_verification",
+            "token": "verification-value",
+            "challenge": "must-not-leak",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "feishu_event_verification_failed"
+
+
+def test_feishu_v2_event_requires_app_and_tenant_identity(feishu_app) -> None:
+    _, client = feishu_app
+    configure_feishu(feishu_app)
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events",
+        json={
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-missing-identity",
+                "event_type": "calendar.calendar.changed_v4",
+                "token": "verification-value",
+                "tenant_key": "tenant-key",
+            },
+            "event": {},
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "feishu_event_verification_failed"
+
+
+def test_feishu_v2_event_uses_app_and_tenant_config_and_deduplicates_event_id(
+    feishu_app,
+) -> None:
+    app, client = feishu_app
+    organization_id, _ = configure_feishu(feishu_app)
+    payload = {
+        "schema": "2.0",
+        "header": {
+            "event_id": "evt-duplicate",
+            "event_type": "calendar.calendar.event.changed_v4",
+            "token": "verification-value",
+            "app_id": "cli_test",
+            "tenant_key": "tenant-key",
+        },
+        "event": {"calendar_id": "primary", "user_id_list": []},
+        "organization_id": "00000000-0000-0000-0000-000000000001",
+    }
+
+    first = client.post("/api/v1/integrations/feishu/events", json=payload)
+    second = client.post("/api/v1/integrations/feishu/events", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    with app.state.identity_store.sync_session() as db:
+        received = [
+            log
+            for log in db.scalars(
+                select(AuditLog).where(AuditLog.event_type == "feishu.event_received")
+            )
+            if log.metadata_json.get("event_id") == "evt-duplicate"
+        ]
+    assert len(received) == 1
+    assert received[0].organization_id == organization_id
+
+
+def test_feishu_signed_encrypted_v2_event_is_accepted(feishu_app) -> None:
+    app, client = feishu_app
+    organization_id, _ = configure_feishu(
+        feishu_app,
+        encrypt_key="encrypt-key-value",
+    )
+    body, headers = encrypted_webhook(
+        {
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-encrypted-v2",
+                "event_type": "calendar.calendar.event.changed_v4",
+                "token": "verification-value",
+                "app_id": "cli_test",
+                "tenant_key": "tenant-key",
+            },
+            "event": {"calendar_id": "primary", "user_id_list": []},
+        },
+        "encrypt-key-value",
+    )
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events",
+        content=body,
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    with app.state.identity_store.sync_session() as db:
+        log = db.scalar(
+            select(AuditLog).where(
+                AuditLog.organization_id == organization_id,
+                AuditLog.event_type == "feishu.event_received",
+            )
+        )
+    assert log is not None
+    assert log.metadata_json["event_id"] == "evt-encrypted-v2"
+    assert log.metadata_json["action"] == "incremental_sync_required"
+
+
+def test_feishu_v2_event_rejects_wrong_tenant_even_with_valid_token(feishu_app) -> None:
+    _, client = feishu_app
+    configure_feishu(feishu_app)
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events",
+        json={
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-wrong-tenant",
+                "event_type": "calendar.calendar.event.changed_v4",
+                "token": "verification-value",
+                "app_id": "cli_test",
+                "tenant_key": "forged-tenant",
+            },
+            "event": {},
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "feishu_event_verification_failed"
+
+
+def test_calendar_event_change_is_recorded_for_incremental_sync_without_guessing_an_event(
+    feishu_app,
+) -> None:
+    app, client = feishu_app
+    organization_id, _ = configure_feishu(feishu_app)
+
+    response = client.post(
+        "/api/v1/integrations/feishu/events",
+        json={
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-calendar-list-changed",
+                "event_type": "calendar.calendar.event.changed_v4",
+                "token": "verification-value",
+                "app_id": "cli_test",
+                "tenant_key": "tenant-key",
+            },
+            "event": {"calendar_id": "primary"},
+        },
+    )
+
+    assert response.status_code == 200
+    with app.state.identity_store.sync_session() as db:
+        log = db.scalar(
+            select(AuditLog).where(
+                AuditLog.organization_id == organization_id,
+                AuditLog.event_type == "feishu.event_received",
+            )
+        )
+    assert log is not None
+    assert log.metadata_json == {
+        "event_id": "evt-calendar-list-changed",
+        "event_type": "calendar.calendar.event.changed_v4",
+        "action": "incremental_sync_required",
+        "calendar_id": "primary",
+    }

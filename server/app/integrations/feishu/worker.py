@@ -59,7 +59,10 @@ class FeishuCalendarOutboxHandler:
                 raise PermanentJobError("feishu_interview_unavailable")
             action = sync.desired_action
             external_event_id = sync.external_event_id
-            credentials = FeishuCredentials(config.app_id, self._cipher.decrypt(config.encrypted_app_secret), config.redirect_uri, config.calendar_id)
+            calendar_id = config.calendar_id
+            if action in {"update", "cancel"} and external_event_id and sync.external_calendar_id:
+                calendar_id = sync.external_calendar_id
+            credentials = FeishuCredentials(config.app_id, self._cipher.decrypt(config.encrypted_app_secret), config.redirect_uri, calendar_id)
             participant_ids = list(
                 db.scalars(
                     select(InterviewParticipant.user_id).where(
@@ -440,8 +443,10 @@ class FeishuNotificationOutboxHandler:
                     FeishuIdentityBinding.user_id == recipient_user_id,
                 )
             )
-            if user is None or user.status != UserStatus.ACTIVE or binding is None or not binding.open_id:
-                return
+            if user is None or user.status != UserStatus.ACTIVE:
+                raise PermanentJobError("feishu_recipient_inactive")
+            if binding is None or not binding.open_id:
+                raise PermanentJobError("feishu_recipient_unbound")
 
             interview = None
             if interview_id is not None:

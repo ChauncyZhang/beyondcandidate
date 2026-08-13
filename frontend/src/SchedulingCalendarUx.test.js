@@ -14,13 +14,15 @@ test("scheduling starts with candidate round and duration without guessing a tim
   assert.match(scheduleSource, /time:\s*record\?\.time\s*\|\|\s*""/);
 });
 
-test("availability is privacy safe in the UI and final save rechecks conflicts", () => {
+test("availability is privacy safe and final save uses one authoritative request", () => {
   assert.match(scheduleSource, /已有安排/);
   assert.match(scheduleSource, /可排/);
   assert.match(scheduleSource, /冲突/);
   assert.match(scheduleSource, /缓冲不足/);
   assert.match(scheduleSource, /无法确认/);
-  assert.match(scheduleSource, /await onCheckConflicts/);
+  assert.doesNotMatch(scheduleSource, /await onCheckConflicts/);
+  assert.match(scheduleSource, /await onSave\(record,/);
+  assert.match(scheduleSource, /allowSoftConflict: false/);
 });
 
 test("calendar owns complete range loading and full week navigation", () => {

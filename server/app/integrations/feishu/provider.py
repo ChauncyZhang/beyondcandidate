@@ -336,6 +336,121 @@ class HttpFeishuProvider:
             json={"attendees": attendees, "need_notification": True},
         )
 
+    def _list_attendees(
+        self,
+        credentials: FeishuCredentials,
+        event_id: str,
+    ) -> list[dict]:
+        attendees: list[dict] = []
+        page_token: str | None = None
+        seen_page_tokens: set[str] = set()
+        while True:
+            params = {"user_id_type": "open_id", "page_size": 100}
+            if page_token is not None:
+                params["page_token"] = page_token
+            payload = self._json(
+                "GET",
+                f"{OPEN_API_BASE}/calendar/v4/calendars/{credentials.calendar_id}/events/{event_id}/attendees",
+                params=params,
+                headers=self._headers(credentials),
+            )
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            page = data.get("items", [])
+            if not isinstance(page, list):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            if any(not isinstance(attendee, dict) for attendee in page):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            attendees.extend(page)
+
+            has_more = data.get("has_more", False)
+            if not isinstance(has_more, bool):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            if not has_more:
+                return attendees
+            next_page_token = data.get("page_token")
+            if (
+                not isinstance(next_page_token, str)
+                or not next_page_token
+                or next_page_token in seen_page_tokens
+            ):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            seen_page_tokens.add(next_page_token)
+            page_token = next_page_token
+
+    def _delete_attendees(
+        self,
+        credentials: FeishuCredentials,
+        event_id: str,
+        attendee_ids: list[str],
+    ) -> None:
+        for offset in range(0, len(attendee_ids), 500):
+            self._json(
+                "POST",
+                f"{OPEN_API_BASE}/calendar/v4/calendars/{credentials.calendar_id}/events/{event_id}/attendees/batch_delete",
+                params={"user_id_type": "open_id"},
+                headers=self._headers(credentials),
+                json={
+                    "attendee_ids": attendee_ids[offset : offset + 500],
+                    "need_notification": True,
+                },
+            )
+
+    def _reconcile_attendees(
+        self,
+        credentials: FeishuCredentials,
+        event_id: str,
+        open_ids: tuple[str, ...],
+        emails: tuple[str, ...],
+    ) -> None:
+        desired_open_ids = set(open_ids)
+        desired_emails = {email.casefold() for email in emails}
+        current_open_ids: set[str] = set()
+        current_emails: set[str] = set()
+        attendee_ids_to_delete: list[str] = []
+
+        for attendee in self._list_attendees(credentials, event_id):
+            if attendee.get("rsvp_status") == "removed":
+                continue
+            if attendee.get("is_organizer") is True:
+                continue
+            attendee_type = attendee.get("type")
+            if attendee_type == "user":
+                open_id = attendee.get("user_id")
+                if not isinstance(open_id, str) or not open_id:
+                    continue
+                current_open_ids.add(open_id)
+                should_delete = open_id not in desired_open_ids
+            elif attendee_type == "third_party":
+                email = attendee.get("third_party_email")
+                if not isinstance(email, str) or not email:
+                    continue
+                normalized_email = email.casefold()
+                current_emails.add(normalized_email)
+                should_delete = normalized_email not in desired_emails
+            else:
+                continue
+            attendee_id = attendee.get("attendee_id")
+            if should_delete:
+                if not isinstance(attendee_id, str) or not attendee_id:
+                    raise FeishuProviderError("feishu_response_invalid", retryable=False)
+                attendee_ids_to_delete.append(attendee_id)
+
+        missing_open_ids = tuple(
+            open_id for open_id in dict.fromkeys(open_ids) if open_id not in current_open_ids
+        )
+        missing_emails: list[str] = []
+        seen_emails = set(current_emails)
+        for email in emails:
+            normalized_email = email.casefold()
+            if normalized_email in seen_emails:
+                continue
+            seen_emails.add(normalized_email)
+            missing_emails.append(email)
+        self._delete_attendees(credentials, event_id, attendee_ids_to_delete)
+        self._add_attendees(credentials, event_id, missing_open_ids, tuple(missing_emails))
+
     def batch_freebusy(self, credentials: FeishuCredentials, request: FreeBusyRequest) -> tuple[BusyWindow, ...]:
         if len(request.user_ids) > MAX_FREEBUSY_USERS or request.time_max - request.time_min > MAX_FREEBUSY_RANGE:
             raise ValueError("freebusy provider request exceeds Feishu limits")
@@ -394,7 +509,7 @@ class HttpFeishuProvider:
         event_id = payload.get("data", {}).get("event", {}).get("event_id")
         if not isinstance(event_id, str) or not event_id:
             raise FeishuProviderError("feishu_response_invalid", retryable=False)
-        self._add_attendees(
+        self._reconcile_attendees(
             credentials,
             event_id,
             request.attendee_open_ids,
@@ -408,8 +523,7 @@ class HttpFeishuProvider:
 
     def update_event(self, credentials: FeishuCredentials, event_id: str, request: CalendarEventRequest, *, idempotency_key: str) -> CalendarEvent:
         self._json("PATCH", f"{OPEN_API_BASE}/calendar/v4/calendars/{credentials.calendar_id}/events/{event_id}", headers=self._headers(credentials), json=self._event_body(request))
-        # Attendee reconciliation is deliberately additive in the skeleton; ATS remains authoritative and retries are idempotent at the outbox boundary.
-        self._add_attendees(
+        self._reconcile_attendees(
             credentials,
             event_id,
             request.attendee_open_ids,

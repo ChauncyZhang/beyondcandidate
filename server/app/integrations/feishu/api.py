@@ -16,12 +16,17 @@ from server.app.identity.models import AuditLog, Organization, User, UserStatus
 from server.app.identity.service import InvalidSession
 from server.app.integrations.feishu.models import (
     FeishuIdentityBinding,
+    FeishuEventReceipt,
     FeishuOAuthState,
     FeishuOrganizationConfig,
 )
 from server.app.integrations.feishu.provider import FeishuCredentials, FeishuProviderError, chunk_freebusy_requests
 from server.app.integrations.feishu.service import hash_oauth_state, public_config
-from server.app.integrations.feishu.sync import mark_provider_change
+from server.app.integrations.feishu.webhook import (
+    FeishuWebhookConfig,
+    FeishuWebhookError,
+    verify_webhook,
+)
 
 
 router = APIRouter(prefix="/api/v1")
@@ -64,13 +69,6 @@ class FreeBusyInput(StrictModel):
     open_ids: list[str] = Field(min_length=1, max_length=100)
     time_min: datetime
     time_max: datetime
-
-
-class FeishuEventInput(StrictModel):
-    organization_id: UUID
-    verification_token: str = Field(min_length=1, max_length=4096)
-    external_event_id: str = Field(min_length=1, max_length=512)
-    provider_revision: str | None = Field(default=None, max_length=255)
 
 
 def _principal(request: Request):
@@ -175,32 +173,46 @@ def test_config(request: Request):
         return problem(request, 403, "forbidden", "The operation is not permitted.")
     now = request.app.state.identity_service.clock.current_time()
     with request.app.state.identity_store.sync_session() as db:
-        config = db.scalar(select(FeishuOrganizationConfig).where(FeishuOrganizationConfig.organization_id == principal.organization_id).with_for_update())
+        config = db.scalar(select(FeishuOrganizationConfig).where(FeishuOrganizationConfig.organization_id == principal.organization_id))
         if config is None or config.encrypted_app_secret is None:
             return problem(request, 409, "feishu_not_configured", "Feishu is not configured.")
         credentials = _credentials(request, config)
-        result = request.app.state.feishu_provider.test_connection(credentials)
-        safe_error_code = result.safe_error_code
-        if result.ok:
-            binding = db.scalar(
-                select(FeishuIdentityBinding).where(
-                    FeishuIdentityBinding.organization_id == principal.organization_id,
-                    FeishuIdentityBinding.user_id == principal.user_id,
-                )
+        config_id, config_version = config.id, config.version
+        binding = db.scalar(
+            select(FeishuIdentityBinding).where(
+                FeishuIdentityBinding.organization_id == principal.organization_id,
+                FeishuIdentityBinding.user_id == principal.user_id,
             )
-            if binding is None or not binding.open_id:
-                safe_error_code = "feishu_test_user_unbound"
-            else:
-                try:
-                    request.app.state.feishu_provider.send_message(
-                        credentials,
-                        binding.open_id,
-                        "BeyondCandidate 飞书招聘提醒测试成功。",
-                        idempotency_key=str(uuid4()),
-                    )
-                except FeishuProviderError as error:
-                    safe_error_code = error.safe_code
-        succeeded = result.ok and safe_error_code is None
+        )
+        binding_open_id = binding.open_id if binding is not None else None
+
+    result = request.app.state.feishu_provider.test_connection(credentials)
+    safe_error_code = result.safe_error_code
+    if result.ok:
+        if not binding_open_id:
+            safe_error_code = "feishu_test_user_unbound"
+        else:
+            try:
+                request.app.state.feishu_provider.send_message(
+                    credentials,
+                    binding_open_id,
+                    "BeyondCandidate 飞书招聘提醒测试成功。",
+                    idempotency_key=str(uuid4()),
+                )
+            except FeishuProviderError as error:
+                safe_error_code = error.safe_code
+    succeeded = result.ok and safe_error_code is None
+
+    with request.app.state.identity_store.sync_session() as db:
+        config = db.scalar(
+            select(FeishuOrganizationConfig).where(
+                FeishuOrganizationConfig.id == config_id,
+                FeishuOrganizationConfig.organization_id == principal.organization_id,
+                FeishuOrganizationConfig.version == config_version,
+            ).with_for_update()
+        )
+        if config is None:
+            return problem(request, 409, "feishu_config_changed", "Feishu configuration changed during the test.")
         config.last_test_status = "succeeded" if succeeded else "failed"
         config.last_tested_at = now
         config.last_test_error_code = safe_error_code
@@ -388,17 +400,94 @@ def freebusy(payload: FreeBusyInput, request: Request):
     return {"data": [{"open_id": item.user_id, "starts_at": item.starts_at.isoformat(), "ends_at": item.ends_at.isoformat()} for item in windows], "meta": {"degraded": False}}
 
 
-@router.post("/integrations/feishu/events", status_code=202)
-def provider_event(payload: FeishuEventInput, request: Request):
+def _webhook_configs(request: Request) -> list[FeishuWebhookConfig]:
     with request.app.state.identity_store.sync_session() as db:
-        config = db.scalar(select(FeishuOrganizationConfig).where(FeishuOrganizationConfig.organization_id == payload.organization_id))
-        if config is None or not config.enabled or config.encrypted_verification_token is None:
-            return problem(request, 403, "feishu_event_verification_failed", "The event could not be verified.")
-        expected = request.app.state.feishu_secret_cipher.decrypt(config.encrypted_verification_token)
-        if not secrets.compare_digest(expected, payload.verification_token):
-            return problem(request, 403, "feishu_event_verification_failed", "The event could not be verified.")
-        found = mark_provider_change(db, payload.organization_id, payload.external_event_id, provider_revision=payload.provider_revision)
+        configs = list(db.scalars(select(FeishuOrganizationConfig).where(
+            FeishuOrganizationConfig.enabled.is_(True),
+            FeishuOrganizationConfig.encrypted_verification_token.is_not(None),
+        )))
+        tenant_rows = list(db.execute(select(
+            FeishuIdentityBinding.organization_id,
+            FeishuIdentityBinding.tenant_key,
+        ).where(FeishuIdentityBinding.tenant_key.is_not(None))))
+    tenants: dict[UUID, set[str]] = {}
+    for organization_id, tenant_key in tenant_rows:
+        tenants.setdefault(organization_id, set()).add(tenant_key)
+    cipher = request.app.state.feishu_secret_cipher
+    return [
+        FeishuWebhookConfig(
+            config.organization_id,
+            config.app_id,
+            cipher.decrypt(config.encrypted_verification_token),
+            cipher.decrypt(config.encrypted_encrypt_key) if config.encrypted_encrypt_key else None,
+            frozenset(tenants.get(config.organization_id, set())),
+        )
+        for config in configs
+    ]
+
+
+@router.post("/integrations/feishu/events")
+async def provider_event(request: Request):
+    raw_body = await request.body()
+    try:
+        verified = verify_webhook(
+            raw_body,
+            {key.casefold(): value for key, value in request.headers.items()},
+            _webhook_configs(request),
+        )
+    except FeishuWebhookError:
+        return problem(request, 403, "feishu_event_verification_failed", "The event could not be verified.")
+
+    payload = verified.payload
+    if payload.get("type") == "url_verification":
+        challenge = payload.get("challenge")
+        if not isinstance(challenge, str) or not challenge or len(challenge) > 4096:
+            return problem(request, 422, "validation_failed", "The request is invalid.")
+        return {"challenge": challenge}
+
+    header = payload.get("header")
+    event = payload.get("event")
+    if payload.get("schema") != "2.0" or not isinstance(header, dict) or not isinstance(event, dict):
+        return problem(request, 422, "validation_failed", "The request is invalid.")
+    event_id = header.get("event_id")
+    event_type = header.get("event_type")
+    if not isinstance(event_id, str) or not event_id or len(event_id) > 512:
+        return problem(request, 422, "validation_failed", "The request is invalid.")
+    if not isinstance(event_type, str) or not event_type or len(event_type) > 255:
+        return problem(request, 422, "validation_failed", "The request is invalid.")
+
+    with request.app.state.identity_store.sync_session() as db:
+        try:
+            with db.begin_nested():
+                db.add(FeishuEventReceipt(
+                    organization_id=verified.organization_id,
+                    event_id=event_id,
+                    event_type=event_type,
+                ))
+                db.flush()
+        except IntegrityError:
+            return Response(status_code=200)
+
+        audit_type = "feishu.event_received"
+        metadata = {
+            "event_id": event_id,
+            "event_type": event_type,
+            "action": (
+                "incremental_sync_required"
+                if event_type == "calendar.calendar.event.changed_v4"
+                else "recorded"
+            ),
+        }
+        calendar_id = event.get("calendar_id")
+        if isinstance(calendar_id, str) and calendar_id:
+            metadata["calendar_id"] = calendar_id[:512]
+        db.add(AuditLog(
+            organization_id=verified.organization_id,
+            actor_user_id=None,
+            event_type=audit_type,
+            outcome="success",
+            trace_id=request.state.trace_id,
+            metadata_json=metadata,
+        ))
         db.commit()
-        if not found:
-            return Response(status_code=202)
-    return Response(status_code=202)
+    return Response(status_code=200)

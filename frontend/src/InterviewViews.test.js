@@ -119,6 +119,17 @@ test("the interview table treats calendar export as a secondary utility instead 
   assert.match(stylesSource, /\.interview-primary-action\s*\{[^}]*font-weight:\s*600/s);
 });
 
+test("the desktop interview table reserves space for long candidate names and action labels", () => {
+  assert.match(themeSource, /\.interview-table-head,[\s\S]*?min-width:\s*1360px;[\s\S]*?minmax\(260px,\s*1\.35fr\)[\s\S]*?156px;/);
+  assert.match(themeSource, /\.interview-table-row > \*,[\s\S]*?min-width:\s*0;/);
+  assert.match(themeSource, /\.interview-row-actions button\s*\{[^}]*width:\s*100%;[^}]*text-align:\s*left;/s);
+});
+
+test("unavailable schedule slots are gray and visually distinct from available green slots", () => {
+  assert.match(themeSource, /\.schedule-slot-grid button\.available\s*\{[^}]*border-color:\s*#16884a;[^}]*background:\s*#dff4e7;/s);
+  assert.match(themeSource, /\.schedule-slot-grid button\.unavailable:disabled\s*\{[^}]*border-color:\s*#d3d5d9;[^}]*background:\s*#ececef;[^}]*opacity:\s*1;/s);
+});
+
 test("the candidate cell is an explicit keyboard-operable materials and feedback entry", () => {
   assert.match(source, /<button className="interview-person" type="button" aria-label=\{`查看\$\{record\.candidate\}的面试材料与评价`\} onClick=\{\(\) => onFeedback\(record\)\}>/);
   assert.match(stylesSource, /\.interview-person\s*\{[^}]*cursor:\s*pointer/s);

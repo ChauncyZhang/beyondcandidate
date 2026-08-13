@@ -73,7 +73,7 @@ after(async () => {
   await vite?.close();
 });
 
-async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = false, roles = ["recruiting_admin"], workbench = null, candidates = null, approvals = null, onRequest } = {}) {
+async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = false, roles = ["recruiting_admin"], workbench = null, candidates = null, interviews = null, interviewSaveResponse = null, participantOptions = null, availability = null, approvals = null, onRequest } = {}) {
   const context = await browser.newContext({ viewport });
   let departmentDetail = {
     ...departments[0],
@@ -105,6 +105,13 @@ async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = f
     if (pathname === "/api/v1/settings/workflow-templates") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [standardWorkflowTemplate] }) });
     if (pathname === "/api/v1/jobs") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [], meta: { departments: [], owners: [], status_counts: {}, next_cursor: null } }) });
     if (pathname === "/api/v1/candidates" && candidates) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: candidates, meta: { limit: 50, next_cursor: null, owners: [] } }) });
+    if (pathname === "/api/v1/interviews" && interviews) {
+      if (request.method() === "POST" && interviewSaveResponse) return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ data: typeof interviewSaveResponse === "function" ? interviewSaveResponse(request) : interviewSaveResponse }) });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: interviews, meta: { count: interviews.length, next_cursor: null } }) });
+    }
+    if (pathname === "/api/v1/me/tasks" && interviews) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [] }) });
+    if (/^\/api\/v1\/applications\/[^/]+\/interview-participant-options$/.test(pathname) && participantOptions) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: participantOptions }) });
+    if (pathname === "/api/v1/interview-availability" && availability) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: typeof availability === "function" ? availability(request.url()) : availability }) });
     if (pathname === "/api/v1/workbench" && workbench) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: workbench }) });
     if (pathname === "/api/v1/offer-approvals/pending" && approvals) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: approvals }) });
     if (/^\/api\/v1\/notifications\/workbench\/[^/]+\/read$/.test(pathname) && request.method() === "PUT") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { application_id: pathname.split("/")[5], version: request.postDataJSON().version, read_at: "2026-07-22T01:00:00Z" } }) });
@@ -365,5 +372,99 @@ test("candidate list keeps long stage labels separate from AI scores", { timeout
     assert.ok(stageBox && scoreBox);
     assert.ok(stageBox.x + stageBox.width + 12 <= scoreBox.x, `stage ends at ${stageBox.x + stageBox.width}, score starts at ${scoreBox.x}`);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth), true);
+  } finally { await context.close(); }
+});
+
+test("interview list keeps long content inside its desktop columns", { timeout: 60_000 }, async () => {
+  const interviews = [{
+    id: "11111111-1111-4111-8111-111111111111",
+    application_id: "22222222-2222-4222-8222-222222222222",
+    candidate: { id: "33333333-3333-4333-8333-333333333333", display_name: "【布局压力测试职位_超长中英文岗位名称_测试城市】虚构候选人甲", current_title: "虚构高级测试职位" },
+    job: { id: notificationJobId, title: "嵌入式软件负责人 / 嵌入式软件 Leader" },
+    round_name: "一面",
+    method: "onsite",
+    timezone: "Asia/Shanghai",
+    starts_at: "2026-08-10T07:00:00Z",
+    ends_at: "2026-08-10T08:00:00Z",
+    location: "深圳研发中心",
+    status: "scheduled",
+    notification_status: "pending",
+    participants: [{ user_id: users[0].id, display_name: "Luna", role: "interviewer", required_feedback: true }],
+    version: 1,
+  }];
+  const { context, page } = await openPage({ viewport: { width: 1640, height: 760 }, interviews });
+  try {
+    await page.goto(`${baseUrl}interviews`);
+    const row = page.locator(".interview-table-row").first();
+    await row.waitFor();
+    const cells = row.locator(":scope > *");
+    assert.equal(await cells.count(), 7);
+    const delivery = await cells.nth(5).boundingBox();
+    const actions = await cells.nth(6).boundingBox();
+    assert.ok(delivery && actions);
+    assert.ok(delivery.x + delivery.width + 8 <= actions.x, `delivery ends at ${delivery.x + delivery.width}, actions start at ${actions.x}`);
+    assert.equal(await row.locator(".interview-person").evaluate((element) => element.scrollWidth <= element.clientWidth), true);
+    assert.equal(await row.locator(".interview-row-actions").evaluate((element) => element.scrollWidth <= element.clientWidth), true);
+  } finally { await context.close(); }
+});
+
+test("unavailable interview slots render gray while selectable slots render green", { timeout: 60_000 }, async () => {
+  const applicationId = "22222222-2222-4222-8222-222222222299";
+  const candidateId = "33333333-3333-4333-8333-333333333299";
+  const candidates = [{
+    id: candidateId,
+    display_name: "排期测试候选人",
+    current_title: "AI 工程师",
+    location: "深圳",
+    application: { id: applicationId, job_id: notificationJobId, job_status: "open", job_title: "AI 工程师", stage: "interview_pending", next_interview_round: "一面", source: "本地上传" },
+  }];
+  const participantOptions = [{ id: users[0].id, display_name: "Admin", roles: ["interviewer"] }];
+  const requests = [];
+  const availability = (url) => {
+    const from = new Date(new URL(url).searchParams.get("from"));
+    const busyStart = new Date(from.getTime() + 9 * 60 * 60 * 1000);
+    const busyEnd = new Date(busyStart.getTime() + 60 * 60 * 1000);
+    return { participants: [{ participant_id: users[0].id, status: "confirmed", busy: [{ starts_at: busyStart.toISOString(), ends_at: busyEnd.toISOString() }] }], buffer_minutes: 15 };
+  };
+  const interviewSaveResponse = {
+    id: "11111111-1111-4111-8111-111111111199",
+    application_id: applicationId,
+    candidate: { id: candidateId, display_name: "排期测试候选人", current_title: "AI 工程师" },
+    job: { id: notificationJobId, title: "AI 工程师" },
+    round_name: "一面",
+    method: "video",
+    timezone: "Asia/Shanghai",
+    starts_at: "2026-08-17T01:00:00Z",
+    ends_at: "2026-08-17T02:00:00Z",
+    meeting_url: "https://meeting.example.test/one",
+    status: "scheduled",
+    notification_status: "pending",
+    participants: [{ user_id: users[0].id, display_name: "Admin", role: "interviewer", required_feedback: true }],
+    version: 1,
+  };
+  const { context, page } = await openPage({ viewport: { width: 1440, height: 900 }, candidates, interviews: [], interviewSaveResponse, participantOptions, availability, onRequest(pathname, request) { requests.push(`${request.method()} ${pathname}`); } });
+  try {
+    await page.goto(`${baseUrl}interviews/new?candidate=${candidateId}`);
+    await page.getByRole("heading", { name: "候选人与面试设置", exact: true }).waitFor();
+    await page.getByRole("button", { name: /下一步：选择面试官/ }).click();
+    await page.locator(".interviewer-picker label").filter({ hasText: "Admin" }).click();
+    await page.getByRole("button", { name: "下一周", exact: true }).click();
+    await page.locator(".availability-timeline .busy").waitFor();
+    await page.getByRole("button", { name: /下一步：选择日期时间/ }).click();
+    const availableSlot = page.locator(".schedule-slot-grid button.available:not(.unavailable)").first();
+    const unavailableSlot = page.locator(".schedule-slot-grid button.unavailable").first();
+    await availableSlot.waitFor();
+    await unavailableSlot.waitFor();
+    const availableColor = await availableSlot.evaluate((element) => getComputedStyle(element).backgroundColor);
+    const unavailableColor = await unavailableSlot.evaluate((element) => getComputedStyle(element).backgroundColor);
+    assert.equal(availableColor, "rgb(223, 244, 231)");
+    assert.equal(unavailableColor, "rgb(236, 236, 239)");
+    assert.equal(await unavailableSlot.isDisabled(), true);
+    await availableSlot.click();
+    await page.getByLabel("会议链接", { exact: true }).fill("https://meeting.example.test/one");
+    await page.getByRole("button", { name: "确认并保存", exact: true }).click();
+    await page.getByRole("heading", { name: "面试安排", exact: true }).waitFor();
+    assert.equal(requests.filter((item) => item === "POST /api/v1/interviews").length, 1);
+    assert.equal(requests.filter((item) => item === "POST /api/v1/interview-conflicts").length, 0);
   } finally { await context.close(); }
 });

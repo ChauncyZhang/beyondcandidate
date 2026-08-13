@@ -143,9 +143,9 @@
 .interview-table { border-top-color: var(--line); }
 .interview-table-head,
 .interview-table-row {
-  min-width: 1210px;
-  grid-template-columns: minmax(150px, 1.05fr) minmax(135px, .9fr) minmax(170px, 1.12fr) minmax(145px, .95fr) 112px 228px 124px;
-  gap: 12px;
+  min-width: 1360px;
+  grid-template-columns: minmax(260px, 1.35fr) minmax(170px, .9fr) minmax(190px, 1fr) minmax(150px, .8fr) 116px 230px 156px;
+  gap: 16px;
 }
 
 .interview-table-head {
@@ -169,6 +169,11 @@
 .interview-table-row:hover { background: #fafafa; }
 .interview-table-row strong { color: var(--ink); font-size: 14px; font-weight: 600; }
 .interview-table-row small { margin-top: 4px; color: var(--muted); font-size: 14px; }
+.interview-table-row > *,
+.interview-table-head > * { min-width: 0; }
+.interview-table-row strong,
+.interview-table-row small,
+.interview-row-actions button { overflow-wrap: anywhere; }
 
 .interview-person {
   min-height: 44px;
@@ -200,6 +205,7 @@
 .interview-status.danger { color: var(--red); background: var(--red-soft); }
 .interview-state-stack,
 .interview-row-actions { gap: 6px; }
+.interview-row-actions { align-items: stretch; }
 
 .interview-email-delivery,
 .interview-secondary-state {
@@ -260,6 +266,7 @@
 }
 
 .interview-row-actions .interview-primary-action { font-weight: 700; }
+.interview-row-actions button { width: 100%; justify-content: flex-start; text-align: left; line-height: 1.35; }
 .interview-calendar-action { margin-top: 4px; color: var(--ink-secondary); }
 .interview-row-actions button.danger-link { color: var(--red); }
 
@@ -451,10 +458,17 @@
 .schedule-slot-grid > section > header span { color: var(--muted); font-size: 14px; }
 .schedule-slot-grid button { min-height: 46px; border-radius: 7px; padding: 0 8px; font-size: 14px; }
 .schedule-slot-grid button span { font-size: 14px; }
-.schedule-slot-grid button.available { border-color: #99d1b3; color: var(--green); background: var(--green-soft); }
+.schedule-slot-grid button.available { border-color: #16884a; color: #0f6938; background: #dff4e7; }
 .schedule-slot-grid button.conflict { color: var(--red); background: var(--red-soft); }
 .schedule-slot-grid button.buffer { color: var(--orange); background: var(--orange-soft); }
 .schedule-slot-grid button.unknown { color: var(--muted); background: #f2f2f4; }
+.schedule-slot-grid button.unavailable,
+.schedule-slot-grid button.unavailable:disabled {
+  border-color: #d3d5d9;
+  color: #777a80;
+  background: #ececef;
+  opacity: 1;
+}
 
 .schedule-summary { border-color: var(--line); border-radius: var(--radius); overflow: hidden; }
 .schedule-summary > div { border-color: var(--line); }

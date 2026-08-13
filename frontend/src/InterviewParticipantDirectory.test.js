@@ -12,6 +12,7 @@ test("schedule workspace loads participant options for the selected application"
   assert.doesNotMatch(source, /records\.flatMap\(\(record\) => record\.participants/);
 });
 
-test("new schedule conflict checks carry the selected application identity", () => {
-  assert.match(scheduleSource, /applicationId: candidate\?\.applicationId \|\| candidate\?\.application\?\.id \|\| record\?\.applicationId \|\| ""/);
+test("the authoritative schedule save carries the selected application identity", () => {
+  assert.match(scheduleSource, /const saved = await onSave\(record, \{ \.\.\.form, applicationId: candidate\?\.applicationId \|\| candidate\?\.application\?\.id \|\| ""/);
+  assert.doesNotMatch(scheduleSource, /await onCheckConflicts/);
 });
