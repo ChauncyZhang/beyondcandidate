@@ -469,6 +469,31 @@
   background: #ececef;
   opacity: 1;
 }
+.schedule-slot-grid button.conflict.unavailable:disabled {
+  border-color: #e1a0a8;
+  color: #9f2634;
+  background: #fde7e9;
+}
+.schedule-slot-grid button.buffer.unavailable:disabled {
+  border-color: #e5c68f;
+  color: #8a5816;
+  background: #fff2d8;
+}
+.schedule-availability-state:empty { display: none; }
+.schedule-availability-state p {
+  min-height: 120px;
+  margin: 0 16px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--muted);
+  background: #fafafa;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.schedule-availability-state p[role="alert"] { color: var(--red); }
+.schedule-availability-state .button { margin-left: 8px; }
 
 .schedule-summary { border-color: var(--line); border-radius: var(--radius); overflow: hidden; }
 .schedule-summary > div { border-color: var(--line); }

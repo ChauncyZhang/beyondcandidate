@@ -111,7 +111,7 @@ async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = f
     }
     if (pathname === "/api/v1/me/tasks" && interviews) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [] }) });
     if (/^\/api\/v1\/applications\/[^/]+\/interview-participant-options$/.test(pathname) && participantOptions) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: participantOptions }) });
-    if (pathname === "/api/v1/interview-availability" && availability) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: typeof availability === "function" ? availability(request.url()) : availability }) });
+    if (pathname === "/api/v1/interview-availability" && availability) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: typeof availability === "function" ? await availability(request.url()) : availability }) });
     if (pathname === "/api/v1/workbench" && workbench) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: workbench }) });
     if (pathname === "/api/v1/offer-approvals/pending" && approvals) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: approvals }) });
     if (/^\/api\/v1\/notifications\/workbench\/[^/]+\/read$/.test(pathname) && request.method() === "PUT") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { application_id: pathname.split("/")[5], version: request.postDataJSON().version, read_at: "2026-07-22T01:00:00Z" } }) });
@@ -429,7 +429,7 @@ test("interview list keeps delivery and task columns separate with desktop horiz
   } finally { await context.close(); }
 });
 
-test("unavailable interview slots render gray while selectable slots render green", { timeout: 60_000 }, async () => {
+test("date selection loads availability and renders occupied slots red", { timeout: 60_000 }, async () => {
   const applicationId = "22222222-2222-4222-8222-222222222299";
   const candidateId = "33333333-3333-4333-8333-333333333299";
   const candidates = [{
@@ -469,23 +469,79 @@ test("unavailable interview slots render gray while selectable slots render gree
     await page.getByRole("heading", { name: "候选人与面试设置", exact: true }).waitFor();
     await page.getByRole("button", { name: /下一步：选择面试官/ }).click();
     await page.locator(".interviewer-picker label").filter({ hasText: "Admin" }).click();
-    await page.getByRole("button", { name: "下一周", exact: true }).click();
-    await page.locator(".availability-timeline .busy").waitFor();
+    assert.equal(await page.getByRole("button", { name: "查看所选周忙闲", exact: true }).count(), 0);
     await page.getByRole("button", { name: /下一步：选择日期时间/ }).click();
+    await page.locator(".schedule-slot-grid").waitFor();
+    await page.getByRole("button", { name: "下一周", exact: true }).click();
+    await page.locator(".schedule-slot-grid").waitFor();
     const availableSlot = page.locator(".schedule-slot-grid button.available:not(.unavailable)").first();
-    const unavailableSlot = page.locator(".schedule-slot-grid button.unavailable").first();
+    const occupiedSlot = page.locator(".schedule-slot-grid button.conflict.unavailable").first();
     await availableSlot.waitFor();
-    await unavailableSlot.waitFor();
+    await occupiedSlot.waitFor();
     const availableColor = await availableSlot.evaluate((element) => getComputedStyle(element).backgroundColor);
-    const unavailableColor = await unavailableSlot.evaluate((element) => getComputedStyle(element).backgroundColor);
+    const occupiedColor = await occupiedSlot.evaluate((element) => getComputedStyle(element).backgroundColor);
     assert.equal(availableColor, "rgb(223, 244, 231)");
-    assert.equal(unavailableColor, "rgb(236, 236, 239)");
-    assert.equal(await unavailableSlot.isDisabled(), true);
+    assert.equal(occupiedColor, "rgb(253, 231, 233)");
+    assert.equal(await occupiedSlot.getByText("已占用", { exact: true }).count(), 1);
+    assert.equal(await occupiedSlot.isDisabled(), true);
+    assert.equal(requests.filter((item) => item.startsWith("GET /api/v1/interview-availability")).length, 2);
     await availableSlot.click();
     await page.getByLabel("会议链接", { exact: true }).fill("https://meeting.example.test/one");
     await page.getByRole("button", { name: "确认并保存", exact: true }).click();
     await page.getByRole("heading", { name: "面试安排", exact: true }).waitFor();
     assert.equal(requests.filter((item) => item === "POST /api/v1/interviews").length, 1);
     assert.equal(requests.filter((item) => item === "POST /api/v1/interview-conflicts").length, 0);
+  } finally { await context.close(); }
+});
+
+test("a stale availability response cannot replace the current interviewers", { timeout: 60_000 }, async () => {
+  const applicationId = "22222222-2222-4222-8222-222222222298";
+  const candidateId = "33333333-3333-4333-8333-333333333298";
+  const otherInterviewerId = "44444444-4444-4444-8444-444444444498";
+  const candidates = [{
+    id: candidateId,
+    display_name: "竞态测试候选人",
+    current_title: "AI 工程师",
+    application: { id: applicationId, job_id: notificationJobId, job_status: "open", job_title: "AI 工程师", stage: "interview_pending", next_interview_round: "一面", source: "本地上传" },
+  }];
+  const participantOptions = [
+    { id: users[0].id, display_name: "Admin", roles: ["interviewer"] },
+    { id: otherInterviewerId, display_name: "Other", roles: ["interviewer"] },
+  ];
+  let resolveFirstRequest;
+  let requestCount = 0;
+  const availability = async (url) => {
+    requestCount += 1;
+    const params = new URL(url).searchParams;
+    const participantId = params.get("participant_ids");
+    if (requestCount === 1) {
+      await new Promise((resolve) => { resolveFirstRequest = resolve; });
+      const from = new Date(params.get("from"));
+      return { participants: [{ participant_id: participantId, status: "confirmed", busy: [{ starts_at: from.toISOString(), ends_at: new Date(from.getTime() + 60 * 60 * 1000).toISOString() }] }], buffer_minutes: 15 };
+    }
+    return { participants: [{ participant_id: participantId, status: "unknown", busy: [] }], buffer_minutes: 15 };
+  };
+  const { context, page } = await openPage({ viewport: { width: 1440, height: 900 }, candidates, interviews: [], participantOptions, availability });
+  try {
+    await page.goto(`${baseUrl}interviews/new?candidate=${candidateId}`);
+    await page.getByRole("button", { name: /下一步：选择面试官/ }).click();
+    await page.locator(".interviewer-picker label").filter({ hasText: "Admin" }).click();
+    const firstResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/v1/interview-availability" && url.searchParams.get("participant_ids") === users[0].id;
+    });
+    await page.getByRole("button", { name: /下一步：选择日期时间/ }).click();
+    await page.getByText("正在读取所选面试官的日历", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "上一步", exact: true }).click();
+    await page.locator(".interviewer-picker label").filter({ hasText: "Admin" }).click();
+    await page.locator(".interviewer-picker label").filter({ hasText: "Other" }).click();
+    await page.getByRole("button", { name: /下一步：选择日期时间/ }).click();
+    await page.locator(".schedule-slot-grid button.unconfirmed").first().waitFor();
+    resolveFirstRequest();
+    const firstResponse = await firstResponsePromise;
+    await firstResponse.finished();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.locator(".schedule-slot-grid button.unconfirmed").count(), 133);
+    assert.equal(await page.locator(".schedule-slot-grid button.conflict").count(), 0);
   } finally { await context.close(); }
 });

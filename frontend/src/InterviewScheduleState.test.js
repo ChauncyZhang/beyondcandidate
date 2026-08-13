@@ -27,7 +27,7 @@ test("hard conflicts block while soft conflicts require an explicit override", (
 test("unconfirmed Feishu availability remains selectable while known busy windows still block", () => {
   assert.match(source, /return unconfirmed \? "unconfirmed" : "available"/);
   assert.match(source, /\["available", "unconfirmed"\]\.includes/);
-  assert.match(source, /飞书未绑定或查询失败，可继续安排/);
+  assert.match(source, /可排·飞书未确认/);
 });
 
 test("saved schedule message distinguishes queued email from manual candidate notice", () => {

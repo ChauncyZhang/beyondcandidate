@@ -8,14 +8,16 @@ const viewsSource = readFileSync(new URL("./InterviewViews.jsx", import.meta.url
 
 test("scheduling starts with candidate round and duration without guessing a time", () => {
   assert.match(scheduleSource, /候选人与轮次/);
-  assert.match(scheduleSource, /选择面试官与忙闲/);
+  assert.match(scheduleSource, /选择面试官/);
   assert.match(scheduleSource, /选择日期时间/);
   assert.match(scheduleSource, /确认邀请/);
   assert.match(scheduleSource, /time:\s*record\?\.time\s*\|\|\s*""/);
 });
 
 test("availability is privacy safe and final save uses one authoritative request", () => {
-  assert.match(scheduleSource, /已有安排/);
+  assert.doesNotMatch(scheduleSource, /查看所选周忙闲/);
+  assert.match(scheduleSource, /void loadAvailability\(\)/);
+  assert.match(scheduleSource, /已占用/);
   assert.match(scheduleSource, /可排/);
   assert.match(scheduleSource, /冲突/);
   assert.match(scheduleSource, /缓冲不足/);
