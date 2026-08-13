@@ -167,7 +167,7 @@ def test_openapi_and_queue_contract_are_exact(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("role", "owns_candidate", "expected"),
     [
-        ("recruiter", True, 201),
+        ("recruiter", True, 404),
         ("recruiting_admin", False, 201),
         ("recruiter", False, 404),
         ("system_admin", True, 404),
@@ -194,7 +194,7 @@ def test_request_authorization_is_non_enumerating_for_every_role(
 
 def test_request_is_replay_safe_conflict_safe_and_public_projection_is_recursive_safe(tmp_path) -> None:
     app = make_app(tmp_path)
-    recruiter_id = seed_user(app, "recruiter", "requester@deletion.test")
+    recruiter_id = seed_user(app, "recruiting_admin", "requester@deletion.test")
     seed_user(app, "system_admin", "redaction-system@deletion.test")
     candidate_id = candidate_for(app, recruiter_id)
     with app.state.identity_store.sync_session() as db:
@@ -339,7 +339,7 @@ def test_request_is_replay_safe_conflict_safe_and_public_projection_is_recursive
 
 def test_create_idempotency_key_is_bound_to_candidate(tmp_path) -> None:
     app = make_app(tmp_path)
-    recruiter_id = seed_user(app, "recruiter", "bound@deletion.test")
+    recruiter_id = seed_user(app, "recruiting_admin", "bound@deletion.test")
     first_id = candidate_for(app, recruiter_id)
     second_id = candidate_for(app, recruiter_id)
     with TestClient(app) as client:
@@ -354,8 +354,8 @@ def test_create_idempotency_key_is_bound_to_candidate(tmp_path) -> None:
 
 def test_list_read_cursor_and_requester_scope(tmp_path) -> None:
     app = make_app(tmp_path)
-    requester_id = seed_user(app, "recruiter", "reader@deletion.test")
-    other_id = seed_user(app, "recruiter", "other@deletion.test")
+    requester_id = seed_user(app, "recruiting_admin", "reader@deletion.test")
+    other_id = seed_user(app, "recruiting_admin", "other@deletion.test")
     admin_id = seed_user(app, "system_admin", "system@deletion.test")
     candidate_id = candidate_for(app, requester_id)
     requester_candidate_2 = candidate_for(app, requester_id)
@@ -417,7 +417,7 @@ def test_list_read_cursor_and_requester_scope(tmp_path) -> None:
 
 def test_approval_requires_current_preconditions_and_enqueues_once(tmp_path) -> None:
     app = make_app(tmp_path)
-    requester_id = seed_user(app, "recruiter", "approval-requester@deletion.test")
+    requester_id = seed_user(app, "recruiting_admin", "approval-requester@deletion.test")
     seed_user(app, "system_admin", "approver@deletion.test")
     candidate_id = candidate_for(app, requester_id)
     with TestClient(app) as client:
@@ -480,7 +480,7 @@ def test_active_applications_require_explicit_termination_and_are_withdrawn_atom
     tmp_path,
 ) -> None:
     app = make_app(tmp_path)
-    requester_id = seed_user(app, "recruiter", "active-requester@deletion.test")
+    requester_id = seed_user(app, "recruiting_admin", "active-requester@deletion.test")
     seed_user(app, "system_admin", "active-approver@deletion.test")
     candidate_id = candidate_for(app, requester_id)
     with app.state.identity_store.sync_session() as db:
@@ -594,7 +594,7 @@ def test_active_applications_require_explicit_termination_and_are_withdrawn_atom
 
 def test_stale_manifest_refreshes_without_enqueue_and_increments_version(tmp_path) -> None:
     app = make_app(tmp_path)
-    requester_id = seed_user(app, "recruiter", "stale-requester@deletion.test")
+    requester_id = seed_user(app, "recruiting_admin", "stale-requester@deletion.test")
     seed_user(app, "system_admin", "stale-approver@deletion.test")
     candidate_id = candidate_for(app, requester_id)
     with TestClient(app) as client:
@@ -618,7 +618,7 @@ def test_stale_manifest_refreshes_without_enqueue_and_increments_version(tmp_pat
 
 def test_removed_resume_stale_refresh_deletes_only_unstarted_artifacts(tmp_path) -> None:
     app = make_app(tmp_path)
-    requester_id = seed_user(app, "recruiter", "artifact-requester@deletion.test")
+    requester_id = seed_user(app, "recruiting_admin", "artifact-requester@deletion.test")
     seed_user(app, "system_admin", "artifact-approver@deletion.test")
     candidate_id = candidate_for(app, requester_id)
     with app.state.identity_store.sync_session() as db:
@@ -706,9 +706,8 @@ def test_legal_hold_release_and_governance_status_redact_reason_by_role(
         )
         db.commit()
     with TestClient(app) as client:
-        recruiter = login(client, "hold-reader@deletion.test")
-        created = request_deletion(client, recruiter, candidate_id)
         admin = login(client, "hold-admin@deletion.test")
+        created = request_deletion(client, admin, candidate_id)
         placed = client.post(
             f"/api/v1/candidates/{candidate_id}/legal-holds",
             json={"reason": "Privileged litigation detail"},
@@ -755,9 +754,8 @@ def test_legal_hold_release_and_governance_status_redact_reason_by_role(
                 f"/api/v1/candidates/{candidate_id}/governance-status",
                 headers=system,
             )
-        assert admin_status.status_code == recruiter_status.status_code == 200
+        assert admin_status.status_code == 200
         assert admin_status.headers["Cache-Control"] == "no-store"
-        assert recruiter_status.headers["Cache-Control"] == "no-store"
         assert admin_status.json()["data"] == {
             "deletion_status": "requested",
             "deletion_request_id": created.json()["data"]["id"],
@@ -766,16 +764,8 @@ def test_legal_hold_release_and_governance_status_redact_reason_by_role(
             "legal_hold_id": hold_id,
             "legal_hold_version": 1,
         }
-        assert "legal_hold_reason" not in recruiter_status.json()["data"]
-        assert set(recruiter_status.json()["data"]) == {
-            "deletion_status", "deletion_request_id", "legal_hold_active"
-        }
-        assert manager_status.status_code == 200
-        assert manager_status.json()["data"] == {
-            "deletion_status": "requested",
-            "deletion_request_id": created.json()["data"]["id"],
-            "legal_hold_active": True,
-        }
+        assert_problem(recruiter_status, 404, "resource_not_found")
+        assert_problem(manager_status, 404, "resource_not_found")
         assert_problem(system_status, 404, "resource_not_found")
         assert_problem(unknown_status, 404, "resource_not_found")
         admin = login(client, "hold-admin@deletion.test")
@@ -849,15 +839,15 @@ def test_legal_hold_release_and_governance_status_redact_reason_by_role(
         denied_status_events = [
             event for event in status_events if event.outcome == "denied"
         ]
-        assert len(success_status_events) == 4
-        assert {event.actor_user_id for event in success_status_events} == {
-            admin_id,
+        assert len(success_status_events) == 2
+        assert {event.actor_user_id for event in success_status_events} == {admin_id}
+        assert all(event.metadata_json == {} for event in success_status_events)
+        assert len(denied_status_events) == 4
+        assert {event.actor_user_id for event in denied_status_events} == {
             recruiter_id,
             manager_id,
+            system_id,
         }
-        assert all(event.metadata_json == {} for event in success_status_events)
-        assert len(denied_status_events) == 2
-        assert {event.actor_user_id for event in denied_status_events} == {system_id}
         assert all(
             event.metadata_json == {"safe_error_code": "resource_not_found"}
             for event in denied_status_events
@@ -870,7 +860,7 @@ def test_legal_hold_release_and_governance_status_redact_reason_by_role(
 
 def test_audit_metadata_is_safe_and_expired_idempotency_can_be_reused(tmp_path) -> None:
     app = make_app(tmp_path)
-    recruiter_id = seed_user(app, "recruiter", "audit-requester@deletion.test")
+    recruiter_id = seed_user(app, "recruiting_admin", "audit-requester@deletion.test")
     candidate_id = candidate_for(app, recruiter_id)
     with TestClient(app) as client:
         headers = login(client, "audit-requester@deletion.test")
@@ -895,7 +885,7 @@ def test_audit_metadata_is_safe_and_expired_idempotency_can_be_reused(tmp_path) 
 
 def test_requester_cannot_self_approve_after_gaining_system_role(tmp_path) -> None:
     app = make_app(tmp_path)
-    requester_id = seed_user(app, "recruiter", "self-approver@deletion.test")
+    requester_id = seed_user(app, "recruiting_admin", "self-approver@deletion.test")
     candidate_id = candidate_for(app, requester_id)
     with TestClient(app) as client:
         requester = login(client, "self-approver@deletion.test")
@@ -915,7 +905,7 @@ def test_requester_cannot_self_approve_after_gaining_system_role(tmp_path) -> No
 
 def test_hold_fails_approved_request_cancels_job_and_rejects_executing(tmp_path) -> None:
     app = make_app(tmp_path)
-    requester_id = seed_user(app, "recruiter", "hold-race-requester@deletion.test")
+    requester_id = seed_user(app, "recruiting_admin", "hold-race-requester@deletion.test")
     seed_user(app, "system_admin", "hold-race-system@deletion.test")
     seed_user(app, "recruiting_admin", "hold-race-admin@deletion.test")
     candidate_id = candidate_for(app, requester_id)
@@ -941,7 +931,7 @@ def test_hold_fails_approved_request_cancels_job_and_rejects_executing(tmp_path)
     second_path = tmp_path / "second"
     second_path.mkdir()
     second_app = make_app(second_path)
-    requester_id = seed_user(second_app, "recruiter", "executing-requester@deletion.test")
+    requester_id = seed_user(second_app, "recruiting_admin", "executing-requester@deletion.test")
     seed_user(second_app, "recruiting_admin", "executing-admin@deletion.test")
     candidate_id = candidate_for(second_app, requester_id)
     with TestClient(second_app) as client:
@@ -967,7 +957,7 @@ def test_audit_and_queue_failures_roll_back_request_job_and_idempotency(
     tmp_path, monkeypatch
 ) -> None:
     app = make_app(tmp_path)
-    requester_id = seed_user(app, "recruiter", "rollback-requester@deletion.test")
+    requester_id = seed_user(app, "recruiting_admin", "rollback-requester@deletion.test")
     candidate_id = candidate_for(app, requester_id)
 
     def fail_audit(*args, **kwargs):
@@ -1015,7 +1005,7 @@ def test_authenticated_route_rejections_are_audited_and_audit_failure_is_503(
     tmp_path, monkeypatch
 ) -> None:
     app = make_app(tmp_path)
-    requester_id = seed_user(app, "recruiter", "route-audit@deletion.test")
+    requester_id = seed_user(app, "recruiting_admin", "route-audit@deletion.test")
     candidate_id = candidate_for(app, requester_id)
     with TestClient(app) as client:
         headers = login(client, "route-audit@deletion.test")

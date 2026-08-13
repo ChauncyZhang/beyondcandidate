@@ -190,12 +190,12 @@ def test_llm_audit_events_are_explicitly_system_and_governance_keys_are_domain_s
 def test_retention_read_roles_defaults_and_fail_closed_denials(tmp_path) -> None:
     app = make_app(tmp_path)
     allowed = {}
-    for role in ("system_admin", "recruiting_admin", "recruiter"):
+    for role in ("system_admin", "recruiting_admin"):
         user_id = seed_user(app, role, f"{role}@governance.test")
         allowed[role] = user_id
     denied = [
         seed_user(app, role, f"{role}@governance.test")
-        for role in ("hiring_manager", "interviewer")
+        for role in ("recruiter", "hiring_manager", "interviewer")
     ]
 
     with TestClient(app) as client:

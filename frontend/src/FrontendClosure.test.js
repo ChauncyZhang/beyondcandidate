@@ -375,7 +375,7 @@ test("candidate list keeps long stage labels separate from AI scores", { timeout
   } finally { await context.close(); }
 });
 
-test("interview list keeps long content inside its desktop columns", { timeout: 60_000 }, async () => {
+test("interview list keeps delivery and task columns separate with desktop horizontal scrolling", { timeout: 60_000 }, async () => {
   const interviews = [{
     id: "11111111-1111-4111-8111-111111111111",
     application_id: "22222222-2222-4222-8222-222222222222",
@@ -392,11 +392,21 @@ test("interview list keeps long content inside its desktop columns", { timeout: 
     participants: [{ user_id: users[0].id, display_name: "Luna", role: "interviewer", required_feedback: true }],
     version: 1,
   }];
-  const { context, page } = await openPage({ viewport: { width: 1640, height: 760 }, interviews });
+  const { context, page } = await openPage({ viewport: { width: 1280, height: 760 }, interviews });
   try {
     await page.goto(`${baseUrl}interviews`);
     const row = page.locator(".interview-table-row").first();
     await row.waitFor();
+    const table = page.locator(".interview-table");
+    const layout = await row.evaluate((element) => ({
+      minWidth: getComputedStyle(element).minWidth,
+      columns: getComputedStyle(element).gridTemplateColumns,
+      tableClientWidth: element.parentElement.clientWidth,
+      tableScrollWidth: element.parentElement.scrollWidth,
+    }));
+    assert.equal(layout.minWidth, "1360px");
+    assert.ok(layout.columns.split(" ").length >= 7, `unexpected columns: ${layout.columns}`);
+    assert.ok(layout.tableScrollWidth > layout.tableClientWidth, `desktop table should scroll horizontally: ${JSON.stringify(layout)}`);
     const cells = row.locator(":scope > *");
     assert.equal(await cells.count(), 7);
     const delivery = await cells.nth(5).boundingBox();
@@ -405,6 +415,17 @@ test("interview list keeps long content inside its desktop columns", { timeout: 
     assert.ok(delivery.x + delivery.width + 8 <= actions.x, `delivery ends at ${delivery.x + delivery.width}, actions start at ${actions.x}`);
     assert.equal(await row.locator(".interview-person").evaluate((element) => element.scrollWidth <= element.clientWidth), true);
     assert.equal(await row.locator(".interview-row-actions").evaluate((element) => element.scrollWidth <= element.clientWidth), true);
+    await page.setViewportSize({ width: 390, height: 760 });
+    const mobileLayout = await row.evaluate((element) => ({
+      minWidth: getComputedStyle(element).minWidth,
+      areas: getComputedStyle(element).gridTemplateAreas,
+      headDisplay: getComputedStyle(element.parentElement.querySelector(".interview-table-head")).display,
+      viewportFits: document.documentElement.scrollWidth === document.documentElement.clientWidth,
+    }));
+    assert.equal(mobileLayout.minWidth, "0px");
+    assert.match(mobileLayout.areas, /"action action"/);
+    assert.equal(mobileLayout.headDisplay, "none");
+    assert.equal(mobileLayout.viewportFits, true);
   } finally { await context.close(); }
 });
 

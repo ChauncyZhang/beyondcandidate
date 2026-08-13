@@ -655,7 +655,9 @@ def list_deletion_requests(
             request, principal, "governance.request_rejected", 422, "validation_failed"
         )
     system_admin = can_approve_deletion(principal)
-    if not system_admin and not principal.active:
+    if not system_admin and (
+        not principal.active or "recruiting_admin" not in principal.roles
+    ):
         return _denied_with_audit(
             request, principal, "governance.deletion_requests_listed"
         )

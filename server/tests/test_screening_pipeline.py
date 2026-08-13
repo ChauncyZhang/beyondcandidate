@@ -14,6 +14,7 @@ from server.app.screening.pipeline import ScreeningPipeline,_PROMPT_CONTENT,_ens
 from server.app.llm.resume_profile import ResumeProfileResult
 from server.app.recruiting.profile_builder import ProfileBuild,ResumeProfileBuilder
 from server.app.recruiting.profile_jobs import ResumeProfileJobHandler,enqueue_missing_resume_profiles
+from server.app.recruiting.candidate_identity import extract_candidate_name,resolve_candidate_name
 from server.app.screening.scanner import ScanResult
 from server.app.queue.service import PermanentJobError,RetryableJobError
 import pytest
@@ -44,6 +45,65 @@ def seeded_pipeline(tmp_path,text=b"required: Python\nPython 5 years",filename="
         item=client.post(f"/api/v1/screening-runs/{run['id']}/items",files={"file":(filename,text,mime)},headers={**headers,"Idempotency-Key":"item"}).json()["data"]
     storage=MemoryPipelineStorage(dict(upload_storage.objects)); scanner=Scanner(); pipeline=ScreeningPipeline(app.state.identity_store.sync_session,storage,scanner,app.state.settings)
     return app,pipeline,storage,scanner,SimpleNamespace(organization_id=next(iter(storage.objects)).split("/")[1],payload={"organization_id":next(iter(storage.objects)).split("/")[1],"screening_item_id":item["id"],"parser_version":"parser-v1"},attempts=1,max_attempts=3),run,item
+
+
+@pytest.mark.parametrize(("resume_text","expected"),[
+    ("张斌超\nAI 工程师 / 大模型应用开发\n邮箱：candidate@example.com","张斌超"),
+    ("个人简历\n姓名：欧阳娜娜 性别：女\n工作经历","欧阳娜娜"),
+    ("Resume\nName: Alice Zhang\nSoftware Engineer","Alice Zhang"),
+    ("个人简历\nAI工程师\n工作经历",None),
+    ("项目经验\n工作履历\nData Scientist",None),
+    ("基本信息\n个人资料\n专业背景",None),
+    ("Quality Assurance\nquality@example.com",None),
+    ("Legal Counsel\nlegal@example.com",None),
+    ("Career Objective\ncontact@example.com",None),
+    ("Work History\ncontact@example.com",None),
+    ("Contact Details\ncontact@example.com",None),
+    ("alice.zhang@example.com\nAlice Zhang","Alice Zhang"),
+])
+def test_candidate_name_extraction_prefers_explicit_or_standalone_identity(resume_text,expected):
+    assert extract_candidate_name(resume_text)==expected
+
+
+def test_candidate_name_falls_back_to_cleaned_filename():
+    assert resolve_candidate_name("个人简历\nAI工程师","张斌超_测试简历.pdf")=="张斌超"
+
+
+def test_pipeline_uses_resume_name_instead_of_filename_stem(tmp_path):
+    app,pipeline,_,_,job,_,item=seeded_pipeline(
+        tmp_path,
+        text="张斌超\nAI 工程师 / 大模型应用开发\n邮箱：candidate@example.com".encode(),
+        filename="张斌超_测试简历.pdf.txt",
+    )
+
+    asyncio.run(pipeline.parse_item(job))
+
+    with app.state.identity_store.sync_session() as db:
+        stored=db.get(ScreeningItem,uuid.UUID(item["id"]))
+        assert db.get(Candidate,stored.candidate_id).display_name=="张斌超"
+
+
+def test_pipeline_does_not_overwrite_an_existing_candidate_name(tmp_path):
+    app,pipeline,_,_,job,run,item=seeded_pipeline(
+        tmp_path,
+        text="张斌超\nAI 工程师".encode(),
+        filename="张斌超_测试简历.txt",
+    )
+    candidate_id=uuid.uuid5(uuid.UUID(item["id"]),"candidate")
+    with app.state.identity_store.sync_session() as db:
+        owner_id=db.get(ScreeningRun,uuid.UUID(run["id"])).created_by
+        db.add(Candidate(
+            id=candidate_id,
+            organization_id=uuid.UUID(job.payload["organization_id"]),
+            display_name="人工确认姓名",
+            owner_id=owner_id,
+        ))
+        db.commit()
+
+    asyncio.run(pipeline.parse_item(job))
+
+    with app.state.identity_store.sync_session() as db:
+        assert db.get(Candidate,candidate_id).display_name=="人工确认姓名"
 
 def test_job_definition_api_rule_boundaries_parse_and_score_without_truncation(tmp_path):
     app,upload_storage,_=app_and_seed(tmp_path)

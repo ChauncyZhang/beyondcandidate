@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const source = readFileSync(new URL("./InterviewViews.jsx", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("./main.jsx", import.meta.url), "utf8");
 const appSource = readFileSync(new URL("./App.jsx", import.meta.url), "utf8");
 const stylesSource = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 const themeSource = readFileSync(new URL("./product-theme-interviews.css", import.meta.url), "utf8");
@@ -123,6 +124,11 @@ test("the desktop interview table reserves space for long candidate names and ac
   assert.match(themeSource, /\.interview-table-head,[\s\S]*?min-width:\s*1360px;[\s\S]*?minmax\(260px,\s*1\.35fr\)[\s\S]*?156px;/);
   assert.match(themeSource, /\.interview-table-row > \*,[\s\S]*?min-width:\s*0;/);
   assert.match(themeSource, /\.interview-row-actions button\s*\{[^}]*width:\s*100%;[^}]*text-align:\s*left;/s);
+});
+
+test("the interview theme loads after shared styles so its desktop columns win the cascade", () => {
+  assert.doesNotMatch(source, /import\s+["']\.\/product-theme-interviews\.css["']/);
+  assert.match(mainSource, /import\s+["']\.\/styles\.css["'];[\s\S]*import\s+["']\.\/product-theme\.css["'];[\s\S]*import\s+["']\.\/product-theme-interviews\.css["'];/);
 });
 
 test("unavailable schedule slots are gray and visually distinct from available green slots", () => {

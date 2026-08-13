@@ -8,6 +8,7 @@ from server.app.governance.retention import recalculate_candidate_retention
 from server.app.recruiting.models import Application,Candidate,FileObject,JobJdVersion,Resume,ResumeProfile,ScreeningRuleVersion
 from server.app.recruiting.profile_builder import PROFILE_VERSION,ProfileBuild,ResumeProfileBuilder
 from server.app.recruiting.resume_profile import extract_resume_profile
+from server.app.recruiting.candidate_identity import resolve_candidate_name
 from server.app.screening.actions import CandidateTombstoned,lock_candidate_screening_item
 from server.app.screening.models import ScreeningItem,ScreeningResult,ScreeningRun
 from server.app.screening.progress import aggregate_run
@@ -110,7 +111,7 @@ class ScreeningPipeline:
             run_context=db.scalar(select(ScreeningRun).where(ScreeningRun.organization_id==organization_id,ScreeningRun.id==item.run_id))
             if run_context is None: raise PermanentJobError("screening_item_missing")
             job_id=run_context.job_id
-        candidate_name=(PurePath(filename).stem[:200] or "Candidate")
+        candidate_name=resolve_candidate_name(enriched.text,filename)
         if self.profile_builder is not None:
             profile=await self.profile_builder.build(
                 organization_id,
@@ -134,7 +135,8 @@ class ScreeningPipeline:
                 item.status="cancelled"; item.safe_error_code="candidate_unavailable"; item.finished_at=item.finished_at or datetime.now(timezone.utc)
                 self._aggregate(db,run); db.commit(); return
             resume_id,application_id=_uuid(item.id,"resume"),_uuid(item.id,"application")
-            candidate=candidate or Candidate(id=candidate_id,organization_id=organization_id,display_name=candidate_name,owner_id=run.created_by)
+            if candidate is None:
+                candidate=Candidate(id=candidate_id,organization_id=organization_id,display_name=candidate_name,owner_id=run.created_by)
             if candidate not in db: db.add(candidate)
             persist_extracted_emails(
                 db,

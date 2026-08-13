@@ -2,10 +2,10 @@ const RECRUITING_NAV_ITEMS = ["工作台", "职位", "筛选任务", "候选人"
 const INTERVIEWER_NAV_ITEMS = ["工作台", "面试"];
 const HIRING_MANAGER_NAV_ITEMS = ["工作台", "职位", "候选人", "面试", "报表"];
 const ALL_SETTINGS_SECTIONS = ["组织与权限", "流程与评价模板", "AI 设置", "飞书集成", "审计与数据治理"];
-const GOVERNANCE_VIEW_ROLES = new Set(["系统管理员", "system_admin", "招聘管理员", "recruiting_admin", "HR 招聘专员", "HR"]);
+const GOVERNANCE_VIEW_ROLES = new Set(["系统管理员", "system_admin", "招聘管理员", "recruiting_admin"]);
 const GOVERNANCE_EDIT_ROLES = new Set(["系统管理员", "system_admin"]);
-const CANDIDATE_GOVERNANCE_READ_ROLES = new Set(["招聘管理员", "recruiting_admin", "HR 招聘专员", "recruiter", "HR", "用人经理", "hiring_manager"]);
-const CANDIDATE_DELETION_REQUEST_ROLES = new Set(["招聘管理员", "recruiting_admin", "HR 招聘专员", "recruiter", "HR"]);
+const CANDIDATE_GOVERNANCE_READ_ROLES = new Set(["招聘管理员", "recruiting_admin"]);
+const CANDIDATE_DELETION_REQUEST_ROLES = new Set(["招聘管理员", "recruiting_admin"]);
 const DELETION_APPROVAL_ROLES = new Set(["系统管理员", "system_admin"]);
 const LEGAL_HOLD_ROLES = new Set(["招聘管理员", "recruiting_admin"]);
 const OFFER_MANAGER_ROLES = new Set(["招聘管理员", "recruiting_admin", "HR 招聘专员", "recruiter", "HR"]);
@@ -97,7 +97,7 @@ export function canEditAiSettings(role) {
 export function getAllowedSettingsSections(role) {
   if (role === "系统管理员") return ["组织与权限", "AI 设置", "飞书集成", "审计与数据治理"];
   if (role === "招聘管理员") return [...ALL_SETTINGS_SECTIONS, "Offer 设置"];
-  if (["HR 招聘专员", "HR"].includes(role)) return [...ALL_SETTINGS_SECTIONS];
+  if (["HR 招聘专员", "HR"].includes(role)) return ALL_SETTINGS_SECTIONS.filter((section) => section !== "审计与数据治理");
   return [];
 }
 

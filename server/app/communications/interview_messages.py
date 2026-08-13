@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import or_, select
 
-from server.app.communications.models import EmailDelivery
+from server.app.communications.models import EmailDelivery, EmailProviderConfig
 from server.app.communications.security import EmailSecretCipher
 from server.app.communications.service import (
     DeliveryCommand,
@@ -42,6 +42,47 @@ class InterviewMessage:
     attachment_filename: str
     attachment_content_type: str
     attachment_content: bytes
+
+
+def resolve_interview_reply_identity(
+    db,
+    *,
+    organization_id,
+    job_owner_id,
+    email_cipher: EmailSecretCipher,
+    provider_config: EmailProviderConfig | None,
+) -> tuple[str | None, str]:
+    visible_name = (
+        (provider_config.default_reply_to_name or "").strip()
+        if provider_config is not None
+        else ""
+    ) or "HR"
+    responsible_hr = db.scalar(
+        select(User).where(
+            User.organization_id == organization_id,
+            User.id == job_owner_id,
+            User.status == UserStatus.ACTIVE,
+        )
+    )
+    if responsible_hr is not None:
+        try:
+            return email_cipher.normalize_email(responsible_hr.email), visible_name
+        except ValueError:
+            pass
+    return (
+        provider_config.default_reply_to_email if provider_config is not None else None,
+        visible_name,
+    )
+
+
+def replace_interview_reply_contact(body: str, reply_to_name: str) -> str:
+    replacement = f"如有问题，请直接回复此邮件联系 {reply_to_name}。"
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith("如有问题，"):
+            lines[index] = replacement
+            return "\n".join(lines)
+    return f"{body.rstrip()}\n\n{replacement}"
 
 
 def _single_line(value: str) -> str:
@@ -243,40 +284,13 @@ def enqueue_interview_message(
         )
     except (KeyError, TypeError, ValueError):
         raise InterviewMessageValidationError("interview_organizer_invalid") from None
-    initial_delivery = db.scalar(
-        select(EmailDelivery)
-        .where(
-            EmailDelivery.organization_id == interview.organization_id,
-            EmailDelivery.resource_type == "interview_invitation",
-            EmailDelivery.resource_id == interview.id,
-        )
-        .order_by(EmailDelivery.created_at, EmailDelivery.id)
-        .limit(1)
+    reply_to_email, reply_to_name = resolve_interview_reply_identity(
+        db,
+        organization_id=interview.organization_id,
+        job_owner_id=job.owner_id,
+        email_cipher=email_cipher,
+        provider_config=provider_config,
     )
-    if initial_delivery is not None:
-        reply_to_email = initial_delivery.reply_to_email
-        reply_to_name = initial_delivery.reply_to_name
-    else:
-        responsible_hr = db.scalar(
-            select(User).where(
-                User.organization_id == interview.organization_id,
-                User.id == interview.owner_id,
-                User.status == UserStatus.ACTIVE,
-            )
-        )
-        if responsible_hr is not None:
-            try:
-                responsible_email = email_cipher.normalize_email(responsible_hr.email)
-            except ValueError:
-                responsible_hr = None
-                responsible_email = None
-        else:
-            responsible_email = None
-        reply_to_email = responsible_email
-        reply_to_name = responsible_hr.display_name if responsible_hr is not None else None
-        if responsible_hr is None:
-            reply_to_email = provider_config.default_reply_to_email
-            reply_to_name = provider_config.default_reply_to_name
 
     message = render_interview_message(
         kind=kind,
@@ -301,7 +315,7 @@ def enqueue_interview_message(
             resource_id=interview.id,
             idempotency_key=f"{interview.id}:{kind}:{interview.calendar_sequence}",
             operation="interview.transactional_email",
-            # Interview ownership is the stable responsible-HR snapshot. The
+            # Delivery attribution follows the interview ownership snapshot. The
             # initiating actor remains on the interview event/audit records.
             created_by=interview.owner_id,
             trace_id=trace_id,

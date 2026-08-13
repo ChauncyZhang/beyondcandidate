@@ -25,7 +25,6 @@ import { candidateEmailCorrectionContext, getInterviewEmailActions, requiresCand
 import { feedbackRatingDimensions, formatSubmittedFeedbackRatings } from "./feedbackRatings.js";
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { interviewStatusLabel } from "./recruitingTerminology.js";
-import "./product-theme-interviews.css";
 export { copyInterviewText, getScheduleConflictType, getScheduleSavedMessage } from "./ScheduleWorkspace.jsx";
 
 /* feedback-draft-helpers:start */

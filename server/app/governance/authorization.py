@@ -16,7 +16,7 @@ RECRUITING = RecruitingAuthorizationService()
 
 def can_read_retention(principal: Principal) -> bool:
     return principal.active and bool(
-        principal.roles & {"system_admin", "recruiting_admin", "recruiter"}
+        principal.roles & {"system_admin", "recruiting_admin"}
     )
 
 
@@ -25,7 +25,7 @@ def can_edit_retention(principal: Principal) -> bool:
 
 
 def can_request_candidate_deletion(db, principal: Principal, candidate_id) -> bool:
-    if not principal.active or not principal.roles & {"recruiter", "recruiting_admin"}:
+    if not principal.active or "recruiting_admin" not in principal.roles:
         return False
     return db.scalar(
         select(Candidate.id).where(
@@ -37,6 +37,8 @@ def can_request_candidate_deletion(db, principal: Principal, candidate_id) -> bo
 
 
 def can_read_candidate_governance(db, principal: Principal, candidate_id) -> bool:
+    if not principal.active or "recruiting_admin" not in principal.roles:
+        return False
     return db.scalar(
         select(Candidate.id).where(
             Candidate.organization_id == principal.organization_id,

@@ -16,6 +16,7 @@ import {
   Import,
   Mail,
   MessageSquareText,
+  MoreHorizontal,
   Phone,
   Plus,
   Search,
@@ -462,19 +463,32 @@ function GovernanceDialog({ mode, status, busy, reason, onReasonChange, onClose,
   </section></div>;
 }
 
-function CandidateGovernance({ candidate, role, onNotify }) {
-  const controller = useMemo(() => createCandidateGovernanceController(), [candidate.id, role]);
-  const [viewState, setViewState] = useState(() => controller.getState());
+function CandidateGovernance({ candidate, role, onNotify, onClose, returnFocusRef }) {
+  const controllerRef = useRef(null);
+  const dialogRef = useRef(null);
+  const restoreRef = useRef(returnFocusRef?.current || (typeof document === "undefined" ? null : document.activeElement));
+  const [viewState, setViewState] = useState({ loadStatus: "idle", status: null, deletionRequest: null, mutation: "", error: "", message: "" });
   const [dialog, setDialog] = useState("");
   const [reason, setReason] = useState("");
   const canRead = canReadCandidateGovernance(role);
   const canRequest = canRequestCandidateDeletion(role);
   const canHold = canManageCandidateLegalHold(role);
   useEffect(() => {
-    const unsubscribe = controller.subscribe(setViewState);
-    if (candidate.serverBacked && canRead) void controller.load(candidate.id, role);
-    return () => { unsubscribe(); controller.dispose(); };
-  }, [canRead, candidate.id, candidate.serverBacked, controller, role]);
+    const activeController = createCandidateGovernanceController();
+    controllerRef.current = activeController;
+    setViewState(activeController.getState());
+    const unsubscribe = activeController.subscribe(setViewState);
+    if (candidate.serverBacked && canRead) void activeController.load(candidate.id, role);
+    return () => {
+      unsubscribe();
+      activeController.dispose();
+      if (controllerRef.current === activeController) controllerRef.current = null;
+    };
+  }, [canRead, candidate.id, candidate.serverBacked, role]);
+  useEffect(() => {
+    dialogRef.current?.querySelector("[data-dialog-initial-focus]")?.focus();
+    return () => restoreRef.current?.isConnected !== false && restoreRef.current?.focus?.();
+  }, []);
   if (!candidate.serverBacked || !canRead) return null;
   const { loadStatus, status, deletionRequest, mutation, error, message } = viewState;
   const legalHoldId = status?.legalHoldId;
@@ -482,20 +496,38 @@ function CandidateGovernance({ candidate, role, onNotify }) {
   const releaseDisabled = !legalHoldId || !legalHoldVersion;
   const duplicateOpen = ["requested", "approved", "executing", "failed"].includes(status?.deletionStatus);
   async function commit() {
+    const controller = controllerRef.current;
+    if (!controller) return;
     const completed = dialog === "delete" ? await controller.requestDeletion() : dialog === "place" ? await controller.placeLegalHold(reason) : await controller.releaseLegalHold(reason);
     if (completed) { onNotify(dialog === "delete" ? "删除请求已提交审批" : dialog === "place" ? "法律保留已生效" : "法律保留已解除"); setDialog(""); setReason(""); }
   }
-  return <section className="candidate-governance" aria-live="polite"><h3>数据治理</h3>
+  function handleKeyDown(event) {
+    if (event.key === "Escape" && !mutation && !dialog) { event.preventDefault(); onClose(); }
+    if (event.key !== "Tab" || dialog) return;
+    const controls = [...dialogRef.current.querySelectorAll("button, textarea, summary")].filter((item) => !item.disabled);
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !dialogRef.current.contains(document.activeElement))) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !dialogRef.current.contains(document.activeElement))) {
+      event.preventDefault();
+      first?.focus();
+    }
+  }
+  return <><div className="candidate-dialog-backdrop candidate-governance-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !mutation && !dialog) onClose(); }}><section ref={dialogRef} className="candidate-dialog candidate-governance-dialog" role="dialog" aria-modal="true" aria-labelledby="candidate-governance-title" onKeyDown={handleKeyDown}>
+    <header><div><h2 id="candidate-governance-title">候选人数据管理</h2><p>查看删除状态和法律保留，仅招聘管理员可操作。</p></div><button className="icon-button" type="button" data-dialog-initial-focus aria-label="关闭" disabled={Boolean(mutation)} onClick={onClose}><X size={19} /></button></header>
+    <div className="candidate-governance" aria-live="polite"><h3>数据治理状态</h3>
     {loadStatus === "loading" && <div className="governance-compact-state" role="status"><LoaderCircle className="spin" size={17} />正在读取治理状态…</div>}
-    {loadStatus === "error" && <div className="governance-compact-state error" role="alert"><span>{error}</span><button type="button" onClick={() => controller.refresh()}>重试</button></div>}
+    {loadStatus === "error" && <div className="governance-compact-state error" role="alert"><span>{error}</span><button type="button" onClick={() => controllerRef.current?.refresh()}>重试</button></div>}
     {status && <><dl><div><dt>删除状态</dt><dd>{status.deletionStatus ? governanceDeletionStatusLabels[status.deletionStatus] : "无删除请求"}</dd></div><div><dt>法律保留</dt><dd>{status.legalHoldActive ? "已生效" : "未设置"}</dd></div>{status.legalHoldReason && <div><dt>保留原因</dt><dd>{status.legalHoldReason}</dd></div>}</dl>
       {deletionRequest && <details className="governance-impact"><summary>查看删除影响（9 类）</summary><div>{governanceCountLabels.map(([key, label]) => <span key={key}>{label}<strong>{deletionRequest.impact.counts[key]}</strong></span>)}</div><small>备份窗口至 {new Date(deletionRequest.impact.backupWindowEndsAt).toLocaleString("zh-CN", { hour12: false })}</small></details>}
       {error && loadStatus !== "error" && <p className="governance-inline-error" role="alert">{error}</p>}{message && <p className="governance-inline-message" role="status">{message}</p>}
       {governanceDeletionGuidance[status.deletionStatus] && <p className="governance-process-note">{governanceDeletionGuidance[status.deletionStatus]}</p>}
       <div className="governance-actions">{canRequest && !duplicateOpen && <button className="button danger full" type="button" disabled={Boolean(mutation)} onClick={() => setDialog("delete")}>请求删除</button>}{canHold && !status.legalHoldActive && <button className="button secondary full" type="button" disabled={Boolean(mutation)} onClick={() => { setReason(""); setDialog("place"); }}>设置法律保留</button>}{canHold && status.legalHoldActive && <button className="button secondary full" type="button" disabled={releaseDisabled || Boolean(mutation)} title={releaseDisabled ? "缺少法律保留 ID 或版本，请刷新" : undefined} onClick={() => { setReason(""); setDialog("release"); }}>解除法律保留</button>}</div>
     </>}
-    {dialog && <GovernanceDialog mode={dialog} status={status} busy={Boolean(mutation)} reason={reason} onReasonChange={setReason} onClose={() => setDialog("")} onConfirm={() => void commit()} />}
-  </section>;
+    </div><footer><button className="button secondary" type="button" disabled={Boolean(mutation)} onClick={onClose}>关闭</button></footer>
+  </section></div>{dialog && <GovernanceDialog mode={dialog} status={status} busy={Boolean(mutation)} reason={reason} onReasonChange={setReason} onClose={() => setDialog("")} onConfirm={() => void commit()} />}</>;
 }
 
 function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotify, onScheduleInterview, onOpenInterviewFeedback, onAddToTalentPool, actorName, controller, offerController, offerApprovalId, onRefresh, activeTab = "档案与简历", onTabChange = () => {} }) {
@@ -509,6 +541,10 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
   const [previewState, setPreviewState] = useState(null);
   const [reassignOpen, setReassignOpen] = useState(false);
   const [emailDialogOpen, setEmailDialogOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [governanceOpen, setGovernanceOpen] = useState(false);
+  const moreMenuRef = useRef(null);
+  const moreButtonRef = useRef(null);
   const previewRequestRef = useRef(null);
 
   useEffect(() => {
@@ -517,6 +553,25 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
   }, [previewState?.file?.url]);
 
   useEffect(() => () => previewRequestRef.current?.abort(), [candidate.id]);
+
+  useEffect(() => { setMoreMenuOpen(false); setGovernanceOpen(false); }, [candidate.id, role]);
+
+  useEffect(() => {
+    if (!moreMenuOpen || typeof document === "undefined") return undefined;
+    function closeMenu(event) {
+      if (event.type === "keydown" && event.key !== "Escape") return;
+      if (event.type === "pointerdown" && moreMenuRef.current?.contains(event.target)) return;
+      setMoreMenuOpen(false);
+      if (event.type === "keydown") moreButtonRef.current?.focus();
+    }
+    document.addEventListener("pointerdown", closeMenu);
+    document.addEventListener("keydown", closeMenu);
+    return () => { document.removeEventListener("pointerdown", closeMenu); document.removeEventListener("keydown", closeMenu); };
+  }, [moreMenuOpen]);
+
+  useEffect(() => {
+    if (moreMenuOpen) moreMenuRef.current?.querySelector('[role="menuitem"]')?.focus();
+  }, [moreMenuOpen]);
 
   function update(patch) { onUpdate({ ...candidate, ...patch }); }
 
@@ -617,12 +672,13 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
   const canScheduleCurrent = canScheduleCandidateInterview(candidate.stage, role, onScheduleInterview, candidate.jobStatus);
   const canReassignReview = candidate.serverBacked && candidate.stage === "待复核" && candidate.reviewTask && canPerformAction(role, "推进候选人");
   const canConfirmEmail = candidate.serverBacked && candidateEmailRoles.has(role);
+  const canOpenGovernance = candidate.serverBacked && canReadCandidateGovernance(role);
   const tabs = candidateDetailTabs(candidate.serverBacked);
   const notes = candidate.notes || [];
   const profileLine = [candidate.role, candidate.company, candidate.city].filter(Boolean).join(" · ");
   return <div className="candidate-page candidate-detail-page">
     <button className="back-link" type="button" onClick={onBack}><ArrowLeft size={17} />{backLabel || "返回候选人列表"}</button>
-    <section className="candidate-detail-hero"><div className="candidate-profile"><span>{candidate.name.slice(-1)}</span><div><div><h2>{candidate.name}</h2><StageTag stage={candidate.stage} /></div><p>{profileLine}</p><div className="masked-contacts"><span><Phone size={13} />{candidate.phone}</span><span><Mail size={13} />{candidate.email}</span></div></div></div><div className="candidate-detail-actions">{!candidate.serverBacked && <button className="button secondary" type="button" onClick={() => onNotify("联系方式已复制，操作已记录") }><ClipboardCopy size={16} />复制联系信息</button>}{canConfirmEmail && <button className="button secondary" type="button" onClick={() => setEmailDialogOpen(true)}><Mail size={16} />查看并确认邮箱</button>}<button className="button secondary" type="button" disabled={candidate.serverBacked && (!candidate.resume?.id || pendingAction === "download")} onClick={() => void downloadResume()}><Download size={16} />{pendingAction === "download" ? "下载中" : "下载简历"}</button>{canAddCandidateToTalentPool(candidate) && onAddToTalentPool && <button className="button secondary" type="button" onClick={() => onAddToTalentPool([candidate.id])}><BriefcaseBusiness size={16} />加入人才库</button>}{canScheduleCurrent && <button className="button primary" type="button" onClick={() => onScheduleInterview(candidate)}><CalendarDays size={16} />安排面试</button>}{availableWorkflowActions.map((action) => <button className={`button ${action.reasonRequired ? "secondary" : "primary"}`} type="button" key={action.id} onClick={() => { setActionError(""); setConflict(false); setSelectedWorkflowAction(action); }}><UserRoundCheck size={16} />{action.label}</button>)}</div></section>
+    <section className="candidate-detail-hero"><div className="candidate-profile"><span>{candidate.name.slice(-1)}</span><div><div><h2>{candidate.name}</h2><StageTag stage={candidate.stage} /></div><p>{profileLine}</p><div className="masked-contacts"><span><Phone size={13} />{candidate.phone}</span><span><Mail size={13} />{candidate.email}</span></div></div></div><div className="candidate-detail-actions">{!candidate.serverBacked && <button className="button secondary" type="button" onClick={() => onNotify("联系方式已复制，操作已记录") }><ClipboardCopy size={16} />复制联系信息</button>}{canConfirmEmail && <button className="button secondary" type="button" onClick={() => setEmailDialogOpen(true)}><Mail size={16} />查看并确认邮箱</button>}<button className="button secondary" type="button" disabled={candidate.serverBacked && (!candidate.resume?.id || pendingAction === "download")} onClick={() => void downloadResume()}><Download size={16} />{pendingAction === "download" ? "下载中" : "下载简历"}</button>{canAddCandidateToTalentPool(candidate) && onAddToTalentPool && <button className="button secondary" type="button" onClick={() => onAddToTalentPool([candidate.id])}><BriefcaseBusiness size={16} />加入人才库</button>}{canScheduleCurrent && <button className="button primary" type="button" onClick={() => onScheduleInterview(candidate)}><CalendarDays size={16} />安排面试</button>}{availableWorkflowActions.map((action) => <button className={`button ${action.reasonRequired ? "secondary" : "primary"}`} type="button" key={action.id} onClick={() => { setActionError(""); setConflict(false); setSelectedWorkflowAction(action); }}><UserRoundCheck size={16} />{action.label}</button>)}{canOpenGovernance && <div className="candidate-more-actions" ref={moreMenuRef}><button ref={moreButtonRef} className="icon-button" type="button" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-expanded={moreMenuOpen} onClick={() => setMoreMenuOpen((current) => !current)}><MoreHorizontal size={19} /></button>{moreMenuOpen && <div className="candidate-more-menu" role="menu"><button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); setGovernanceOpen(true); }}><ShieldCheck size={17} />数据管理</button></div>}</div>}</div></section>
     {actionError && !selectedWorkflowAction && <div className="candidate-action-error" role="alert"><CircleAlert size={16} /><span>{actionError}</span>{conflict && <button type="button" onClick={() => void onRefresh()}>刷新最新详情</button>}</div>}
     <div className="candidate-detail-layout"><main className="candidate-detail-main"><section className="candidate-detail-panel"><div className="candidate-detail-tabs">{tabs.map((item) => <button type="button" key={item} className={tab === item ? "active" : ""} onClick={() => onTabChange(item)}>{item}</button>)}</div>
       {tab === "档案与简历" && <div className="candidate-tab-content profile-tab">{candidate.serverBacked && candidate.profileStatus !== "ready" && <div className="candidate-profile-notice" role="status"><CircleAlert size={17} /><span><strong>自动结构化信息不完整</strong><small>部分内容未能可靠识别，请以右侧原始简历为准。</small></span></div>}<section><h3>候选人摘要{candidate.summaryOrigin === "generated" && <span className="candidate-generated-label">AI 基于简历生成</span>}</h3><p>{candidate.summary}</p></section><section><h3>技能</h3><div className="candidate-skill-tags">{candidate.skills.length ? candidate.skills.map((item) => <span key={item}>{item}</span>) : <span>暂无结构化技能</span>}</div></section><div className="profile-facts"><div><BriefcaseBusiness size={18} /><span><strong>工作经验</strong><small>{candidate.experience}</small></span></div><div><GraduationCap size={18} /><span><strong>教育经历</strong><small>{candidate.education}</small></span></div><div className="resume-detail-row"><FileText size={18} /><span><strong>当前简历</strong><small>{candidate.serverBacked ? resumeDisplayName(candidate.resume) : `${candidate.name}_简历.pdf · 解析质量良好`}</small>{candidate.serverBacked && candidate.resume?.id && <span className="resume-inline-actions"><button type="button" onClick={() => void loadPreview()}><Eye size={14} />预览</button><button type="button" onClick={() => void downloadResume()}><Download size={14} />下载</button></span>}</span></div></div></div>}
@@ -631,10 +687,11 @@ function CandidateDetail({ candidate, role, onBack, backLabel, onUpdate, onNotif
       {tab === "面试与反馈" && <div className="candidate-tab-content"><div className="candidate-interview-toolbar"><div><h3>面试记录</h3><span>安排、通知和反馈统一记录在候选人时间线中。</span></div>{canScheduleCurrent && <button className="button primary" type="button" onClick={() => onScheduleInterview(candidate)}><CalendarDays size={16} />安排面试</button>}</div>{candidate.interviews.length ? <div className="interview-feedback-list">{candidate.interviews.map((item) => <section key={item.time}><header><div><strong>{item.round}</strong><span>{item.time}</span></div><span className="feedback-result">{item.result}</span></header><p>面试官：{item.interviewer}</p><blockquote>{item.feedback}</blockquote>{onOpenInterviewFeedback && item.interviewId && <button className="button secondary" type="button" onClick={() => onOpenInterviewFeedback(item.interviewId)}>查看面试详情</button>}</section>)}</div> : <div className="candidate-empty compact"><MessageSquareText size={23} /><strong>暂无面试记录</strong><span>{candidate.stage === "待安排" ? "可以为该候选人创建第一场面试。" : "面试将在 HR 完成安排后显示。"}</span>{canScheduleCurrent && <button className="button primary" type="button" onClick={() => onScheduleInterview(candidate)}><CalendarDays size={16} />安排面试</button>}</div>}</div>}
       {tab === "Offer" && <div className="candidate-tab-content offer-tab"><CandidateOfferView candidate={candidate} role={role} controller={offerController} approvalId={offerApprovalId} onNotify={onNotify} /></div>}
       {tab === "时间线" && <div className="candidate-tab-content candidate-timeline">{candidate.timeline.map((item, index) => <div key={`${item.time}-${index}`}><span /><div><strong>{item.action}</strong><p>{item.actor} · {item.time}</p></div></div>)}{candidate.timeline.length === 0 && <div className="candidate-muted">暂无可见时间线记录</div>}</div>}
-    </section></main><aside className="candidate-context"><section><h3>当前申请</h3><dl><div><dt>应聘职位</dt><dd>{candidate.position}</dd></div><div><dt>当前状态</dt><dd><StageTag stage={candidate.stage} /></dd></div><div><dt>招聘负责人（HR）</dt><dd>{candidate.owner}</dd></div><div><dt>下一步</dt><dd>{nextStep}</dd></div><div><dt>最近进展</dt><dd>{candidate.lastActivity || "未记录"}</dd></div></dl><p className="candidate-auto-stage-note">状态会在完成业务动作后自动更新，无需手动维护。</p></section>{candidate.reviewTask && candidate.stage === "待复核" && <section className="candidate-review-assignee"><h3>简历评审</h3><dl><div><dt>当前评审人</dt><dd>{candidate.reviewTask.assigneeName}</dd></div></dl>{canReassignReview && <button className="button secondary full" type="button" disabled={pendingAction === "review-reassignment"} onClick={() => { setActionError(""); setConflict(false); setReassignOpen(true); }}><UserRoundCheck size={16} />改派评审人</button>}</section>}<CandidateGovernance candidate={candidate} role={role} onNotify={onNotify} />{!candidate.serverBacked && <section><h3>标签</h3><div className="context-tags">{candidate.tags.map((item) => <span key={item}>{item}</span>)}</div><div className="inline-add"><input value={tagInput} onChange={(event) => setTagInput(event.target.value)} placeholder="添加标签" /><button type="button" aria-label="添加标签" onClick={addTag}><Plus size={15} /></button></div></section>}<section><h3>招聘备注</h3>{notes.map((item, index) => <p className="saved-note" key={typeof item === "object" ? item.id : `${item}-${index}`}>{typeof item === "object" ? item.body : item}</p>)}{notes.length === 0 && <p className="candidate-muted">暂无招聘备注</p>}<textarea rows="4" disabled={pendingAction === "note"} value={note} onChange={(event) => setNote(event.target.value)} placeholder="记录沟通重点或后续事项" /><button className="button secondary full" type="button" disabled={!note.trim() || pendingAction === "note"} onClick={() => void addNote()}>{pendingAction === "note" ? "保存中" : "保存备注"}</button></section></aside></div>
+    </section></main><aside className="candidate-context"><section><h3>当前申请</h3><dl><div><dt>应聘职位</dt><dd>{candidate.position}</dd></div><div><dt>当前状态</dt><dd><StageTag stage={candidate.stage} /></dd></div><div><dt>招聘负责人（HR）</dt><dd>{candidate.owner}</dd></div><div><dt>下一步</dt><dd>{nextStep}</dd></div><div><dt>最近进展</dt><dd>{candidate.lastActivity || "未记录"}</dd></div></dl><p className="candidate-auto-stage-note">状态会在完成业务动作后自动更新，无需手动维护。</p></section>{candidate.reviewTask && candidate.stage === "待复核" && <section className="candidate-review-assignee"><h3>简历评审</h3><dl><div><dt>当前评审人</dt><dd>{candidate.reviewTask.assigneeName}</dd></div></dl>{canReassignReview && <button className="button secondary full" type="button" disabled={pendingAction === "review-reassignment"} onClick={() => { setActionError(""); setConflict(false); setReassignOpen(true); }}><UserRoundCheck size={16} />改派评审人</button>}</section>}{!candidate.serverBacked && <section><h3>标签</h3><div className="context-tags">{candidate.tags.map((item) => <span key={item}>{item}</span>)}</div><div className="inline-add"><input value={tagInput} onChange={(event) => setTagInput(event.target.value)} placeholder="添加标签" /><button type="button" aria-label="添加标签" onClick={addTag}><Plus size={15} /></button></div></section>}<section><h3>招聘备注</h3>{notes.map((item, index) => <p className="saved-note" key={typeof item === "object" ? item.id : `${item}-${index}`}>{typeof item === "object" ? item.body : item}</p>)}{notes.length === 0 && <p className="candidate-muted">暂无招聘备注</p>}<textarea rows="4" disabled={pendingAction === "note"} value={note} onChange={(event) => setNote(event.target.value)} placeholder="记录沟通重点或后续事项" /><button className="button secondary full" type="button" disabled={!note.trim() || pendingAction === "note"} onClick={() => void addNote()}>{pendingAction === "note" ? "保存中" : "保存备注"}</button></section></aside></div>
     {selectedWorkflowAction && <WorkflowActionDialog candidate={candidate} action={selectedWorkflowAction} serverBacked={candidate.serverBacked} submitting={pendingAction === "workflow"} actionError={actionError} conflict={conflict} onClose={() => setSelectedWorkflowAction(null)} onCommit={commitWorkflowAction} onConflictRefresh={(latestStage) => { if (candidate.serverBacked) { void onRefresh(); setSelectedWorkflowAction(null); return; } update({ stage: latestStage, version: 3, lastActivity: "刚刚", timeline: [{ time: "刚刚", actor: "系统", action: `检测到其他成员已更新流程` }, ...candidate.timeline] }); setSelectedWorkflowAction(null); onNotify("已刷新为服务端最新状态"); }} />}
     {reassignOpen && <ReviewReassignmentDialog candidate={candidate} controller={controller} submitting={pendingAction === "review-reassignment"} onClose={() => setReassignOpen(false)} onConfirm={commitReviewReassignment} />}
     {emailDialogOpen && <CandidateEmailDialog candidate={candidate} controller={controller} onClose={() => setEmailDialogOpen(false)} onConfirmed={(saved) => { update({ email: saved.maskedValue || candidate.email }); onNotify("候选人邮箱已确认"); }} />}
+    {governanceOpen && <CandidateGovernance candidate={candidate} role={role} onNotify={onNotify} onClose={() => setGovernanceOpen(false)} returnFocusRef={moreButtonRef} />}
     {previewState && <ResumePreview candidate={candidate} file={previewState.file} status={previewState.status} error={previewState.error} downloading={pendingAction === "download"} onClose={closePreview} onRetry={() => void loadPreview()} onDownload={() => void downloadResume()} />}
   </div>;
 }

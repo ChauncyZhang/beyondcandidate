@@ -192,6 +192,10 @@ test("candidate detail wires governance states, destructive confirmation and rol
   assert.match(source, /canReadCandidateGovernance/);
   assert.match(source, /canRequestCandidateDeletion/);
   assert.match(source, /canManageCandidateLegalHold/);
+  assert.match(source, /aria-label="更多操作"/);
+  assert.match(source, />数据管理</);
+  assert.match(source, /governanceOpen && <CandidateGovernance/);
+  assert.doesNotMatch(source, /<CandidateGovernance candidate=\{candidate\} role=\{role\} onNotify=\{onNotify\} \/>\{!candidate\.serverBacked/);
   assert.match(source, /提交审批，不会立即删除/);
   assert.match(source, /legalHoldId/);
   assert.match(source, /legalHoldVersion/);

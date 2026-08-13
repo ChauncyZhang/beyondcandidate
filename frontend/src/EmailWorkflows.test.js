@@ -98,7 +98,7 @@ function candidateEmail(version = 2) {
 
 async function openCandidate({ role = "recruiter", conflictOnce = false, conflictCode = "resource_version_conflict", holdPut = false, viewport = { width: 1280, height: 800 } } = {}) {
   const context = await browser.newContext({ viewport });
-  const requests = { emailGet: 0, emailPut: [] };
+  const requests = { emailGet: 0, emailPut: [], governanceGet: 0 };
   let releasePut;
   let putGate = holdPut ? new Promise((resolve) => { releasePut = resolve; }) : null;
   requests.releasePut = () => { releasePut?.(); releasePut = null; };
@@ -126,6 +126,10 @@ async function openCandidate({ role = "recruiter", conflictOnce = false, conflic
       }
       email = { ...email, value: "ocr@example.com", masked_value: "o***@example.com", source: "ocr", confirmation_status: "confirmed", version: email.version + 1 };
       return json(email);
+    }
+    if (pathname === `/api/v1/candidates/${candidateId}/governance-status`) {
+      requests.governanceGet += 1;
+      return json({ deletion_status: null, deletion_request_id: null, legal_hold_active: false });
     }
     if (pathname === "/api/v1/jobs") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [], meta: { next_cursor: null } }) });
     return route.fulfill({ status: 503, contentType: "application/problem+json", body: JSON.stringify({ status: 503, code: "service_unavailable" }) });
@@ -224,6 +228,15 @@ test("candidate plaintext is fetched only in the focused dialog and existing cho
     await trigger.click();
     const dialog = page.getByRole("dialog", { name: "确认候选人邮箱", exact: true });
     await dialog.getByText("native@example.com", { exact: true }).waitFor();
+    const nativeOption = dialog.locator(".candidate-email-options > label").filter({ hasText: "native@example.com" });
+    const optionLayout = await nativeOption.evaluate((element) => {
+      const radio = element.querySelector('input[type="radio"]').getBoundingClientRect();
+      const title = element.querySelector("strong").getBoundingClientRect();
+      return { display: getComputedStyle(element).display, radioLeft: radio.left, radioRight: radio.right, radioTop: radio.top, titleLeft: title.left, titleTop: title.top };
+    });
+    assert.equal(optionLayout.display, "grid");
+    assert.ok(optionLayout.radioLeft < optionLayout.titleLeft && optionLayout.radioRight <= optionLayout.titleLeft, JSON.stringify(optionLayout));
+    assert.ok(Math.abs(optionLayout.radioTop - optionLayout.titleTop) <= 4, JSON.stringify(optionLayout));
     assert.ok(requests.emailGet >= 1);
     assert.match(await dialog.textContent(), /简历原文.*OCR 识别/s);
     assert.equal(await dialog.evaluate((element) => element.contains(document.activeElement)), true);
@@ -307,4 +320,34 @@ test("candidate email choices remain contained at 390px", { timeout: 60_000 }, a
     const widths = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
     assert.equal(widths.scroll, widths.client, JSON.stringify(widths));
   } finally { await context.close(); }
+});
+
+test("candidate data management is on-demand for recruiting admins and absent for recruiters", { timeout: 60_000 }, async () => {
+  const admin = await openCandidate({ role: "recruiting_admin" });
+  try {
+    assert.equal(admin.requests.governanceGet, 0);
+    const trigger = admin.page.getByRole("button", { name: "更多操作", exact: true });
+    await trigger.click();
+    await admin.page.getByRole("menuitem", { name: "数据管理", exact: true }).click();
+    const dialog = admin.page.getByRole("dialog", { name: "候选人数据管理", exact: true });
+    await dialog.getByText("数据治理状态", { exact: true }).waitFor();
+    await dialog.getByText("无删除请求", { exact: true }).waitFor();
+    assert.ok(admin.requests.governanceGet >= 1);
+    const closeButtons = dialog.getByRole("button", { name: "关闭", exact: true });
+    await closeButtons.last().focus();
+    await admin.page.keyboard.press("Tab");
+    assert.equal(await closeButtons.first().evaluate((element) => element === document.activeElement), true);
+    await closeButtons.first().focus();
+    await admin.page.keyboard.press("Shift+Tab");
+    assert.equal(await closeButtons.last().evaluate((element) => element === document.activeElement), true);
+    await closeButtons.last().click();
+    await dialog.waitFor({ state: "hidden" });
+    assert.equal(await trigger.evaluate((element) => element === document.activeElement), true);
+  } finally { await admin.context.close(); }
+
+  const recruiter = await openCandidate({ role: "recruiter" });
+  try {
+    assert.equal(await recruiter.page.getByRole("button", { name: "更多操作", exact: true }).count(), 0);
+    assert.equal(recruiter.requests.governanceGet, 0);
+  } finally { await recruiter.context.close(); }
 });

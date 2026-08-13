@@ -1082,10 +1082,116 @@ def test_reschedule_and_cancel_enqueue_one_versioned_calendar_message_each(tmp_p
         assert "STATUS:CANCELLED\r\n" in cancellation
 
 
+def test_interview_messages_resolve_current_job_owner_without_inheriting_initial_contact(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    first_owner_id = seed_user(app, "recruiter", "first-job-owner@example.test")
+    replacement_owner_id = seed_user(app, "recruiter", "replacement-job-owner@example.test")
+    with app.state.identity_store.sync_session() as database:
+        first_owner = database.get(User, first_owner_id)
+        first_owner.email = first_owner.normalized_email = "first-job-owner@example.com"
+        first_owner.display_name = "First Job Owner"
+        replacement_owner = database.get(User, replacement_owner_id)
+        replacement_owner.email = replacement_owner.normalized_email = "replacement-job-owner@example.com"
+        replacement_owner.display_name = "Replacement Job Owner"
+        database.get(Job, seed["job_id"]).owner_id = first_owner_id
+        database.commit()
+
+    with TestClient(app) as client:
+        created, headers = create_interview(client, seed, key="job-owner-contact-create")
+        interview_id = created.json()["data"]["id"]
+
+        with app.state.identity_store.sync_session() as database:
+            database.get(Job, seed["job_id"]).owner_id = replacement_owner_id
+            database.commit()
+
+        new_start = datetime(2099, 7, 25, 9, 30, tzinfo=timezone.utc)
+        rescheduled = client.patch(
+            f"/api/v1/interviews/{interview_id}",
+            json={
+                "starts_at": new_start.isoformat(),
+                "ends_at": (new_start + timedelta(minutes=45)).isoformat(),
+            },
+            headers={**headers, "If-Match": '"1"'},
+        )
+        assert rescheduled.status_code == 200
+
+        with app.state.identity_store.sync_session() as database:
+            database.get(User, replacement_owner_id).status = UserStatus.DISABLED
+            database.commit()
+
+        cancelled = client.post(
+            f"/api/v1/interviews/{interview_id}/transitions",
+            json={"target": "cancelled", "reason": "Contact regression"},
+            headers={
+                **headers,
+                "If-Match": '"2"',
+                "Idempotency-Key": "job-owner-contact-cancel",
+            },
+        )
+        assert cancelled.status_code == 200
+
+    with app.state.identity_store.sync_session() as database:
+        deliveries = database.scalars(
+            select(EmailDelivery)
+            .where(EmailDelivery.resource_id == UUID(interview_id))
+            .order_by(EmailDelivery.created_at, EmailDelivery.id)
+        ).all()
+
+    assert [
+        (delivery.resource_type, delivery.reply_to_email, delivery.reply_to_name)
+        for delivery in deliveries
+    ] == [
+        ("interview_invitation", "first-job-owner@example.com", "Recruiting Team"),
+        ("interview_rescheduled", "replacement-job-owner@example.com", "Recruiting Team"),
+        ("interview_cancelled", "recruiting@example.com", "Recruiting Team"),
+    ]
+    assert all("联系 Recruiting Team。" in delivery.rendered_body for delivery in deliveries)
+
+
+@pytest.mark.parametrize(
+    ("owner_status", "owner_email", "provider_name", "expected_name"),
+    [
+        (UserStatus.DISABLED, "disabled-job-owner@example.com", "Recruiting Team", "Recruiting Team"),
+        (UserStatus.ACTIVE, "invalid-email", "", "HR"),
+    ],
+)
+def test_interview_invitation_falls_back_to_provider_reply_identity_for_unusable_job_owner(
+    tmp_path, owner_status, owner_email, provider_name, expected_name
+) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    owner_id = seed_user(app, "recruiter", "fallback-job-owner@example.test")
+    with app.state.identity_store.sync_session() as database:
+        owner = database.get(User, owner_id)
+        owner.email = owner.normalized_email = owner_email
+        owner.display_name = "Unusable Job Owner"
+        owner.status = owner_status
+        database.get(Job, seed["job_id"]).owner_id = owner_id
+        database.scalar(select(EmailProviderConfig)).default_reply_to_name = provider_name
+        database.commit()
+
+    with TestClient(app) as client:
+        created, _ = create_interview(client, seed, key=f"fallback-job-owner-{owner_status.value}")
+        interview_id = created.json()["data"]["id"]
+
+    with app.state.identity_store.sync_session() as database:
+        delivery = database.scalar(
+            select(EmailDelivery).where(EmailDelivery.resource_id == UUID(interview_id))
+        )
+
+    assert (delivery.reply_to_email, delivery.reply_to_name) == (
+        "recruiting@example.com",
+        expected_name,
+    )
+    assert f"联系 {expected_name}。" in delivery.rendered_body
+
+
 def test_interview_resend_uses_current_confirmed_email_preserves_ics_and_enforces_job_scope(tmp_path) -> None:
     app = make_app(tmp_path)
     seed = seed_application(app)
     scoped_recruiter_id = seed_user(app, "recruiter", "scoped-resend@example.test")
+    current_hr_id = seed_user(app, "recruiter", "current-resend-hr@example.test")
     seed_user(app, "recruiter", "unrelated-resend@example.test")
     with app.state.identity_store.sync_session() as database:
         database.add(
@@ -1163,6 +1269,10 @@ def test_interview_resend_uses_current_confirmed_email_preserves_ics_and_enforce
                 )
             )
             original_ids = [item.id for item in original_deliveries]
+            current_hr = database.get(User, current_hr_id)
+            current_hr.email = current_hr.normalized_email = "current-resend-hr@example.com"
+            database.get(Job, seed["job_id"]).owner_id = current_hr_id
+            database.scalar(select(EmailProviderConfig)).default_reply_to_name = "Current HR Team"
             database.commit()
 
         scoped_headers = login(client, "scoped-resend@example.test")
@@ -1289,18 +1399,18 @@ def test_interview_resend_uses_current_confirmed_email_preserves_ics_and_enforce
             assert (
                 resend.attachment_filename,
                 resend.attachment_content_type,
-                resend.reply_to_email,
-                resend.reply_to_name,
                 resend.rendered_subject,
-                resend.rendered_body,
             ) == (
                 original.attachment_filename,
                 original.attachment_content_type,
-                original.reply_to_email,
-                original.reply_to_name,
                 original.rendered_subject,
-                original.rendered_body,
             )
+            assert (resend.reply_to_email, resend.reply_to_name) == (
+                "current-resend-hr@example.com",
+                "Current HR Team",
+            )
+            assert "联系 Current HR Team。" in resend.rendered_body
+            assert "联系 Recruiting Team。" not in resend.rendered_body
             assert b"candidate@example.com" not in resend.attachment_ciphertext
 
 
@@ -2132,9 +2242,12 @@ def test_calendar_cancel_reuses_persisted_request_contacts_after_user_changes(tm
             "interview_invitation",
             "interview_cancelled",
         ]
-        assert {
+        assert [
             (item.reply_to_email, item.reply_to_name) for item in deliveries
-        } == {("interview-admin@example.com", "recruiting_admin")}
+        ] == [
+            ("interview-admin@example.com", "Recruiting Team"),
+            ("changed-default@example.com", "Changed Default"),
+        ]
         outbound_contacts = []
         for delivery in deliveries:
             calendar = app.state.email_secret_cipher.decrypt_attachment(

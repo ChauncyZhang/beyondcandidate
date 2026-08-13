@@ -67,6 +67,7 @@ test("HR 招聘专员拥有招聘导航但设置能力有限", () => {
   assert.equal(canPerformAction("HR 招聘专员", "评审候选人"), false);
   assert.equal(canPerformAction("HR 招聘专员", "确认录用决策"), false);
   assert.equal(getAllowedSettingsSections("HR 招聘专员").includes("Offer 设置"), false);
+  assert.equal(getAllowedSettingsSections("HR 招聘专员").includes("审计与数据治理"), false);
 });
 
 test("面试官只能访问工作台和面试", () => {
@@ -123,8 +124,8 @@ test("治理设置显式区分审计查看和保留策略编辑权限", () => {
     ["system_admin", true, true, true],
     ["招聘管理员", true, true, false],
     ["recruiting_admin", true, true, false],
-    ["HR 招聘专员", true, true, false],
-    ["HR", true, true, false],
+    ["HR 招聘专员", false, false, false],
+    ["HR", false, false, false],
     ["用人经理", false, false, false],
     ["hiring_manager", false, false, false],
     ["面试官", false, false, false],
@@ -145,11 +146,11 @@ test("候选人治理权限按四种能力独立且未知角色默认拒绝", ()
     ["system_admin", false, false, true, false],
     ["招聘管理员", true, true, false, true],
     ["recruiting_admin", true, true, false, true],
-    ["HR 招聘专员", true, true, false, false],
-    ["recruiter", true, true, false, false],
-    ["HR", true, true, false, false],
-    ["用人经理", true, false, false, false],
-    ["hiring_manager", true, false, false, false],
+    ["HR 招聘专员", false, false, false, false],
+    ["recruiter", false, false, false, false],
+    ["HR", false, false, false, false],
+    ["用人经理", false, false, false, false],
+    ["hiring_manager", false, false, false, false],
     ["面试官", false, false, false, false],
     ["interviewer", false, false, false, false],
     ["未知角色", false, false, false, false],
