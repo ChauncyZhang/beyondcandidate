@@ -914,6 +914,100 @@ def test_create_interview_requires_confirmed_email_without_partial_mutation(tmp_
         assert database.scalar(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email")) is None
 
 
+@pytest.mark.parametrize("source", ["native", "ocr"])
+def test_create_interview_accepts_auto_extracted_email_without_manual_confirmation(tmp_path, source) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with app.state.identity_store.sync_session() as database:
+        contact = database.scalar(select(CandidateContact).where(CandidateContact.candidate_id == seed["candidate_id"]))
+        contact.source = source
+        contact.confirmation_status = "unconfirmed"
+        contact.confirmed_by = None
+        contact.confirmed_at = None
+        database.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/interviews",
+            json=interview_payload(seed),
+            headers={**login(client, "interview-admin@example.test"), "Idempotency-Key": f"email-{source}"},
+        )
+
+    assert response.status_code == 201
+    with app.state.identity_store.sync_session() as database:
+        assert database.scalar(select(Interview)) is not None
+        assert database.scalar(select(EmailDelivery)) is not None
+        assert database.scalar(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email")) is not None
+
+
+def test_create_interview_requires_selection_when_multiple_emails_were_auto_extracted(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with app.state.identity_store.sync_session() as database:
+        contact = database.scalar(select(CandidateContact).where(CandidateContact.candidate_id == seed["candidate_id"]))
+        contact.source = "native"
+        contact.confirmation_status = "unconfirmed"
+        contact.confirmed_by = None
+        contact.confirmed_at = None
+        protected = app.state.contact_cipher.protect("email", "alternate@example.com")
+        database.add(CandidateContact(
+            organization_id=contact.organization_id,
+            candidate_id=contact.candidate_id,
+            kind="email",
+            ciphertext=protected.ciphertext,
+            lookup_hash=protected.lookup_hash,
+            masked_value=protected.masked_value,
+            source="ocr",
+            confirmation_status="unconfirmed",
+        ))
+        database.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/interviews",
+            json=interview_payload(seed),
+            headers={**login(client, "interview-admin@example.test"), "Idempotency-Key": "email-ambiguous"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "candidate_email_unconfirmed"
+    with app.state.identity_store.sync_session() as database:
+        assert database.scalar(select(Interview)) is None
+        assert database.scalar(select(EmailDelivery)) is None
+        assert database.scalar(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email")) is None
+
+
+def test_create_interview_prefers_confirmed_email_over_newer_auto_extracted_email(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with app.state.identity_store.sync_session() as database:
+        confirmed = database.scalar(select(CandidateContact).where(CandidateContact.candidate_id == seed["candidate_id"]))
+        protected = app.state.contact_cipher.protect("email", "alternate@example.com")
+        database.add(CandidateContact(
+            organization_id=confirmed.organization_id,
+            candidate_id=confirmed.candidate_id,
+            kind="email",
+            ciphertext=protected.ciphertext,
+            lookup_hash=protected.lookup_hash,
+            masked_value=protected.masked_value,
+            source="native",
+            confirmation_status="unconfirmed",
+        ))
+        database.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/interviews",
+            json=interview_payload(seed),
+            headers={**login(client, "interview-admin@example.test"), "Idempotency-Key": "email-confirmed-priority"},
+        )
+
+    assert response.status_code == 201
+    with app.state.identity_store.sync_session() as database:
+        delivery = database.scalar(select(EmailDelivery))
+        assert app.state.email_secret_cipher.decrypt_recipient(delivery.recipient_ciphertext) == "candidate@example.com"
+
+
 def test_reschedule_and_cancel_enqueue_one_versioned_calendar_message_each(tmp_path) -> None:
     app = make_app(tmp_path)
     seed = seed_application(app)

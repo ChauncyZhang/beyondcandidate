@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import threading
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Callable, Protocol
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
@@ -200,8 +203,20 @@ class FakeFeishuProvider:
 class HttpFeishuProvider:
     """Small synchronous adapter; callers run it outside database transactions."""
 
-    def __init__(self, client: httpx.Client | None = None, *, timeout_seconds: float = 10) -> None:
-        self._client = client or httpx.Client(timeout=timeout_seconds, follow_redirects=False)
+    def __init__(
+        self,
+        client: httpx.Client | None = None,
+        *,
+        timeout_seconds: float = 5,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._client = client or httpx.Client(
+            timeout=httpx.Timeout(timeout_seconds, connect=min(3, timeout_seconds)),
+            follow_redirects=False,
+        )
+        self._clock = clock
+        self._tenant_token_lock = threading.Lock()
+        self._tenant_tokens: dict[str, tuple[bytes, str, float]] = {}
 
     def authorization_url(self, credentials: FeishuCredentials, state: str) -> str:
         return f"{AUTHORIZE_URL}?{urlencode({'client_id': credentials.app_id, 'response_type': 'code', 'redirect_uri': credentials.redirect_uri, 'state': state})}"
@@ -224,22 +239,46 @@ class HttpFeishuProvider:
             raise FeishuProviderError("feishu_request_failed", retryable=retryable)
         return payload
 
-    def _tenant_token(self, credentials: FeishuCredentials) -> str:
-        payload = self._json(
-            "POST",
-            f"{OPEN_API_BASE}/auth/v3/tenant_access_token/internal",
-            json={"app_id": credentials.app_id, "app_secret": credentials.app_secret},
-        )
-        token = payload.get("tenant_access_token")
-        if not isinstance(token, str) or not token:
-            raise FeishuProviderError("feishu_response_invalid", retryable=False)
-        return token
+    def _tenant_token(self, credentials: FeishuCredentials, *, force_refresh: bool = False) -> str:
+        secret_fingerprint = hashlib.sha256(credentials.app_secret.encode()).digest()
+        with self._tenant_token_lock:
+            cached = self._tenant_tokens.get(credentials.app_id)
+            if (
+                not force_refresh
+                and cached is not None
+                and cached[0] == secret_fingerprint
+                and cached[2] > self._clock()
+            ):
+                return cached[1]
+
+            payload = self._json(
+                "POST",
+                f"{OPEN_API_BASE}/auth/v3/tenant_access_token/internal",
+                json={"app_id": credentials.app_id, "app_secret": credentials.app_secret},
+            )
+            token = payload.get("tenant_access_token")
+            expires_in = payload.get("expire", 7200)
+            if (
+                not isinstance(token, str)
+                or not token
+                or isinstance(expires_in, bool)
+                or not isinstance(expires_in, (int, float))
+                or expires_in <= 0
+            ):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            refresh_margin = min(60.0, float(expires_in) / 10)
+            self._tenant_tokens[credentials.app_id] = (
+                secret_fingerprint,
+                token,
+                self._clock() + max(1.0, float(expires_in) - refresh_margin),
+            )
+            return token
 
     def test_connection(self, credentials: FeishuCredentials) -> ConnectionResult:
         from time import perf_counter
         started = perf_counter()
         try:
-            self._tenant_token(credentials)
+            self._tenant_token(credentials, force_refresh=True)
         except FeishuProviderError as error:
             return ConnectionResult(False, int((perf_counter() - started) * 1000), error.safe_code)
         return ConnectionResult(True, int((perf_counter() - started) * 1000))

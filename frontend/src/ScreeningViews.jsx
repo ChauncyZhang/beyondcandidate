@@ -54,7 +54,19 @@ export function statusLabel(status) {
 }
 
 export function taskLifecycleLabel(task) {
+  if (task?.status === "partial") return "完成（有异常）";
   return statusLabel(task?.status);
+}
+
+export function taskResultSummary(task) {
+  const completed = Number.isFinite(task?.completed) ? task.completed : 0;
+  const issues = [];
+  if (task?.aiUnavailableCount > 0) issues.push(`${task.aiUnavailableCount} 份 AI 评分失败`);
+  if (task?.fileFailedCount > 0) issues.push(`${task.fileFailedCount} 份文件处理失败`);
+  return {
+    primary: `${completed} 已处理`,
+    secondary: issues.length > 0 ? issues.join(" · ") : "无异常",
+  };
 }
 
 export function pollFailureAction(error) {
@@ -428,14 +440,16 @@ export function ScreeningTaskCenter({ controller = defaultScreeningController, o
         {state.status === "ready" && state.tasks.length === 0 && <div className="screening-center-state empty"><FileText size={24} /><div><strong>还没有筛选任务</strong><span>导入一批简历后，处理进度和结果会保存在这里。</span></div></div>}
         {state.tasks.length > 0 && <div className="screening-task-list-table">
           <div className="screening-task-list-head"><span>任务 / 职位</span><span>状态</span><span>处理进度</span><span>结果</span><span>发起信息</span><span /></div>
-          {state.tasks.map((task) => <button className="screening-task-list-row" type="button" key={task.id} onClick={() => onOpenTask(task)}>
+          {state.tasks.map((task) => {
+            const resultSummary = taskResultSummary(task);
+            return <button className="screening-task-list-row" type="button" key={task.id} onClick={() => onOpenTask(task)}>
             <span><strong>{task.position}</strong><small>{task.id}</small></span>
             <span><i className={`task-status ${lifecycleStatusClass(task)}`}>{taskLifecycleLabel(task)}</i></span>
             <span><strong>{task.completed}/{task.total}</strong><small>{task.total > 0 ? `${Math.round((task.completed / task.total) * 100)}%` : "等待文件"}</small></span>
-            <span><strong>{task.succeeded} 成功</strong><small>{task.failed} 失败</small></span>
+            <span><strong>{resultSummary.primary}</strong><small>{resultSummary.secondary}</small></span>
             <span><strong>{task.creator}</strong><small>{task.source} · {taskCreatedAt(task.createdAt)}</small></span>
             <ChevronRight size={18} />
-          </button>)}
+          </button>})}
         </div>}
       </section>
     </div>

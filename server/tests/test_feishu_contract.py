@@ -212,6 +212,66 @@ def test_http_provider_parses_current_batch_freebusy_response_shape() -> None:
     }
 
 
+def test_http_provider_reuses_tenant_token_until_its_refresh_window() -> None:
+    token_requests = 0
+    now = [100.0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal token_requests
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            token_requests += 1
+            return httpx.Response(200, json={
+                "code": 0,
+                "tenant_access_token": f"tenant-token-{token_requests}",
+                "expire": 100,
+            })
+        if request.url.path.endswith("/freebusy/batch"):
+            return httpx.Response(200, json={"code": 0, "data": {}})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    provider = HttpFeishuProvider(
+        httpx.Client(transport=httpx.MockTransport(handler)),
+        clock=lambda: now[0],
+    )
+    credentials = FeishuCredentials("cli", "secret", "https://example.test/callback")
+    start = datetime(2026, 7, 21, 6, tzinfo=timezone.utc)
+    request = FreeBusyRequest(("ou_interviewer",), start, start + timedelta(hours=1))
+
+    provider.batch_freebusy(credentials, request)
+    provider.batch_freebusy(credentials, request)
+    assert token_requests == 1
+
+    now[0] = 191.0
+    provider.batch_freebusy(credentials, request)
+    assert token_requests == 2
+
+
+def test_http_provider_does_not_reuse_token_after_secret_changes() -> None:
+    token_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal token_requests
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            token_requests += 1
+            return httpx.Response(200, json={
+                "code": 0,
+                "tenant_access_token": f"tenant-token-{token_requests}",
+                "expire": 7200,
+            })
+        if request.url.path.endswith("/freebusy/batch"):
+            return httpx.Response(200, json={"code": 0, "data": {}})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    start = datetime(2026, 7, 21, 6, tzinfo=timezone.utc)
+    request = FreeBusyRequest(("ou_interviewer",), start, start + timedelta(hours=1))
+
+    provider.batch_freebusy(FeishuCredentials("cli", "secret-one", "https://example.test/callback"), request)
+    provider.batch_freebusy(FeishuCredentials("cli", "secret-two", "https://example.test/callback"), request)
+
+    assert token_requests == 2
+
+
 def test_http_provider_accepts_successful_empty_next_week_freebusy_data() -> None:
     requests: list[httpx.Request] = []
 

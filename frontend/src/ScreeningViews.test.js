@@ -421,6 +421,26 @@ test("cancelled tasks never describe progress as completed", () => {
   assert.equal(helpers.progressSummary({ status: "complete", completed: 5, total: 5 }), "处理完成：5/5 份简历");
 });
 
+test("task center distinguishes AI scoring failures from file processing failures", () => {
+  assert.equal(helpers.taskLifecycleLabel({ status: "partial" }), "完成（有异常）");
+  assert.deepEqual(helpers.taskResultSummary({
+    completed: 3,
+    aiUnavailableCount: 1,
+    fileFailedCount: 1,
+  }), {
+    primary: "3 已处理",
+    secondary: "1 份 AI 评分失败 · 1 份文件处理失败",
+  });
+  assert.deepEqual(helpers.taskResultSummary({
+    completed: 1,
+    aiUnavailableCount: 0,
+    fileFailedCount: 0,
+  }), {
+    primary: "1 已处理",
+    secondary: "无异常",
+  });
+});
+
 test("an interrupted empty upload offers abandonment instead of an ineffective retry", () => {
   assert.deepEqual(helpers.pollFailureAction({ code: "RECOVERED_RUN_EMPTY" }), {
     code: "RECOVERED_RUN_EMPTY",

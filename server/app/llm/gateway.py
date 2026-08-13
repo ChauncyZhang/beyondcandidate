@@ -25,8 +25,13 @@ def _validate_screening_result(content:str)->ScreeningResult:
     if not isinstance(document,dict): raise ValueError
     dimensions=document.get("dimensions")
     if isinstance(dimensions,dict):
-        document["dimensions"]=[dimensions[key] for key in DIMENSION_LIMITS if key in dimensions]
-        document["dimensions"].extend(value for key,value in dimensions.items() if key not in DIMENSION_LIMITS)
+        normalized_dimensions=[]
+        for key in (*DIMENSION_LIMITS,*(key for key in dimensions if key not in DIMENSION_LIMITS)):
+            value=dimensions[key]
+            if isinstance(value,dict):
+                value={**value,"key":value.get("key",key)}
+            normalized_dimensions.append(value)
+        document["dimensions"]=normalized_dimensions
     if isinstance(document.get("dimensions"),list):
         for dimension in document["dimensions"]:
             if not isinstance(dimension,dict): continue

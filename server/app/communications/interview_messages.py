@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from server.app.communications.models import EmailDelivery
 from server.app.communications.security import EmailSecretCipher
@@ -23,6 +23,7 @@ from server.app.recruiting.security import ContactCipher
 INTERVIEW_MESSAGE_KINDS = frozenset(
     {"interview_invitation", "interview_rescheduled", "interview_cancelled"}
 )
+AUTO_USABLE_CANDIDATE_EMAIL_SOURCES = frozenset({"native", "ocr"})
 
 
 class CandidateEmailUnavailable(ValueError):
@@ -146,23 +147,41 @@ def resolve_confirmed_candidate_email(
     candidate_id,
     contact_cipher: ContactCipher,
 ) -> str:
-    contact = db.scalar(
+    candidate = db.scalar(
+        select(Candidate)
+        .where(
+            Candidate.organization_id == organization_id,
+            Candidate.id == candidate_id,
+        )
+        .with_for_update()
+    )
+    if candidate is None or candidate.deleted_at is not None:
+        raise CandidateEmailUnavailable
+
+    contacts = list(db.scalars(
         select(CandidateContact)
         .where(
             CandidateContact.organization_id == organization_id,
             CandidateContact.candidate_id == candidate_id,
             CandidateContact.kind == "email",
-            CandidateContact.confirmation_status == "confirmed",
+            or_(
+                CandidateContact.confirmation_status == "confirmed",
+                CandidateContact.source.in_(AUTO_USABLE_CANDIDATE_EMAIL_SOURCES),
+            ),
         )
         .order_by(
+            (CandidateContact.confirmation_status == "confirmed").desc(),
             CandidateContact.confirmed_at.desc(),
             CandidateContact.created_at.desc(),
             CandidateContact.id.desc(),
         )
-        .limit(1)
+        .limit(2)
         .with_for_update()
-    )
-    if contact is None:
+    ).all())
+    if not contacts:
+        raise CandidateEmailUnavailable
+    contact = contacts[0]
+    if contact.confirmation_status != "confirmed" and len(contacts) > 1:
         raise CandidateEmailUnavailable
     try:
         return contact_cipher.decrypt(contact.ciphertext)

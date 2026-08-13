@@ -62,7 +62,7 @@ def test_evaluation_normalizes_common_openai_compatible_json_shapes():
     provider_result={
         "score":0,
         "dimensions":{
-            key:{"key":key,"score":0,"evidence":"No evidence supplied.","gaps":"No evidence supplied."}
+            key:{"score":0,"evidence":"No evidence supplied.","gaps":"No evidence supplied."}
             for key in ("core_capability","experience_depth","role_seniority","transferability","explicit_constraints")
         },
         "summary":"No matching evidence was supplied.",
