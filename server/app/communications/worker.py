@@ -2,6 +2,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from html import escape
+from urllib.parse import urlsplit
 
 from sqlalchemy import select
 
@@ -15,6 +16,13 @@ from server.app.queue.service import PermanentJobError, RetryableJobError
 
 
 logger = logging.getLogger(__name__)
+
+
+INTERVIEW_EMAIL_STYLES = {
+    "interview_invitation": ("面试邀请", "面试已安排", "#0068d8", "#eaf3ff"),
+    "interview_rescheduled": ("面试安排更新", "面试时间已变更", "#b54708", "#fff4e5"),
+    "interview_cancelled": ("面试取消通知", "本次面试已取消", "#b42318", "#fff0ee"),
+}
 
 
 def _render_offer_link(body: str, token_id: uuid.UUID, codec, public_base_url: str) -> str:
@@ -40,6 +48,79 @@ def _offer_html_body(*, brand_name: str, body: str, offer_link: str) -> str:
 <table role="presentation" cellspacing="0" cellpadding="0" style="margin:28px 0 22px;"><tr><td style="border-radius:7px;background:#0068d8;"><a href="{safe_link}" style="display:inline-block;padding:13px 24px;color:#ffffff;text-decoration:none;font-size:16px;font-weight:600;">查看并确认 Offer</a></td></tr></table>
 <p style="margin:0;color:#667085;font-size:13px;line-height:1.7;">该链接包含您的录用信息，请勿转发。如按钮无法打开，请联系招聘负责人。</p></td></tr>
 <tr><td style="padding:18px 32px;border-top:1px solid #e8ebf0;background:#fafbfc;color:#7a8495;font-size:12px;text-align:center;">{safe_brand} · 安全录用确认邮件</td></tr>
+</table></td></tr></table></body></html>'''
+
+
+def _safe_web_link(value: str) -> str | None:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    return value if parsed.scheme in {"http", "https"} and parsed.netloc else None
+
+
+def _interview_html_body(*, brand_name: str, subject: str, body: str, kind: str) -> str:
+    title, status_text, accent, accent_background = INTERVIEW_EMAIL_STYLES[kind]
+    safe_brand = escape(brand_name, quote=True)
+    safe_initial = escape((brand_name.strip()[:1] or "B").upper(), quote=True)
+    safe_subject = escape(subject, quote=True)
+    lines = [line.strip() for line in body.splitlines()]
+    nonempty = [line for line in lines if line]
+    greeting = nonempty[0] if nonempty else "您好："
+    detail_labels = ("职位", "轮次", "时间", "方式", "地点/链接")
+    details: list[tuple[str, str]] = []
+    detail_lines: set[str] = set()
+    for line in nonempty:
+        for label in detail_labels:
+            prefix = f"{label}："
+            if line.startswith(prefix):
+                details.append((label, line.removeprefix(prefix).strip()))
+                detail_lines.add(line)
+                break
+    narrative = [
+        line for line in nonempty[1:]
+        if line not in detail_lines and not line.startswith("如有问题，")
+    ]
+    opening = narrative[0] if narrative else status_text
+    closing = next(
+        (line for line in reversed(nonempty) if line.startswith("如有问题，")),
+        "如有问题，请直接回复此邮件联系招聘负责人。",
+    )
+    detail_rows = []
+    meeting_link = None
+    for label, value in details:
+        safe_value = escape(value, quote=True)
+        if label == "地点/链接":
+            meeting_link = None if kind == "interview_cancelled" else _safe_web_link(value)
+            if meeting_link is not None:
+                safe_link = escape(meeting_link, quote=True)
+                safe_value = f'<a href="{safe_link}" style="color:{accent};text-decoration:none;word-break:break-all;">{safe_value}</a>'
+        detail_rows.append(
+            f'<tr><td style="width:92px;padding:10px 0;color:#667085;font-size:14px;vertical-align:top;">{escape(label)}</td>'
+            f'<td style="padding:10px 0;color:#101828;font-size:15px;font-weight:600;line-height:1.6;vertical-align:top;">{safe_value}</td></tr>'
+        )
+    action = ""
+    if meeting_link is not None and kind != "interview_cancelled":
+        safe_link = escape(meeting_link, quote=True)
+        action = (
+            f'<table role="presentation" cellspacing="0" cellpadding="0" style="margin:26px 0 8px;"><tr>'
+            f'<td style="border-radius:7px;background:{accent};"><a href="{safe_link}" style="display:inline-block;padding:13px 24px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;">进入面试</a></td>'
+            f'</tr></table>'
+        )
+    return f'''<!doctype html>
+<html lang="zh-CN"><body style="margin:0;padding:0;background:#f5f7fa;font-family:Arial,'Microsoft YaHei',sans-serif;color:#172033;">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f5f7fa;padding:24px 12px;"><tr><td align="center">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border:1px solid #e3e7ee;border-radius:8px;overflow:hidden;">
+<tr><td style="padding:20px 30px;border-bottom:1px solid #e8ebf0;"><table role="presentation" cellspacing="0" cellpadding="0"><tr><td style="width:36px;height:36px;border-radius:7px;background:#0068d8;color:#ffffff;text-align:center;font-size:18px;font-weight:700;">{safe_initial}</td><td style="padding-left:12px;font-size:17px;font-weight:600;color:#101828;">{safe_brand}<div style="margin-top:2px;color:#7a8495;font-size:12px;font-weight:400;">招聘团队</div></td></tr></table></td></tr>
+<tr><td style="padding:34px 30px 30px;"><span style="display:inline-block;margin:0 0 16px;padding:6px 10px;border-radius:5px;background:{accent_background};color:{accent};font-size:12px;font-weight:700;">{escape(title)}</span>
+<h1 style="margin:0 0 10px;color:#101828;font-size:26px;line-height:1.4;font-weight:650;">{safe_subject}</h1>
+<p style="margin:0 0 8px;color:#344054;font-size:16px;line-height:1.75;">{escape(greeting, quote=True)}</p>
+<p style="margin:0 0 24px;color:#475467;font-size:15px;line-height:1.75;">{escape(opening, quote=True)}</p>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:8px 20px;border:1px solid #e5e9f0;border-radius:7px;background:#fafbfc;">{''.join(detail_rows)}</table>
+{action}
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:24px;"><tr><td style="padding:14px 16px;border-left:3px solid {accent};background:{accent_background};color:#475467;font-size:13px;line-height:1.7;">邮件已附带日历文件，您可以将面试安排添加到常用日历。</td></tr></table>
+<p style="margin:24px 0 0;color:#667085;font-size:13px;line-height:1.75;">{escape(closing, quote=True)}</p></td></tr>
+<tr><td style="padding:17px 30px;border-top:1px solid #e8ebf0;background:#fafbfc;color:#7a8495;font-size:12px;text-align:center;">{safe_brand} · 候选人面试通知</td></tr>
 </table></td></tr></table></body></html>'''
 
 
@@ -103,6 +184,13 @@ class EmailDeliveryJobHandler:
                             offer_link = f"{self._offer_public_base_url}/offer/{self._offer_token_codec.raw_token(token.id)}"
                             body = _render_offer_link(body, token.id, self._offer_token_codec, self._offer_public_base_url)
                             html_body = _offer_html_body(brand_name=organization.name if organization else delivery.sender_name, body=body, offer_link=offer_link)
+                    elif delivery.resource_type in INTERVIEW_EMAIL_STYLES:
+                        html_body = _interview_html_body(
+                            brand_name=delivery.sender_name,
+                            subject=delivery.rendered_subject,
+                            body=body,
+                            kind=delivery.resource_type,
+                        )
                     message = MailMessage(
                         recipient=recipient,
                         sender_email=delivery.sender_email,

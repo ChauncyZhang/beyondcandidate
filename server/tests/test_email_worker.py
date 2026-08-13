@@ -11,15 +11,17 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from server.app.communications.models import EmailDelivery, EmailProviderConfig
+from server.app.communications.interview_messages import render_interview_message
 from server.app.communications.provider import MailMessage, PermanentMailError, ProviderReceipt, SmtpMailProvider, TemporaryMailError
 from server.app.communications.security import EmailSecretCipher
 from server.app.communications.service import DeliveryCommand, DeliveryIdempotencyConflict, SenderPolicy, email_delivery_terminal_callback, enqueue_delivery, render_template
 from server.app.communications.worker import EmailDeliveryJobHandler
-from server.app.communications.worker import _offer_html_body, _render_offer_link
+from server.app.communications.worker import _interview_html_body, _offer_html_body, _render_offer_link
 from server.app.offers.service import OfferTokenCodec
 from server.app.identity.models import AuditLog, Base, Organization, User, UserRole
 from server.app.integrations.feishu.models import FeishuOrganizationConfig
 from server.app.interviews.models import Interview  # noqa: F401 - registers Feishu FK metadata
+from server.app.interviews.domain import CalendarContact
 from server.app.offers import models as offer_models  # noqa: F401 - registers identity FKs
 from server.app.queue.models import BackgroundJob, JobAttempt, OutboxEvent
 from server.app.queue.repository import QueueRepository
@@ -110,6 +112,89 @@ def test_offer_html_email_is_branded_escaped_and_uses_one_secure_action_link():
     assert "查看并确认 Offer" in rendered
 
 
+@pytest.mark.parametrize(
+    "kind,expected_title",
+    [
+        ("interview_invitation", "面试已安排"),
+        ("interview_rescheduled", "面试时间已变更"),
+        ("interview_cancelled", "本次面试已取消"),
+    ],
+)
+def test_interview_html_email_is_branded_escaped_and_keeps_structured_details(kind, expected_title):
+    rendered = _interview_html_body(
+        brand_name="Example <Talent>",
+        subject="面试邀请：AI 工程师 - 一面",
+        body=(
+            "候选人 <测试>，您好：\n\n"
+            f"{expected_title}。\n"
+            "职位：AI 工程师\n"
+            "轮次：一面\n"
+            "时间：2026-08-13 13:00 - 14:00 (Asia/Shanghai)\n"
+            "方式：视频面试\n"
+            "地点/链接：https://meeting.example.test/room?a=1&b=2\n\n"
+            "如有问题，请直接回复此邮件联系招聘负责人。"
+        ),
+        kind=kind,
+    )
+    assert "Example &lt;Talent&gt;" in rendered
+    assert "候选人 &lt;测试&gt;" in rendered
+    assert "AI 工程师" in rendered
+    assert "2026-08-13 13:00 - 14:00" in rendered
+    assert "interview.ics" not in rendered
+    assert "邮件已附带日历文件" in rendered
+    expected_actions = 0 if kind == "interview_cancelled" else 1
+    assert rendered.count(">进入面试</a>") == expected_actions
+    expected_links = 0 if kind == "interview_cancelled" else 2
+    assert rendered.count('href="https://meeting.example.test/room?a=1&amp;b=2"') == expected_links
+    assert "<测试>" not in rendered
+
+
+def test_interview_html_email_does_not_link_unsafe_location_values():
+    rendered = _interview_html_body(
+        brand_name="Example Talent",
+        subject="面试邀请：测试职位 - 一面",
+        body="候选人，您好：\n\n面试已安排。\n地点/链接：javascript:alert(1)",
+        kind="interview_invitation",
+    )
+    assert "javascript:alert(1)" in rendered
+    assert 'href="javascript:' not in rendered
+    assert "进入面试" not in rendered
+
+
+@pytest.mark.parametrize(
+    "method,expected_label",
+    [("video", "视频面试"), ("onsite", "现场面试"), ("phone", "电话面试")],
+)
+def test_interview_plain_text_uses_candidate_facing_method_labels(method, expected_label):
+    interview = SimpleNamespace(
+        id=uuid.uuid4(),
+        timezone="Asia/Shanghai",
+        starts_at=datetime(2026, 8, 13, 5, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 8, 13, 6, 0, tzinfo=timezone.utc),
+        round_name="一面",
+        method=method,
+        meeting_url="https://meeting.example.test/one" if method == "video" else None,
+        location="测试地点" if method == "onsite" else None,
+        calendar_attendees=[],
+        calendar_sequence=0,
+        status="scheduled",
+    )
+
+    message = render_interview_message(
+        kind="interview_invitation",
+        interview=interview,
+        candidate_name="测试候选人",
+        candidate_email="candidate@example.test",
+        job_title="测试职位",
+        organizer=CalendarContact(name="招聘负责人", email="hr@example.test"),
+        reply_to_name="招聘负责人",
+        dtstamp=datetime(2026, 8, 12, tzinfo=timezone.utc),
+    )
+
+    assert f"方式：{expected_label}" in message.body
+    assert f"方式：{method}" not in message.body
+
+
 def test_smtp_provider_adds_html_alternative_without_removing_plain_text(monkeypatch):
     captured = {}
 
@@ -126,6 +211,45 @@ def test_smtp_provider_adds_html_alternative_without_removing_plain_text(monkeyp
     message = captured["message"]
     assert message.get_body(preferencelist=("plain",)).get_content().strip() == "纯文本内容"
     assert "HTML 内容" in message.get_body(preferencelist=("html",)).get_content()
+
+
+def test_smtp_provider_keeps_html_plain_text_and_calendar_attachment_together(monkeypatch):
+    captured = {}
+
+    async def smtp_send(message, **kwargs):
+        captured["message"] = message
+
+    monkeypatch.setattr("server.app.communications.provider.aiosmtplib.send", smtp_send)
+    provider = SmtpMailProvider(
+        host="smtp.example.com",
+        port=587,
+        tls_mode="starttls",
+        username="mailer",
+        password="private",
+    )
+    asyncio.run(provider.send(MailMessage(
+        "candidate@example.com",
+        "careers@example.com",
+        "Example Company",
+        "hr@example.com",
+        "HR",
+        "面试邀请",
+        "纯文本面试内容",
+        "<email-interview-html@beyondcandidate.internal>",
+        attachment_filename="interview.ics",
+        attachment_content_type="text/calendar; method=REQUEST; charset=UTF-8",
+        attachment_content=b"BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n",
+        html_body="<strong>HTML 面试内容</strong>",
+    )))
+
+    message = captured["message"]
+    assert message.get_body(preferencelist=("plain",)).get_content().strip() == "纯文本面试内容"
+    assert "HTML 面试内容" in message.get_body(preferencelist=("html",)).get_content()
+    attachments = list(message.iter_attachments())
+    assert len(attachments) == 1
+    assert attachments[0].get_content_type() == "text/calendar"
+    assert attachments[0].get_param("method") == "REQUEST"
+    assert attachments[0].get_filename() == "interview.ics"
 
 
 def test_worker_retries_temporary_smtp_failure_without_marking_sent(tmp_path):
@@ -163,6 +287,39 @@ def test_worker_uses_fixed_sender_hr_reply_to_and_immutable_snapshots(tmp_path):
     with sessions() as db:
         stored = db.get(EmailDelivery, delivery_id)
         assert (stored.status, stored.provider_receipt_id) == ("sent", "receipt-123")
+
+
+def test_worker_adds_html_template_to_interview_email_and_keeps_plain_text(tmp_path):
+    sessions, cipher, delivery_id, job = delivery_store(tmp_path)
+    with sessions.begin() as db:
+        stored = db.get(EmailDelivery, delivery_id)
+        stored.resource_type = "interview_invitation"
+        stored.rendered_subject = "面试邀请：AI 工程师 - 一面"
+        stored.rendered_body = (
+            "测试候选人，您好：\n\n"
+            "已为您安排面试。\n"
+            "职位：AI 工程师\n"
+            "轮次：一面\n"
+            "时间：2026-08-13 13:00 - 14:00 (Asia/Shanghai)\n"
+            "方式：视频面试\n"
+            "地点/链接：https://meeting.example.test/one\n\n"
+            "如有问题，请直接回复此邮件联系 Responsible HR。"
+        )
+        stored.attachment_filename = "interview.ics"
+        stored.attachment_content_type = "text/calendar; method=REQUEST; charset=UTF-8"
+        stored.attachment_ciphertext = cipher.encrypt_attachment(
+            b"BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n"
+        )
+    provider = FakeMailProvider()
+
+    asyncio.run(EmailDeliveryJobHandler(sessions, provider, cipher)(job))
+
+    message = provider.messages[0]
+    assert message.body.startswith("测试候选人，您好：")
+    assert message.html_body.startswith("<!doctype html>")
+    assert "面试邀请：AI 工程师 - 一面" in message.html_body
+    assert ">进入面试</a>" in message.html_body
+    assert message.attachment_filename == "interview.ics"
 
 
 def test_worker_uses_organization_sender_snapshot_when_configured(tmp_path):

@@ -94,6 +94,11 @@ def render_interview_message(
     local_start = starts_at.astimezone(local_timezone)
     local_end = ends_at.astimezone(local_timezone)
     location = interview.meeting_url or interview.location or "待确认"
+    method_label = {
+        "video": "视频面试",
+        "onsite": "现场面试",
+        "phone": "电话面试",
+    }.get(interview.method, interview.method)
     body = "\n".join(
         [
             f"{candidate_name}，您好：",
@@ -102,7 +107,7 @@ def render_interview_message(
             f"职位：{job_title}",
             f"轮次：{interview.round_name}",
             f"时间：{local_start:%Y-%m-%d %H:%M} - {local_end:%H:%M} ({interview.timezone})",
-            f"方式：{interview.method}",
+            f"方式：{method_label}",
             f"地点/链接：{location}",
             "",
             f"如有问题，请直接回复此邮件联系 {reply_to_name}。",
