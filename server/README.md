@@ -237,6 +237,19 @@ UUID as the Feishu message idempotency key. Disabled configs,
 unbound recipients, stale feedback assignments, or completed feedback are successful no-ops;
 provider/network failures remain retryable without logging provider response bodies or private
 candidate data. Verify this path with `python -m pytest server/tests/test_feishu_notifications.py`.
+
+Feishu interview calendar sync is also an outbox-generation contract. A recurring failure mode is
+that a stale create/update event races a reschedule and creates a duplicate Feishu event or
+overwrites the newer meeting URL. Include the sync row generation in the outbox payload, lock the
+interview and sync row while persisting the provider result, and return without provider calls when
+the generation is stale. Video interviews should let Feishu create the native meeting and persist the
+returned meeting URL; onsite and phone interviews must clear any old URL. Add the candidate email as
+an attendee only after decrypting it at delivery time. Verify this path with:
+
+```powershell
+python -m pytest server/tests/test_feishu_contract.py server/tests/test_feishu_sync.py server/tests/test_interview_api.py
+```
+
 Production TLS must terminate upstream or use externally managed certificates mounted into
 Nginx with a production-specific server block. Never expose API, PostgreSQL, or MinIO ports.
 

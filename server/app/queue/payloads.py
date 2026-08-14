@@ -200,7 +200,8 @@ for _feishu_topic in (
                 "organization_id": OpaqueIdField(),
                 "interview_id": OpaqueIdField(),
                 "sync_id": OpaqueIdField(),
-            }
+            },
+            {"sync_generation": OpaqueIdField()},
         ),
     )
 

@@ -101,6 +101,18 @@ def _calendar_contacts(values: list[dict]) -> tuple[CalendarContact, ...]:
     return tuple(contacts)
 
 
+def _interview_location_text(interview: Interview) -> str:
+    if interview.method == "video":
+        return interview.meeting_url or "飞书视频会议将通过日历邀请发送"
+    if interview.method == "onsite":
+        if not interview.location:
+            raise InterviewMessageValidationError("interview_location_invalid")
+        return interview.location
+    if interview.method == "phone":
+        return "招聘负责人将通过电话联系"
+    raise InterviewMessageValidationError("interview_method_invalid")
+
+
 def render_interview_message(
     *,
     kind: str,
@@ -134,7 +146,7 @@ def render_interview_message(
         ends_at = ends_at.replace(tzinfo=timezone.utc)
     local_start = starts_at.astimezone(local_timezone)
     local_end = ends_at.astimezone(local_timezone)
-    location = interview.meeting_url or interview.location or "待确认"
+    location = _interview_location_text(interview)
     method_label = {
         "video": "视频面试",
         "onsite": "现场面试",

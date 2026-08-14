@@ -92,6 +92,29 @@ test("past slots on the current day are unavailable in the selected timezone", (
   assert.equal(isScheduleSlotInPast("2026-07-17", "09:00", "Asia/Shanghai", now), false);
 });
 
+test("interview scheduling offers half-hour start times through 22:00", () => {
+  assert.ok(helpersSource, "ScheduleWorkspace.jsx must expose the interview schedule helper block");
+  const { buildInterviewTimeSlots } = vm.runInNewContext(`(() => { ${helpersSource.replaceAll("export ", "")} return { buildInterviewTimeSlots }; })()`);
+
+  const slots = Array.from(buildInterviewTimeSlots());
+  assert.equal(slots.length, 27);
+  assert.equal(slots[0], "09:00");
+  assert.equal(slots.at(-1), "22:00");
+  assert.deepEqual(slots.slice(-4), ["20:30", "21:00", "21:30", "22:00"]);
+});
+
+test("interview methods use prominent choices and method-specific confirmation requirements", () => {
+  assert.match(source, /role="radiogroup" aria-label="面试方式"/);
+  assert.match(source, /label: "线上面试"/);
+  assert.match(source, /label: "线下面试"/);
+  assert.match(source, /label: "电话面试"/);
+  assert.match(source, /form\.method === "现场面试" && !form\.location\.trim\(\)/);
+  assert.match(source, /保存后自动创建飞书视频会议并通过日历邀请发送/);
+  assert.match(source, /电话面试无需额外填写/);
+  assert.match(source, /method, location: ""/);
+  assert.doesNotMatch(source, />会议链接</);
+});
+
 test("disabled and past slots receive an explicit unavailable visual state", () => {
   assert.match(source, /className=\{`\$\{state\}\$\{disabled \? " unavailable" : ""\}`\}/);
   assert.match(source, /disabled=\{disabled\}/);

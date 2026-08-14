@@ -1131,7 +1131,7 @@ def create_interview(payload: InterviewCreate, request: Request, idempotency_key
                     starts_at=payload.starts_at,
                     ends_at=payload.ends_at,
                     location=payload.location,
-                    meeting_url=payload.meeting_url,
+                    meeting_url=payload.meeting_url if payload.method == "video" else None,
                     status="scheduled",
                     notification_status="not_sent",
                     invitation_status="artifact_ready",
@@ -1308,11 +1308,12 @@ def patch_interview(interview_id: UUID, payload: InterviewPatch, request: Reques
             return problem(request, 422, "interview_time_in_past", "The interview must start in the future.")
         final_method = changes.get("method", interview.method)
         final_location = changes.get("location", interview.location)
-        final_meeting_url = changes.get("meeting_url", interview.meeting_url)
-        if final_method == "video" and not final_meeting_url:
-            return problem(request, 422, "validation_failed", "meeting_url is required for video interviews.")
         if final_method == "onsite" and not final_location:
             return problem(request, 422, "validation_failed", "location is required for onsite interviews.")
+        if final_method != "video" and (
+            interview.meeting_url is not None or "meeting_url" in changes
+        ):
+            changes["meeting_url"] = None
         previous_participant_ids = list(
             db.scalars(
                 select(InterviewParticipant.user_id).where(

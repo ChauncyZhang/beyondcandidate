@@ -385,6 +385,43 @@ def create_interview(client, seed, *, key="create-interview", payload=None):
     return response, headers
 
 
+def test_video_interview_can_be_created_without_a_preexisting_meeting_url(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    payload = interview_payload(seed)
+    payload.pop("meeting_url")
+
+    with TestClient(app) as client:
+        created, _ = create_interview(
+            client, seed, key="create-video-without-link", payload=payload
+        )
+
+    assert created.json()["data"]["method"] == "video"
+    assert created.json()["data"]["meeting_url"] is None
+
+
+@pytest.mark.parametrize(
+    "method,extra",
+    [("onsite", {"location": "会议室 A"}), ("phone", {})],
+)
+def test_switching_from_video_clears_the_old_meeting_url(tmp_path, method, extra) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with TestClient(app) as client:
+        created, headers = create_interview(
+            client, seed, key=f"create-before-{method}"
+        )
+        changed = client.patch(
+            f"/api/v1/interviews/{created.json()['data']['id']}",
+            headers={**headers, "If-Match": '"1"'},
+            json={"method": method, **extra},
+        )
+
+    assert changed.status_code == 200
+    assert changed.json()["data"]["method"] == method
+    assert changed.json()["data"]["meeting_url"] is None
+
+
 def seed_feedback_summary(app):
     seed = seed_application(app)
     recruiter_id = seed_user(app, "recruiter", "application-owner@example.test")

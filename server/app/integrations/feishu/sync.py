@@ -41,6 +41,7 @@ def schedule_interview_sync(database, interview, action: str) -> FeishuInterview
             "organization_id": str(interview.organization_id),
             "interview_id": str(interview.id),
             "sync_id": str(sync.id),
+            "sync_generation": str(sync.idempotency_key),
         },
     )
     return sync

@@ -99,6 +99,7 @@ def test_interview_create_queues_enabled_feishu_sync_with_durable_idempotency(tm
             "organization_id": str(sync.organization_id),
             "interview_id": str(sync.interview_id),
             "sync_id": str(sync.id),
+            "sync_generation": str(sync.idempotency_key),
         }
         assert str(event.id)
         assert notification.payload == {
@@ -229,6 +230,7 @@ def test_outbox_handler_creates_event_and_persists_retry_safe_sync_status(tmp_pa
         app.state.identity_store.sync_session,
         app.state.feishu_provider,
         app.state.feishu_secret_cipher,
+        app.state.contact_cipher,
     )
     asyncio.run(handler(event, event.id))
 
@@ -239,7 +241,71 @@ def test_outbox_handler_creates_event_and_persists_retry_safe_sync_status(tmp_pa
         assert sync.external_event_id in app.state.feishu_provider.events
         event = app.state.feishu_provider.events[sync.external_event_id]
         assert event.attendee_open_ids == ("ou_interviewer",)
-        assert event.attendee_emails == ("interview-admin@example.com",)
+        assert event.attendee_emails == (
+            "interview-admin@example.com",
+            "candidate@example.com",
+        )
+        interview = db.get(Interview, interview_id)
+        assert interview.meeting_url == event.meeting_url
+        assert interview.meeting_url.startswith("https://vc.feishu.test/j/")
+
+
+def test_stale_outbox_generation_cannot_call_feishu_or_overwrite_new_sync(tmp_path) -> None:
+    app = make_app(tmp_path)
+    provider = RecordingCalendarProvider()
+    seed = seed_application(app)
+    with TestClient(app) as client:
+        headers = login(client, "interview-admin@example.test")
+        assert client.put(
+            "/api/v1/settings/integrations/feishu",
+            headers=headers,
+            json={
+                "app_id": "cli_test",
+                "app_secret": "app-secret-value",
+                "redirect_uri": "https://hr.example.test/api/v1/auth/feishu/callback",
+                "calendar_id": "primary",
+                "enabled": True,
+            },
+        ).status_code == 200
+        created, _ = create_interview(
+            client,
+            seed,
+            key="feishu-stale-generation",
+            payload=_future_payload(seed),
+        )
+        interview_id = UUID(created.json()["data"]["id"])
+
+    with app.state.identity_store.sync_session() as db:
+        stale_event = db.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.aggregate_id == interview_id,
+                OutboxEvent.topic == "feishu.calendar.create",
+            )
+        )
+        db.expunge(stale_event)
+        interview = db.get(Interview, interview_id)
+        sync = schedule_interview_sync(db, interview, "update")
+        current_generation = sync.idempotency_key
+        db.commit()
+
+    handler = FeishuCalendarOutboxHandler(
+        app.state.identity_store.sync_session,
+        provider,
+        app.state.feishu_secret_cipher,
+    )
+    asyncio.run(handler(stale_event, stale_event.id))
+
+    assert provider.calendar_calls == []
+    with app.state.identity_store.sync_session() as db:
+        sync = db.scalar(
+            select(FeishuInterviewSync).where(
+                FeishuInterviewSync.interview_id == interview_id
+            )
+        )
+        interview = db.get(Interview, interview_id)
+        assert sync.idempotency_key == current_generation
+        assert sync.sync_status == "pending"
+        assert interview.meeting_url == "https://meeting.example.test/room"
 
 
 @pytest.mark.parametrize("action", ["update", "cancel"])

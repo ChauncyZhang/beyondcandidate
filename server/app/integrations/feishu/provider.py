@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Callable, Protocol
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -74,6 +74,7 @@ class CalendarEventRequest:
     location: str
     attendee_open_ids: tuple[str, ...]
     attendee_emails: tuple[str, ...]
+    video_conference: bool = False
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ class CalendarEvent:
     event_id: str
     attendee_open_ids: tuple[str, ...]
     attendee_emails: tuple[str, ...]
+    meeting_url: str | None = None
     cancelled: bool = False
 
 
@@ -152,10 +154,12 @@ class FakeFeishuProvider:
         self._check()
         if idempotency_key in self._idempotency:
             return self._idempotency[idempotency_key]  # type: ignore[return-value]
+        event_id = f"evt_{uuid4().hex}"
         event = CalendarEvent(
-            f"evt_{uuid4().hex}",
+            event_id,
             request.attendee_open_ids,
             request.attendee_emails,
+            f"https://vc.feishu.test/j/{event_id}" if request.video_conference else None,
         )
         self.events[event.event_id] = event
         self._idempotency[idempotency_key] = event
@@ -171,6 +175,12 @@ class FakeFeishuProvider:
             event_id,
             request.attendee_open_ids,
             request.attendee_emails,
+            (
+                self.events[event_id].meeting_url
+                or f"https://vc.feishu.test/j/{event_id}"
+            )
+            if request.video_conference
+            else None,
         )
         self.events[event_id] = event
         self._idempotency[idempotency_key] = event
@@ -309,7 +319,22 @@ class HttpFeishuProvider:
             "start_time": {"timestamp": str(int(request.starts_at.timestamp())), "timezone": request.timezone},
             "end_time": {"timestamp": str(int(request.ends_at.timestamp())), "timezone": request.timezone},
             "location": {"name": request.location[:512]},
+            "vchat": {"vc_type": "vc" if request.video_conference else "no_meeting"},
         }
+
+    @staticmethod
+    def _meeting_url(event: object) -> str | None:
+        if not isinstance(event, dict):
+            return None
+        vchat = event.get("vchat")
+        meeting_url = vchat.get("meeting_url") if isinstance(vchat, dict) else None
+        if not isinstance(meeting_url, str):
+            return None
+        try:
+            parsed = urlsplit(meeting_url)
+        except ValueError:
+            return None
+        return meeting_url if parsed.scheme in {"http", "https"} and parsed.netloc else None
 
     def _add_attendees(
         self,
@@ -506,7 +531,8 @@ class HttpFeishuProvider:
 
     def create_event(self, credentials: FeishuCredentials, request: CalendarEventRequest, *, idempotency_key: str) -> CalendarEvent:
         payload = self._json("POST", f"{OPEN_API_BASE}/calendar/v4/calendars/{credentials.calendar_id}/events", params={"idempotency_key": idempotency_key}, headers=self._headers(credentials), json=self._event_body(request))
-        event_id = payload.get("data", {}).get("event", {}).get("event_id")
+        event_data = payload.get("data", {}).get("event", {})
+        event_id = event_data.get("event_id") if isinstance(event_data, dict) else None
         if not isinstance(event_id, str) or not event_id:
             raise FeishuProviderError("feishu_response_invalid", retryable=False)
         self._reconcile_attendees(
@@ -519,10 +545,11 @@ class HttpFeishuProvider:
             event_id,
             request.attendee_open_ids,
             request.attendee_emails,
+            self._meeting_url(event_data),
         )
 
     def update_event(self, credentials: FeishuCredentials, event_id: str, request: CalendarEventRequest, *, idempotency_key: str) -> CalendarEvent:
-        self._json("PATCH", f"{OPEN_API_BASE}/calendar/v4/calendars/{credentials.calendar_id}/events/{event_id}", headers=self._headers(credentials), json=self._event_body(request))
+        payload = self._json("PATCH", f"{OPEN_API_BASE}/calendar/v4/calendars/{credentials.calendar_id}/events/{event_id}", headers=self._headers(credentials), json=self._event_body(request))
         self._reconcile_attendees(
             credentials,
             event_id,
@@ -533,6 +560,7 @@ class HttpFeishuProvider:
             event_id,
             request.attendee_open_ids,
             request.attendee_emails,
+            self._meeting_url(payload.get("data", {}).get("event")),
         )
 
     def cancel_event(self, credentials: FeishuCredentials, event_id: str, *, idempotency_key: str) -> None:

@@ -441,6 +441,7 @@ test("date selection loads availability and renders occupied slots red", { timeo
   }];
   const participantOptions = [{ id: users[0].id, display_name: "Admin", roles: ["interviewer"] }];
   const requests = [];
+  let interviewRequestBody;
   const availability = (url) => {
     const from = new Date(new URL(url).searchParams.get("from"));
     const busyStart = new Date(from.getTime() + 9 * 60 * 60 * 1000);
@@ -463,10 +464,13 @@ test("date selection loads availability and renders occupied slots red", { timeo
     participants: [{ user_id: users[0].id, display_name: "Admin", role: "interviewer", required_feedback: true }],
     version: 1,
   };
-  const { context, page } = await openPage({ viewport: { width: 1440, height: 900 }, candidates, interviews: [], interviewSaveResponse, participantOptions, availability, onRequest(pathname, request) { requests.push(`${request.method()} ${pathname}`); } });
+  const { context, page } = await openPage({ viewport: { width: 1440, height: 900 }, candidates, interviews: [], interviewSaveResponse, participantOptions, availability, onRequest(pathname, request) { requests.push(`${request.method()} ${pathname}`); if (pathname === "/api/v1/interviews" && request.method() === "POST") interviewRequestBody = request.postDataJSON(); } });
   try {
     await page.goto(`${baseUrl}interviews/new?candidate=${candidateId}`);
     await page.getByRole("heading", { name: "候选人与面试设置", exact: true }).waitFor();
+    assert.equal(await page.getByRole("radio", { name: /线上面试/ }).getAttribute("aria-checked"), "true");
+    assert.equal(await page.getByRole("radio", { name: /线下面试/ }).count(), 1);
+    assert.equal(await page.getByRole("radio", { name: /电话面试/ }).count(), 1);
     await page.getByRole("button", { name: /下一步：选择面试官/ }).click();
     await page.locator(".interviewer-picker label").filter({ hasText: "Admin" }).click();
     assert.equal(await page.getByRole("button", { name: "查看所选周忙闲", exact: true }).count(), 0);
@@ -486,10 +490,14 @@ test("date selection loads availability and renders occupied slots red", { timeo
     assert.equal(await occupiedSlot.isDisabled(), true);
     assert.equal(requests.filter((item) => item.startsWith("GET /api/v1/interview-availability")).length, 2);
     await availableSlot.click();
-    await page.getByLabel("会议链接", { exact: true }).fill("https://meeting.example.test/one");
+    await page.getByText("保存后自动创建飞书视频会议并通过日历邀请发送。", { exact: true }).waitFor();
+    assert.equal(await page.getByLabel("会议链接", { exact: true }).count(), 0);
     await page.getByRole("button", { name: "确认并保存", exact: true }).click();
     await page.getByRole("heading", { name: "面试安排", exact: true }).waitFor();
     assert.equal(requests.filter((item) => item === "POST /api/v1/interviews").length, 1);
+    assert.equal(interviewRequestBody.method, "video");
+    assert.equal(interviewRequestBody.location, null);
+    assert.equal(interviewRequestBody.meeting_url, null);
     assert.equal(requests.filter((item) => item === "POST /api/v1/interview-conflicts").length, 0);
   } finally { await context.close(); }
 });
@@ -541,7 +549,7 @@ test("a stale availability response cannot replace the current interviewers", { 
     const firstResponse = await firstResponsePromise;
     await firstResponse.finished();
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    assert.equal(await page.locator(".schedule-slot-grid button.unconfirmed").count(), 133);
+    assert.equal(await page.locator(".schedule-slot-grid button.unconfirmed").count(), 189);
     assert.equal(await page.locator(".schedule-slot-grid button.conflict").count(), 0);
   } finally { await context.close(); }
 });

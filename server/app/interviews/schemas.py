@@ -75,8 +75,6 @@ class InterviewCreate(StrictModel):
             raise ValueError("schedule timestamps must include a timezone")
         if self.ends_at <= self.starts_at:
             raise ValueError("ends_at must be after starts_at")
-        if self.method == "video" and not self.meeting_url:
-            raise ValueError("meeting_url is required for video interviews")
         if self.method == "onsite" and not self.location:
             raise ValueError("location is required for onsite interviews")
         if len({item.user_id for item in self.participants}) != len(self.participants):

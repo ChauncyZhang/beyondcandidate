@@ -5,8 +5,9 @@ from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
+from server.app.communications.interview_messages import AUTO_USABLE_CANDIDATE_EMAIL_SOURCES
 from server.app.communications.models import EmailDelivery
 from server.app.identity.models import Job, User, UserStatus
 from server.app.integrations.feishu.models import (
@@ -19,7 +20,7 @@ from server.app.integrations.feishu.provider import CalendarEventRequest, Feishu
 from server.app.interviews.models import Interview, InterviewParticipant
 from server.app.notifications.models import UserNotification
 from server.app.queue.service import PermanentJobError, RetryableJobError
-from server.app.recruiting.models import Application, ApplicationReviewTask, Candidate
+from server.app.recruiting.models import Application, ApplicationReviewTask, Candidate, CandidateContact
 from server.app.recruiting.review_assignments import review_notification_user_ids
 
 
@@ -28,27 +29,80 @@ def _aware(value):
 
 
 class FeishuCalendarOutboxHandler:
-    def __init__(self, sessions, provider, cipher) -> None:
+    def __init__(self, sessions, provider, cipher, contact_cipher=None) -> None:
         self._sessions = sessions
         self._provider = provider
         self._cipher = cipher
+        self._contact_cipher = contact_cipher
+
+    def _candidate_email(self, db, organization_id, candidate_id) -> str | None:
+        if self._contact_cipher is None:
+            return None
+        contacts = list(
+            db.scalars(
+                select(CandidateContact)
+                .where(
+                    CandidateContact.organization_id == organization_id,
+                    CandidateContact.candidate_id == candidate_id,
+                    CandidateContact.kind == "email",
+                    or_(
+                        CandidateContact.confirmation_status == "confirmed",
+                        CandidateContact.source.in_(AUTO_USABLE_CANDIDATE_EMAIL_SOURCES),
+                    ),
+                )
+                .order_by(
+                    (CandidateContact.confirmation_status == "confirmed").desc(),
+                    CandidateContact.confirmed_at.desc(),
+                    CandidateContact.created_at.desc(),
+                    CandidateContact.id.desc(),
+                )
+                .limit(2)
+            ).all()
+        )
+        if not contacts:
+            return None
+        contact = contacts[0]
+        if contact.confirmation_status != "confirmed" and len(contacts) > 1:
+            return None
+        try:
+            return self._contact_cipher.decrypt(contact.ciphertext)
+        except ValueError:
+            return None
 
     async def __call__(self, event, idempotency_key) -> None:
         try:
             organization_id = UUID(event.payload["organization_id"])
             interview_id = UUID(event.payload["interview_id"])
             sync_id = UUID(event.payload["sync_id"])
+            sync_generation = (
+                UUID(event.payload["sync_generation"])
+                if event.payload.get("sync_generation") is not None
+                else None
+            )
             if organization_id != event.organization_id or interview_id != event.aggregate_id:
                 raise ValueError
         except (AttributeError, KeyError, TypeError, ValueError):
             raise PermanentJobError("feishu_payload_invalid") from None
 
+        provider_error: FeishuProviderError | None = None
         with self._sessions.begin() as db:
+            # Keep the interview and its sync row locked until the provider
+            # result is persisted. A concurrent reschedule then observes the
+            # external event id and queues an update instead of a second create.
+            interview = db.scalar(
+                select(Interview)
+                .where(
+                    Interview.organization_id == organization_id,
+                    Interview.id == interview_id,
+                )
+                .with_for_update()
+            )
             sync = db.scalar(select(FeishuInterviewSync).where(FeishuInterviewSync.organization_id == organization_id, FeishuInterviewSync.id == sync_id).with_for_update())
-            interview = db.scalar(select(Interview).where(Interview.organization_id == organization_id, Interview.id == interview_id))
             config = db.scalar(select(FeishuOrganizationConfig).where(FeishuOrganizationConfig.organization_id == organization_id))
             if sync is None or interview is None:
                 raise PermanentJobError("feishu_sync_missing")
+            if sync_generation is not None and sync.idempotency_key != sync_generation:
+                return
             if config is None or not config.enabled or config.encrypted_app_secret is None:
                 sync.sync_status = "disabled"
                 return
@@ -101,6 +155,13 @@ class FeishuCalendarOutboxHandler:
                     open_ids.append(binding.open_id)
                 elif user is not None and user.email:
                     emails.append(user.email)
+            candidate_email = self._candidate_email(
+                db,
+                organization_id,
+                candidate.id,
+            )
+            if candidate_email:
+                emails.append(candidate_email)
             request = CalendarEventRequest(
                 interview_id=interview.id,
                 summary=f"{job.title} - {candidate.display_name} - {interview.round_name}",
@@ -108,43 +169,45 @@ class FeishuCalendarOutboxHandler:
                 ends_at=_aware(interview.ends_at),
                 timezone=interview.timezone,
                 description=f"ATS interview {interview.id}",
-                location=interview.location or interview.meeting_url or "",
+                location=interview.location or "",
+                video_conference=interview.method == "video",
                 attendee_open_ids=tuple(dict.fromkeys(open_ids)),
                 attendee_emails=tuple(dict.fromkeys(emails)),
             )
             sync.sync_status = "syncing"
             sync.attempts += 1
             sync.last_attempted_at = datetime.now(timezone.utc)
-        try:
-            if action == "cancel":
-                if external_event_id:
-                    self._provider.cancel_event(credentials, external_event_id, idempotency_key=str(idempotency_key))
-                result = None
-            elif action == "update" and external_event_id:
-                result = self._provider.update_event(credentials, external_event_id, request, idempotency_key=str(idempotency_key))
+            try:
+                if action == "cancel":
+                    if external_event_id:
+                        self._provider.cancel_event(credentials, external_event_id, idempotency_key=str(idempotency_key))
+                    result = None
+                elif action == "update" and external_event_id:
+                    result = self._provider.update_event(credentials, external_event_id, request, idempotency_key=str(idempotency_key))
+                else:
+                    result = self._provider.create_event(credentials, request, idempotency_key=str(idempotency_key))
+            except FeishuProviderError as error:
+                sync.sync_status = "failed"
+                sync.last_error_code = error.safe_code
+                provider_error = error
             else:
-                result = self._provider.create_event(credentials, request, idempotency_key=str(idempotency_key))
-        except FeishuProviderError as error:
-            with self._sessions.begin() as db:
-                locked = db.scalar(select(FeishuInterviewSync).where(FeishuInterviewSync.id == sync_id).with_for_update())
-                if locked:
-                    locked.sync_status = "failed"
-                    locked.last_error_code = error.safe_code
-            exception = RetryableJobError if error.retryable else PermanentJobError
-            raise exception(error.safe_code) from None
+                sync.last_error_code = None
+                sync.next_retry_at = None
+                if action == "cancel":
+                    sync.sync_status = "cancelled"
+                else:
+                    sync.external_calendar_id = credentials.calendar_id
+                    sync.external_event_id = result.event_id
+                    sync.sync_status = "synced"
+                    if request.video_conference and interview.method == "video":
+                        if result.meeting_url is not None:
+                            interview.meeting_url = result.meeting_url
+                    elif interview.method != "video":
+                        interview.meeting_url = None
 
-        with self._sessions.begin() as db:
-            locked = db.scalar(select(FeishuInterviewSync).where(FeishuInterviewSync.id == sync_id).with_for_update())
-            if locked is None:
-                raise PermanentJobError("feishu_sync_missing")
-            locked.last_error_code = None
-            locked.next_retry_at = None
-            if action == "cancel":
-                locked.sync_status = "cancelled"
-            else:
-                locked.external_calendar_id = credentials.calendar_id
-                locked.external_event_id = result.event_id
-                locked.sync_status = "synced"
+        if provider_error is not None:
+            exception = RetryableJobError if provider_error.retryable else PermanentJobError
+            raise exception(provider_error.safe_code) from None
 
 
 def _platform_origin(redirect_uri: str) -> str:
@@ -577,6 +640,7 @@ def build_feishu_outbox_handlers(settings):
 
     from server.app.integrations.feishu.provider import HttpFeishuProvider
     from server.app.integrations.feishu.service import FeishuSecretCipher
+    from server.app.communications.extraction import contact_cipher_from_settings
 
     key = settings.feishu_config_encryption_key.get_secret_value()
     if key == "change-me":
@@ -587,7 +651,12 @@ def build_feishu_outbox_handlers(settings):
     )
     provider = HttpFeishuProvider()
     cipher = FeishuSecretCipher(key.encode())
-    handler = FeishuCalendarOutboxHandler(sessions, provider, cipher)
+    handler = FeishuCalendarOutboxHandler(
+        sessions,
+        provider,
+        cipher,
+        contact_cipher_from_settings(settings),
+    )
     notification_handler = FeishuNotificationOutboxHandler(sessions, provider, cipher)
     return {
         "feishu.calendar.create": handler,

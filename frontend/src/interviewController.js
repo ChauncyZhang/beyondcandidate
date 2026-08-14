@@ -281,8 +281,8 @@ function interviewBody(form, includeApplication) {
     timezone: safeString(form?.timezone, "Asia/Shanghai"),
     starts_at: startsAt,
     ends_at: endsAt,
-    location: method === "video" ? null : location,
-    meeting_url: method === "video" ? location : null,
+    location: method === "onsite" ? location : null,
+    meeting_url: null,
     participants: participantBody(form?.participants),
     allow_soft_conflict: form?.allowSoftConflict === true,
   };

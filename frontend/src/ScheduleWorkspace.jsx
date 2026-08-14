@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, CalendarDays, Check, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, ClipboardCopy, RefreshCw, Send, UserRound, Users } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CalendarDays, Check, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, ClipboardCopy, MapPin, Phone, RefreshCw, Send, UserRound, Users, Video } from "lucide-react";
 import { buildWeekDays, moveWeek, parseLocalDate, weekLabel, weekRange } from "./interviewDateUtils.js";
 import { isScheduleCandidateEligible, resolveScheduleCandidateId, shouldHydrateScheduleCandidate } from "./interviewViewState.js";
 
@@ -49,12 +49,18 @@ export function recommendedInterviewRound(candidate, fallback = "一面") {
   const commonRounds = ["一面", "二面", "三面", "四面", "终面"];
   return commonRounds[Math.min(completedRounds.length, commonRounds.length - 1)];
 }
+
+export function buildInterviewTimeSlots(startHour = 9, endHour = 22, stepMinutes = 30) {
+  const startMinutes = startHour * 60;
+  const endMinutes = endHour * 60;
+  return Array.from({ length: Math.floor((endMinutes - startMinutes) / stepMinutes) + 1 }, (_, index) => {
+    const minutes = startMinutes + index * stepMinutes;
+    return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+  });
+}
 /* interview-schedule-helpers:end */
 
-const timeSlots = Array.from({ length: 19 }, (_, index) => {
-  const minutes = 9 * 60 + index * 30;
-  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
-});
+const timeSlots = buildInterviewTimeSlots();
 
 function offsetFor(timezone) {
   return ["Asia/Shanghai", "Asia/Singapore"].includes(timezone) ? "+08:00" : "Z";
@@ -83,6 +89,11 @@ export function getAvailabilitySlotState(availability, date, time, duration, tim
 }
 
 const slotLabels = { available: "可排", unconfirmed: "可排·飞书未确认", conflict: "已占用", buffer: "缓冲不足", unknown: "无法确认" };
+const interviewMethods = [
+  { value: "视频面试", label: "线上面试", description: "自动创建飞书视频会议", Icon: Video },
+  { value: "现场面试", label: "线下面试", description: "在指定地点当面进行", Icon: MapPin },
+  { value: "电话面试", label: "电话面试", description: "通过电话直接沟通", Icon: Phone },
+];
 
 export function ScheduleWorkspace({ record, candidateId, candidates, participantOptions, participantStatus, onBack, backLabel, onSave, onGetAvailability, onNotify }) {
   const recordCandidate = record ? { id: record.candidateId, candidateId: record.candidateId, name: record.candidate, position: record.position, role: record.role } : null;
@@ -99,7 +110,7 @@ export function ScheduleWorkspace({ record, candidateId, candidates, participant
     candidateId: resolveScheduleCandidateId(record, candidateId, fallback), position: record?.position || fallback?.position || "", round: record?.round || recommendedInterviewRound(fallback),
     method: record?.method || "视频面试", timezone: record?.timezone || "Asia/Shanghai", date: record?.date || "", time: record?.time || "", duration: record?.duration || 60,
     interviewerIds: record?.interviewerIds || [], location: record?.location === "未填写" ? "" : record?.location || "",
-    candidateMessage: "您好，诚邀您参加本次面试，请提前 5 分钟进入会议。", interviewerMessage: "您有一场新的面试任务，请提前查看候选人材料与职位重点。",
+    candidateMessage: "您好，诚邀您参加本次面试，请提前 5 分钟做好准备。", interviewerMessage: "您有一场新的面试任务，请提前查看候选人材料与职位重点。",
   }));
   useEffect(() => {
     if (record || !candidateId) return;
@@ -123,6 +134,21 @@ export function ScheduleWorkspace({ record, candidateId, candidates, participant
     setForm((current) => ({ ...current, [field]: value }));
     setErrors((current) => ({ ...current, [field]: "" }));
     setSubmitError("");
+  }
+
+  function selectMethod(method) {
+    setForm((current) => current.method === method ? current : { ...current, method, location: "" });
+    setErrors((current) => ({ ...current, location: "" }));
+    setSubmitError("");
+  }
+
+  function moveMethodSelection(event, index) {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault();
+    const direction = ['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : -1;
+    const nextIndex = (index + direction + interviewMethods.length) % interviewMethods.length;
+    selectMethod(interviewMethods[nextIndex].value);
+    event.currentTarget.parentElement?.querySelectorAll('[role="radio"]')[nextIndex]?.focus();
   }
 
   function toggleInterviewer(id) {
@@ -179,7 +205,7 @@ export function ScheduleWorkspace({ record, candidateId, candidates, participant
 
   async function save() {
     const next = {};
-    if (!form.location.trim()) next.location = form.method === "视频面试" ? "请填写会议链接" : "请填写地点或联系说明";
+    if (form.method === "现场面试" && !form.location.trim()) next.location = "请填写面试地点";
     setErrors(next); if (Object.keys(next).length) return;
     if (isScheduleSlotInPast(form.date, form.time, form.timezone)) {
       setSubmitError("该面试时间已经过去，请返回重新选择时间。");
@@ -203,10 +229,10 @@ export function ScheduleWorkspace({ record, candidateId, candidates, participant
   return <div className="interview-page schedule-page"><button className="back-link" type="button" onClick={onBack}><ArrowLeft size={17} />{backLabel}</button>
     <div className="schedule-heading"><div><h2>{record ? "改期面试" : "安排面试"}</h2><p>{candidate?.name || "选择候选人"} · {form.position}</p></div><div className="schedule-steps">{steps.map((label, index) => <span key={label} className={step >= index + 1 ? "active" : ""}><i>{step > index + 1 ? <Check size={13} /> : index + 1}</i>{label}</span>)}</div></div>
     <div className="schedule-layout"><main className="schedule-main">
-      {step === 1 && <section className="schedule-section"><header><CalendarDays size={19} /><div><h3>候选人与面试设置</h3><p>先确认对象、轮次和时长，不预设面试时间。</p></div></header><div className="schedule-grid"><label>候选人<select value={form.candidateId} disabled={Boolean(record)} onChange={(event) => { const selected = candidates.find((item) => item.id === event.target.value || item.candidateId === event.target.value); setForm((current) => ({ ...current, candidateId: event.target.value, position: selected?.position || current.position, round: recommendedInterviewRound(selected, current.round) })); }}><option value="">请选择候选人</option>{candidateOptions.map((item) => <option value={item.candidateId || item.id} key={item.applicationId || item.id}>{item.name} · {item.position}{item.nextRound ? ` · 待安排${item.nextRound}` : ""}</option>)}</select>{errors.candidateId && <small className="field-error">{errors.candidateId}</small>}</label><label>应聘职位<input value={form.position} onChange={(event) => update("position", event.target.value)} />{errors.position && <small className="field-error">{errors.position}</small>}</label><label>面试轮次<select value={form.round} onChange={(event) => update("round", event.target.value)}>{roundOptions.map((round) => <option key={round}>{round}</option>)}</select>{candidate?.nextRound ? <small className="field-hint">已按职位流程预选{candidate.nextRound}</small> : candidate?.stage === "待决策" ? <small className="field-hint">流程轮次已完成，可追加三面、终面或加面</small> : null}</label><label>时长<select value={form.duration} onChange={(event) => update("duration", Number(event.target.value))}><option value="30">30 分钟</option><option value="45">45 分钟</option><option value="60">60 分钟</option><option value="90">90 分钟</option></select></label><label>面试方式<select value={form.method} onChange={(event) => update("method", event.target.value)}><option>视频面试</option><option>现场面试</option><option>电话面试</option></select></label><label>时区<select value={form.timezone} onChange={(event) => update("timezone", event.target.value)}><option value="Asia/Shanghai">北京时间 GMT+8</option><option value="Asia/Singapore">新加坡 GMT+8</option></select></label></div><footer><button className="button primary" type="button" onClick={continueFromBasics}>下一步：选择面试官<ChevronRight size={16} /></button></footer></section>}
+      {step === 1 && <section className="schedule-section"><header><CalendarDays size={19} /><div><h3>候选人与面试设置</h3><p>先确认对象、轮次和时长，不预设面试时间。</p></div></header><div className="schedule-grid"><label>候选人<select value={form.candidateId} disabled={Boolean(record)} onChange={(event) => { const selected = candidates.find((item) => item.id === event.target.value || item.candidateId === event.target.value); setForm((current) => ({ ...current, candidateId: event.target.value, position: selected?.position || current.position, round: recommendedInterviewRound(selected, current.round) })); }}><option value="">请选择候选人</option>{candidateOptions.map((item) => <option value={item.candidateId || item.id} key={item.applicationId || item.id}>{item.name} · {item.position}{item.nextRound ? ` · 待安排${item.nextRound}` : ""}</option>)}</select>{errors.candidateId && <small className="field-error">{errors.candidateId}</small>}</label><label>应聘职位<input value={form.position} onChange={(event) => update("position", event.target.value)} />{errors.position && <small className="field-error">{errors.position}</small>}</label><label>面试轮次<select value={form.round} onChange={(event) => update("round", event.target.value)}>{roundOptions.map((round) => <option key={round}>{round}</option>)}</select>{candidate?.nextRound ? <small className="field-hint">已按职位流程预选{candidate.nextRound}</small> : candidate?.stage === "待决策" ? <small className="field-hint">流程轮次已完成，可追加三面、终面或加面</small> : null}</label><label>时长<select value={form.duration} onChange={(event) => update("duration", Number(event.target.value))}><option value="30">30 分钟</option><option value="45">45 分钟</option><option value="60">60 分钟</option><option value="90">90 分钟</option></select></label><fieldset className="schedule-method-field"><legend>面试方式</legend><div className="schedule-method-options" role="radiogroup" aria-label="面试方式">{interviewMethods.map(({ value, label, description, Icon }, index) => <button key={value} className={form.method === value ? "selected" : ""} type="button" role="radio" aria-checked={form.method === value} tabIndex={form.method === value ? 0 : -1} onClick={() => selectMethod(value)} onKeyDown={(event) => moveMethodSelection(event, index)}><Icon size={19} aria-hidden="true" /><span><strong>{label}</strong><small>{description}</small></span><Check size={15} className="schedule-method-check" aria-hidden="true" /></button>)}</div></fieldset><label>时区<select value={form.timezone} onChange={(event) => update("timezone", event.target.value)}><option value="Asia/Shanghai">北京时间 GMT+8</option><option value="Asia/Singapore">新加坡 GMT+8</option></select></label></div><footer><button className="button primary" type="button" onClick={continueFromBasics}>下一步：选择面试官<ChevronRight size={16} /></button></footer></section>}
       {step === 2 && <section className="schedule-section"><header><Users size={19} /><div><h3>选择面试官</h3><p>下一步会直接在日期时间表中标出所选面试官的已占用时段。</p></div></header><div className="interviewer-picker"><strong>面试官</strong><div>{participantOptions.map((person) => <label key={person.id} className={form.interviewerIds.includes(person.id) ? "selected" : ""}><input type="checkbox" checked={form.interviewerIds.includes(person.id)} onChange={() => toggleInterviewer(person.id)} /><span><UserRound size={16} /></span><strong>{person.name}</strong><small>面试参与人</small></label>)}</div>{participantStatus === "loading" && <p><RefreshCw size={14} />正在加载可选面试官</p>}{participantStatus === "error" && <p className="field-error"><CircleAlert size={14} />面试官目录加载失败</p>}{errors.interviewers && <p className="field-error">{errors.interviewers}</p>}</div><footer><button className="button secondary" type="button" onClick={() => setStep(1)}>上一步</button><button className="button primary" type="button" disabled={!form.interviewerIds.length} onClick={continueToTime}>下一步：选择日期时间<ChevronRight size={16} /></button></footer></section>}
       {step === 3 && <section className="schedule-section"><header><CalendarDays size={19} /><div><h3>选择可用日期时间</h3><p>红色表示所选面试官已有安排；缓冲不足和已过去的时段同样不可选。</p></div></header><div className="availability-toolbar schedule-time-toolbar"><button type="button" aria-label="上一周" disabled={availability.status === "loading"} onClick={() => changeWeek(-1)}><ChevronLeft size={16} /></button><strong>{weekLabel(weekReference)}</strong><button type="button" aria-label="下一周" disabled={availability.status === "loading"} onClick={() => changeWeek(1)}><ChevronRight size={16} /></button><input aria-label="选择排期周" type="date" disabled={availability.status === "loading"} value={weekDays[0].key} onChange={(event) => { const reference = parseLocalDate(event.target.value); if (reference) { setWeekReference(reference); update("date", ""); update("time", ""); void loadAvailability(reference); } }} /></div><div className="availability-legend"><span className="available">可排</span><span className="conflict">已占用</span><span className="buffer">缓冲不足</span><span className="unconfirmed">可排·飞书未确认</span></div><div className="schedule-availability-state" aria-live="polite">{availability.status === "loading" && <p><RefreshCw size={16} />正在读取所选面试官的日历</p>}{availability.status === "error" && <p role="alert"><AlertTriangle size={16} />忙闲服务暂时不可用<button className="button secondary" type="button" onClick={() => void loadAvailability()}>重新查询</button></p>}</div>{availability.status === "ready" && <div className="schedule-slot-grid">{weekDays.map((day) => <section key={day.key}><header><strong>{day.weekday}</strong><span>{day.label}</span></header><div>{timeSlots.map((time) => { const state = getAvailabilitySlotState(availability, day.key, time, form.duration, form.timezone); const inPast = isScheduleSlotInPast(day.key, time, form.timezone); const disabled = !["available", "unconfirmed"].includes(state) || inPast; return <button type="button" key={time} className={`${state}${disabled ? " unavailable" : ""}`} disabled={disabled} onClick={() => chooseSlot(day.key, time)}><strong>{time}</strong><span>{inPast ? "已过期" : slotLabels[state]}</span></button>; })}</div></section>)}</div>}<footer><button className="button secondary" type="button" onClick={() => setStep(2)}>上一步</button></footer></section>}
-      {step === 4 && <section className="schedule-section"><header><Send size={19} /><div><h3>确认邀请</h3><p>保存前会再次执行服务端权威冲突检查。</p></div></header><div className="schedule-summary"><div><span>候选人</span><strong>{candidate?.name} · {form.position}</strong></div><div><span>时间</span><strong>{form.date} {form.time} · {form.duration} 分钟</strong></div><div><span>面试官</span><strong>{selectedInterviewers.map((item) => item.name).join("、")}</strong></div><div><span>方式</span><strong>{form.method}</strong></div></div><label className="schedule-full-field">{form.method === "视频面试" ? "会议链接" : form.method === "现场面试" ? "面试地点" : "联系说明"}<input value={form.location} onChange={(event) => update("location", event.target.value)} />{errors.location && <small className="field-error">{errors.location}</small>}</label><div className="invitation-preview"><section><header><strong>候选人邀请文本</strong><button type="button" onClick={() => void copyInvitation(form.candidateMessage, "候选人邀请文本")}><ClipboardCopy size={14} />复制</button></header><textarea rows="4" value={form.candidateMessage} onChange={(event) => update("candidateMessage", event.target.value)} /></section><section><header><strong>面试官任务文本</strong><button type="button" onClick={() => void copyInvitation(form.interviewerMessage, "面试官任务文本")}><ClipboardCopy size={14} />复制</button></header><textarea rows="4" value={form.interviewerMessage} onChange={(event) => update("interviewerMessage", event.target.value)} /></section></div>{submitError && <div className="feedback-submit-error" role="alert"><CircleAlert size={18} /><p>{submitError}</p></div>}<footer><button className="button secondary" type="button" disabled={submitting} onClick={() => setStep(3)}>上一步</button><button className="button primary" type="button" disabled={submitting} onClick={() => void save()}><CheckCircle2 size={16} />{submitting ? "正在检查并保存" : "确认并保存"}</button></footer></section>}
+      {step === 4 && <section className="schedule-section"><header><Send size={19} /><div><h3>确认邀请</h3><p>保存前会再次执行服务端权威冲突检查。</p></div></header><div className="schedule-summary"><div><span>候选人</span><strong>{candidate?.name} · {form.position}</strong></div><div><span>时间</span><strong>{form.date} {form.time} · {form.duration} 分钟</strong></div><div><span>面试官</span><strong>{selectedInterviewers.map((item) => item.name).join("、")}</strong></div><div><span>方式</span><strong>{form.method}</strong></div></div>{form.method === "现场面试" ? <label className="schedule-full-field">面试地点<span className="required-mark" aria-hidden="true">*</span><input value={form.location} aria-required="true" placeholder="例如：深圳研发中心 3 楼会议室" onChange={(event) => update("location", event.target.value)} />{errors.location && <small className="field-error">{errors.location}</small>}</label> : <div className="schedule-method-note" role="status">{form.method === "视频面试" ? <><Video size={18} aria-hidden="true" /><p><strong>飞书视频会议将自动创建</strong><span>保存后自动创建飞书视频会议并通过日历邀请发送。</span></p></> : <><Phone size={18} aria-hidden="true" /><p><strong>电话面试无需额外填写</strong><span>保存后将按当前时间和参与人发送日历邀请。</span></p></>}</div>}<div className="invitation-preview"><section><header><strong>候选人邀请文本</strong><button type="button" onClick={() => void copyInvitation(form.candidateMessage, "候选人邀请文本")}><ClipboardCopy size={14} />复制</button></header><textarea rows="4" value={form.candidateMessage} onChange={(event) => update("candidateMessage", event.target.value)} /></section><section><header><strong>面试官任务文本</strong><button type="button" onClick={() => void copyInvitation(form.interviewerMessage, "面试官任务文本")}><ClipboardCopy size={14} />复制</button></header><textarea rows="4" value={form.interviewerMessage} onChange={(event) => update("interviewerMessage", event.target.value)} /></section></div>{submitError && <div className="feedback-submit-error" role="alert"><CircleAlert size={18} /><p>{submitError}</p></div>}<footer><button className="button secondary" type="button" disabled={submitting} onClick={() => setStep(3)}>上一步</button><button className="button primary" type="button" disabled={submitting} onClick={() => void save()}><CheckCircle2 size={16} />{submitting ? "正在检查并保存" : "确认并保存"}</button></footer></section>}
     </main><aside className="schedule-aside"><section><h3>候选人摘要</h3><strong>{candidate?.name || "待选择"}</strong><p>{candidate?.role || "当前职称未填写"}</p><p>{candidate?.summary || "候选人详情以服务端档案为准。"}</p></section><section><h3>本次安排</h3><dl><div><dt>轮次</dt><dd>{form.round}</dd></div><div><dt>时间</dt><dd>{form.date && form.time ? `${form.date} ${form.time}` : "待选时段"}</dd></div><div><dt>面试官</dt><dd>{selectedInterviewers.map((item) => item.name).join("、") || "待选择"}</dd></div></dl></section></aside></div>
   </div>;
 }

@@ -454,6 +454,7 @@ def _calendar_event_request(
     *,
     attendee_open_ids: tuple[str, ...],
     attendee_emails: tuple[str, ...],
+    video_conference: bool = False,
 ) -> CalendarEventRequest:
     return CalendarEventRequest(
         interview_id=uuid4(),
@@ -465,7 +466,71 @@ def _calendar_event_request(
         location="Room 1",
         attendee_open_ids=attendee_open_ids,
         attendee_emails=attendee_emails,
+        video_conference=video_conference,
     )
+
+
+def test_http_provider_creates_native_vchat_and_parses_meeting_url() -> None:
+    event_writes: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token"})
+        if request.method == "POST" and request.url.path.endswith("/events"):
+            event_writes.append(request)
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {"event": {"event_id": "evt_video", "vchat": {
+                    "vc_type": "vc",
+                    "meeting_url": "https://vc.feishu.cn/j/123456789",
+                }}},
+            })
+        if request.method == "GET" and request.url.path.endswith("/events/evt_video/attendees"):
+            return httpx.Response(200, json={"code": 0, "data": {"items": [], "has_more": False}})
+        if request.method == "POST" and request.url.path.endswith("/events/evt_video/attendees"):
+            return httpx.Response(200, json={"code": 0, "data": {"attendees": []}})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    result = provider.create_event(
+        FeishuCredentials("cli", "secret", "https://example.test/callback"),
+        _calendar_event_request(
+            attendee_open_ids=("ou_bound",),
+            attendee_emails=(),
+            video_conference=True,
+        ),
+        idempotency_key="video-event-key",
+    )
+
+    assert json.loads(event_writes[0].content)["vchat"] == {"vc_type": "vc"}
+    assert len(event_writes) == 1
+    assert result.meeting_url == "https://vc.feishu.cn/j/123456789"
+
+
+def test_http_provider_update_explicitly_removes_native_vchat() -> None:
+    patch_body = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal patch_body
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token"})
+        if request.method == "PATCH" and request.url.path.endswith("/events/evt_1"):
+            patch_body = json.loads(request.content)
+            return httpx.Response(200, json={"code": 0, "data": {"event": {"event_id": "evt_1", "vchat": {"vc_type": "no_meeting"}}}})
+        if request.method == "GET" and request.url.path.endswith("/events/evt_1/attendees"):
+            return httpx.Response(200, json={"code": 0, "data": {"items": [], "has_more": False}})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    result = provider.update_event(
+        FeishuCredentials("cli", "secret", "https://example.test/callback"),
+        "evt_1",
+        _calendar_event_request(attendee_open_ids=(), attendee_emails=()),
+        idempotency_key="remove-video-key",
+    )
+
+    assert patch_body["vchat"] == {"vc_type": "no_meeting"}
+    assert result.meeting_url is None
 
 
 def test_http_provider_update_adds_only_missing_internal_and_external_attendees() -> None:

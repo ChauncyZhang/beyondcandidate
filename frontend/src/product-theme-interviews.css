@@ -385,6 +385,32 @@
 .feedback-form-section header p { color: var(--muted); font-size: 14px; }
 
 .schedule-grid { padding: 16px; gap: 16px; }
+.schedule-method-field { min-width: 0; margin: 0; padding: 0; border: 0; grid-column: 1 / -1; }
+.schedule-method-field legend { margin-bottom: 7px; color: var(--ink-secondary); font-size: 14px; font-weight: 500; }
+.schedule-method-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.schedule-method-options button {
+  position: relative;
+  min-width: 0;
+  min-height: 82px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink-secondary);
+  background: var(--surface);
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  cursor: pointer;
+  text-align: left;
+}
+.schedule-method-options button:hover { border-color: var(--line-strong); }
+.schedule-method-options button:focus-visible { outline: 3px solid rgba(0, 102, 230, .18); outline-offset: 2px; }
+.schedule-method-options button.selected { border-color: var(--blue); color: var(--blue); background: var(--blue-soft); }
+.schedule-method-options button > span { min-width: 0; display: grid; gap: 4px; }
+.schedule-method-options strong { color: var(--ink); font-size: 14px; }
+.schedule-method-options small { color: var(--muted); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+.schedule-method-check { margin-left: auto; flex: 0 0 auto; opacity: 0; }
+.schedule-method-options button.selected .schedule-method-check { opacity: 1; }
 .schedule-grid label,
 .schedule-full-field,
 .feedback-form-section label { color: var(--ink-secondary); font-size: 14px; font-weight: 500; }
@@ -499,6 +525,23 @@
 .schedule-summary > div { border-color: var(--line); }
 .schedule-summary span { color: var(--muted); font-size: 14px; }
 .schedule-summary strong { color: var(--ink); font-size: 14px; }
+.schedule-full-field .required-mark { margin-left: 3px; color: var(--red); }
+.schedule-method-note {
+  min-width: 0;
+  margin: 0 17px 13px;
+  padding: 12px;
+  border: 1px solid #b9d7fb;
+  border-radius: var(--radius);
+  color: var(--blue);
+  background: var(--blue-soft);
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+.schedule-method-note svg { flex: 0 0 auto; margin-top: 1px; }
+.schedule-method-note p { min-width: 0; margin: 0; display: grid; gap: 4px; }
+.schedule-method-note strong { color: var(--ink); font-size: 14px; }
+.schedule-method-note span { color: var(--ink-secondary); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 .invitation-preview { gap: 10px; }
 .invitation-preview section { border-color: var(--line); border-radius: var(--radius); }
 .invitation-preview header { min-height: 42px; background: #f7f7f9; }
@@ -700,6 +743,7 @@
   .schedule-section { min-height: 0; }
   .schedule-section > header { padding: 13px; }
   .schedule-grid { grid-template-columns: 1fr; padding: 13px; gap: 13px; }
+  .schedule-method-options { grid-template-columns: 1fr; }
   .interviewer-picker { padding: 13px; }
   .interviewer-picker > div { grid-template-columns: 1fr; }
   .availability-toolbar,
@@ -708,6 +752,7 @@
   .schedule-full-field,
   .schedule-summary,
   .invitation-preview { margin-left: 13px; margin-right: 13px; }
+  .schedule-method-note { margin-left: 13px; margin-right: 13px; }
   .availability-toolbar > strong { width: 100%; }
   .availability-toolbar .button { width: 100%; }
   .availability-timeline section { align-items: flex-start; }

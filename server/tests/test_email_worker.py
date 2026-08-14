@@ -162,10 +162,16 @@ def test_interview_html_email_does_not_link_unsafe_location_values():
 
 
 @pytest.mark.parametrize(
-    "method,expected_label",
-    [("video", "视频面试"), ("onsite", "现场面试"), ("phone", "电话面试")],
+    "method,expected_label,expected_location",
+    [
+        ("video", "视频面试", "飞书视频会议将通过日历邀请发送"),
+        ("onsite", "现场面试", "测试地点"),
+        ("phone", "电话面试", "招聘负责人将通过电话联系"),
+    ],
 )
-def test_interview_plain_text_uses_candidate_facing_method_labels(method, expected_label):
+def test_interview_plain_text_and_ics_use_candidate_facing_delivery_details(
+    method, expected_label, expected_location
+):
     interview = SimpleNamespace(
         id=uuid.uuid4(),
         timezone="Asia/Shanghai",
@@ -173,7 +179,7 @@ def test_interview_plain_text_uses_candidate_facing_method_labels(method, expect
         ends_at=datetime(2026, 8, 13, 6, 0, tzinfo=timezone.utc),
         round_name="一面",
         method=method,
-        meeting_url="https://meeting.example.test/one" if method == "video" else None,
+        meeting_url=None,
         location="测试地点" if method == "onsite" else None,
         calendar_attendees=[],
         calendar_sequence=0,
@@ -193,6 +199,41 @@ def test_interview_plain_text_uses_candidate_facing_method_labels(method, expect
 
     assert f"方式：{expected_label}" in message.body
     assert f"方式：{method}" not in message.body
+    assert f"地点/链接：{expected_location}" in message.body
+    assert expected_location.encode("utf-8") in message.attachment_content
+    assert "待确认" not in message.body
+    assert "待确认".encode("utf-8") not in message.attachment_content
+
+
+def test_interview_message_keeps_an_existing_video_meeting_url() -> None:
+    meeting_url = "https://vc.feishu.cn/j/123456789"
+    interview = SimpleNamespace(
+        id=uuid.uuid4(),
+        timezone="Asia/Shanghai",
+        starts_at=datetime(2026, 8, 13, 5, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 8, 13, 6, 0, tzinfo=timezone.utc),
+        round_name="一面",
+        method="video",
+        meeting_url=meeting_url,
+        location=None,
+        calendar_attendees=[],
+        calendar_sequence=0,
+        status="scheduled",
+    )
+
+    message = render_interview_message(
+        kind="interview_invitation",
+        interview=interview,
+        candidate_name="测试候选人",
+        candidate_email="candidate@example.test",
+        job_title="测试职位",
+        organizer=CalendarContact(name="招聘负责人", email="hr@example.test"),
+        reply_to_name="招聘负责人",
+        dtstamp=datetime(2026, 8, 12, tzinfo=timezone.utc),
+    )
+
+    assert f"地点/链接：{meeting_url}" in message.body
+    assert meeting_url.encode() in message.attachment_content
 
 
 def test_smtp_provider_adds_html_alternative_without_removing_plain_text(monkeypatch):

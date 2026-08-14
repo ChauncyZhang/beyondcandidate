@@ -343,13 +343,42 @@ test("creates and reschedules interviews with idempotency and quoted versions", 
     starts_at: "2026-07-15T10:00:00+08:00",
     ends_at: "2026-07-15T11:00:00+08:00",
     location: null,
-    meeting_url: "https://meeting.example.com/one",
+    meeting_url: null,
     participants: [{ user_id: USER_ID, role: "interviewer", required_feedback: true }],
     allow_soft_conflict: true,
   };
   assert.deepEqual(calls, [
     { kind: "request", path: "/api/v1/interviews", options: { method: "POST", body, idempotencyKey: "create-key", signal } },
     { kind: "request", path: `/api/v1/interviews/${INTERVIEW_ID}`, options: { method: "PATCH", body: Object.fromEntries(Object.entries(body).filter(([key]) => key !== "application_id")), ifMatch: '"7"', idempotencyKey: "patch-key", signal } },
+  ]);
+});
+
+test("sends a location only for onsite interviews", async () => {
+  const { client, calls } = queuedClient([
+    { data: apiInterview({ method: "onsite", location: "深圳研发中心" }) },
+    { data: apiInterview({ method: "phone", location: null }) },
+  ]);
+  const controller = createInterviewController({ client, idempotencyKey: () => "method-key" });
+  const baseForm = {
+    applicationId: APPLICATION_ID,
+    round: "一面",
+    timezone: "Asia/Shanghai",
+    date: "2026-07-15",
+    time: "10:00",
+    duration: 60,
+    participants: [{ id: USER_ID, role: "interviewer", requiredFeedback: true }],
+  };
+
+  await controller.save(null, { ...baseForm, method: "现场面试", location: "深圳研发中心" });
+  await controller.save(null, { ...baseForm, method: "电话面试", location: "不应提交的旧地址" });
+
+  assert.deepEqual(calls.map((call) => ({
+    method: call.options.body.method,
+    location: call.options.body.location,
+    meetingUrl: call.options.body.meeting_url,
+  })), [
+    { method: "onsite", location: "深圳研发中心", meetingUrl: null },
+    { method: "phone", location: null, meetingUrl: null },
   ]);
 });
 
