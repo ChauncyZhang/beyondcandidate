@@ -5,7 +5,7 @@
 1. 在部署环境设置独立的 `EMAIL_ENCRYPTION_KEY`。它必须是 32 字节 padded base64url 密钥，不能与联系人、LLM 或飞书密钥复用。
 2. 将 `OFFER_PUBLIC_BASE_URL` 设置为候选人实际访问的站点 origin，例如 `https://recruiting.example.com`。生产环境必须使用 HTTPS，且不能带路径、查询参数或账号信息。
 3. 根据企业邮件策略设置 `EMAIL_FROM_ADDRESS`、`EMAIL_FROM_NAME` 和 `EMAIL_SMTP_TIMEOUT_SECONDS`。
-4. 系统管理员在网页的邮件设置中填写 SMTP 主机、端口、TLS 模式、账号、密码及回复地址，保存后执行连接测试。
+4. 系统管理员在网页的邮件设置中填写 SMTP 主机、端口、连接加密方式、账号、密码及回复地址，保存后执行连接测试。服务商标注 SSL/SMTPS 时选择“SSL/TLS（连接即加密）”；标注 STARTTLS 时选择“STARTTLS（连接后升级加密）”。
 5. 执行 Alembic 迁移到最新 revision 后，再启动 API 与 worker。
 
 候选人公开页由同一个前端站点提供。反向代理必须将 `/offer/` 返回前端页面，并将 `/api/public/v1/offers/` 转发到 API。项目 Nginx 模板已关闭这两类路径的访问日志，并添加 `no-store` 与安全响应头。

@@ -147,6 +147,7 @@ test("system administrator edits sender without replacing the SMTP password, sav
     assert.equal(await page.getByLabel("发件人名称").inputValue(), "星河招聘");
     assert.equal(await page.getByLabel("发件地址").inputValue(), "jobs@example.test");
     assert.equal(await page.getByLabel("替换 SMTP 密码").inputValue(), "");
+    assert.deepEqual(await page.getByLabel("连接加密").locator("option").allTextContents(), ["STARTTLS（连接后升级加密）", "SSL/TLS（连接即加密）"]);
     await page.getByLabel("发件人名称").fill("星河人才团队");
     await page.getByLabel("发件地址").fill("talent@example.test");
     await page.getByLabel("默认回复地址").fill("talent@example.test");
