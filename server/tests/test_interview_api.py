@@ -13,6 +13,7 @@ from server.app.communications.worker import EmailDeliveryJobHandler
 from server.app.core.settings import Settings
 from server.app.identity.models import AuditLog, Job, JobCollaborator, Organization, User, UserRole, UserStatus
 from server.app.identity.security import PasswordService
+from server.app.integrations.feishu.models import FeishuInterviewSync
 from server.app.interviews.models import (
     Interview,
     InterviewEvent,
@@ -22,7 +23,7 @@ from server.app.interviews.models import (
 )
 from server.app.main import create_app
 from server.app.queue.models import BackgroundJob
-from server.app.queue.service import PermanentJobError
+from server.app.queue.service import PermanentJobError, RetryableJobError
 from server.app.recruiting.models import Application, Candidate, CandidateContact, FileObject, JobJdVersion, Resume
 from server.app.recruiting.storage import MAX_PREVIEW_BYTES
 from server.app.screening.models import ScreeningResult
@@ -398,6 +399,154 @@ def test_video_interview_can_be_created_without_a_preexisting_meeting_url(tmp_pa
 
     assert created.json()["data"]["method"] == "video"
     assert created.json()["data"]["meeting_url"] is None
+
+
+def test_video_interview_email_materializes_feishu_link_before_sending(tmp_path) -> None:
+    class RecordingProvider:
+        def __init__(self):
+            self.messages = []
+
+        async def send(self, message):
+            self.messages.append(message)
+            return ProviderReceipt("provider-receipt")
+
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    payload = interview_payload(seed)
+    payload.pop("meeting_url")
+    with TestClient(app) as client:
+        headers = login(client, "interview-admin@example.test")
+        configured = client.put(
+            "/api/v1/settings/integrations/feishu",
+            headers=headers,
+            json={
+                "app_id": "cli_test",
+                "app_secret": "app-secret-value",
+                "redirect_uri": "https://hr.example.test/api/v1/auth/feishu/callback",
+                "calendar_id": "primary",
+                "enabled": True,
+            },
+        )
+        assert configured.status_code == 200
+        created, _ = create_interview(
+            client,
+            seed,
+            key="video-email-materializes-link",
+            payload=payload,
+        )
+
+    interview_id = UUID(created.json()["data"]["id"])
+    meeting_url = "https://vc.feishu.cn/j/123456789"
+    with app.state.identity_store.sync_session() as database:
+        interview = database.get(Interview, interview_id)
+        interview.meeting_url = meeting_url
+        sync = database.scalar(
+            select(FeishuInterviewSync).where(
+                FeishuInterviewSync.interview_id == interview_id
+            )
+        )
+        sync.sync_status = "synced"
+        job = database.scalar(
+            select(BackgroundJob).where(
+                BackgroundJob.type == "communications.send_email"
+            )
+        )
+        assert job.max_attempts == 5
+        database.commit()
+
+    provider = RecordingProvider()
+    asyncio.run(
+        EmailDeliveryJobHandler(
+            app.state.identity_store.sync_session,
+            provider,
+            app.state.email_secret_cipher,
+        )(job)
+    )
+
+    message = provider.messages[0]
+    assert f"地点/链接：{meeting_url}" in message.body
+    assert message.html_body.count(f'href="{meeting_url}"') == 2
+    assert ">进入面试</a>" in message.html_body
+    assert meeting_url.encode() in message.attachment_content
+
+
+def test_video_interview_email_waits_while_feishu_link_is_pending(tmp_path) -> None:
+    class RecordingProvider:
+        def __init__(self):
+            self.messages = []
+
+        async def send(self, message):
+            self.messages.append(message)
+            return ProviderReceipt("provider-receipt")
+
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    payload = interview_payload(seed)
+    payload.pop("meeting_url")
+    with TestClient(app) as client:
+        headers = login(client, "interview-admin@example.test")
+        assert client.put(
+            "/api/v1/settings/integrations/feishu",
+            headers=headers,
+            json={
+                "app_id": "cli_test",
+                "app_secret": "app-secret-value",
+                "redirect_uri": "https://hr.example.test/api/v1/auth/feishu/callback",
+                "calendar_id": "primary",
+                "enabled": True,
+            },
+        ).status_code == 200
+        created, _ = create_interview(
+            client,
+            seed,
+            key="video-email-waits-for-link",
+            payload=payload,
+        )
+
+    interview_id = UUID(created.json()["data"]["id"])
+    with app.state.identity_store.sync_session() as database:
+        sync = database.scalar(
+            select(FeishuInterviewSync).where(
+                FeishuInterviewSync.interview_id == interview_id
+            )
+        )
+        assert sync.sync_status == "pending"
+        job = database.scalar(
+            select(BackgroundJob).where(
+                BackgroundJob.type == "communications.send_email"
+            )
+        )
+        delivery = database.scalar(
+            select(EmailDelivery).where(EmailDelivery.resource_id == interview_id)
+        )
+        delivery_id = delivery.id
+
+    provider = RecordingProvider()
+    with pytest.raises(RetryableJobError, match="feishu_meeting_link_pending"):
+        asyncio.run(
+            EmailDeliveryJobHandler(
+                app.state.identity_store.sync_session,
+                provider,
+                app.state.email_secret_cipher,
+            )(job)
+        )
+
+    assert provider.messages == []
+    with app.state.identity_store.sync_session() as database:
+        delivery = database.get(EmailDelivery, delivery_id)
+        assert (delivery.status, delivery.attempts) == ("queued", 0)
+
+    # The last bounded attempt must still send the invitation when Feishu is
+    # unavailable, so calendar integration cannot block the hiring workflow.
+    job.attempts = job.max_attempts
+    asyncio.run(
+        EmailDeliveryJobHandler(
+            app.state.identity_store.sync_session,
+            provider,
+            app.state.email_secret_cipher,
+        )(job)
+    )
+    assert "地点/链接：飞书视频会议将通过日历邀请发送" in provider.messages[0].body
 
 
 @pytest.mark.parametrize(
@@ -1046,6 +1195,14 @@ def test_create_interview_prefers_confirmed_email_over_newer_auto_extracted_emai
 
 
 def test_reschedule_and_cancel_enqueue_one_versioned_calendar_message_each(tmp_path) -> None:
+    class RecordingProvider:
+        def __init__(self):
+            self.messages = []
+
+        async def send(self, message):
+            self.messages.append(message)
+            return ProviderReceipt("provider-receipt")
+
     app = make_app(tmp_path)
     seed = seed_application(app)
     with TestClient(app) as client:
@@ -1100,7 +1257,12 @@ def test_reschedule_and_cancel_enqueue_one_versioned_calendar_message_each(tmp_p
             "interview_rescheduled",
             "interview_cancelled",
         ]
-        assert len(database.scalars(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email")).all()) == 3
+        jobs = database.scalars(
+            select(BackgroundJob).where(
+                BackgroundJob.type == "communications.send_email"
+            )
+        ).all()
+        assert len(jobs) == 3
         for sequence, delivery in enumerate(deliveries):
             assert b"candidate@example.com" not in delivery.attachment_ciphertext
             calendar = app.state.email_secret_cipher.decrypt_attachment(
@@ -1117,6 +1279,29 @@ def test_reschedule_and_cancel_enqueue_one_versioned_calendar_message_each(tmp_p
         ).decode("utf-8")
         assert "METHOD:CANCEL\r\n" in cancellation
         assert "STATUS:CANCELLED\r\n" in cancellation
+        invitation_delivery_id = deliveries[0].id
+        invitation_job = next(
+            job
+            for job in jobs
+            if job.payload["delivery_id"] == str(invitation_delivery_id)
+        )
+
+    provider = RecordingProvider()
+    asyncio.run(
+        EmailDeliveryJobHandler(
+            app.state.identity_store.sync_session,
+            provider,
+            app.state.email_secret_cipher,
+        )(invitation_job)
+    )
+    assert provider.messages == []
+    with app.state.identity_store.sync_session() as database:
+        invitation_delivery = database.get(EmailDelivery, invitation_delivery_id)
+        assert (
+            invitation_delivery.status,
+            invitation_delivery.safe_error_code,
+            invitation_delivery.attempts,
+        ) == ("cancelled", "interview_message_superseded", 0)
 
 
 def test_interview_messages_resolve_current_job_owner_without_inheriting_initial_contact(tmp_path) -> None:

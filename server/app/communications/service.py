@@ -201,10 +201,17 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
         if existing is None or not hmac.compare_digest(existing.request_fingerprint, request_fingerprint):
             raise DeliveryIdempotencyConflict("idempotency_conflict") from None
         return existing
+    job_max_attempts = (
+        5
+        if command.resource_type in {"interview_invitation", "interview_rescheduled"}
+        else 3
+    )
     QueueRepository(db).enqueue(
         command.organization_id, "communications.send_email",
         {"organization_id": str(command.organization_id), "delivery_id": str(delivery.id)},
-        max_attempts=3, dedupe_key=f"email-delivery:{delivery.id}", trace_id=command.trace_id,
+        max_attempts=job_max_attempts,
+        dedupe_key=f"email-delivery:{delivery.id}",
+        trace_id=command.trace_id,
     )
     return delivery
 
@@ -233,7 +240,7 @@ def _responsible_notification_user_id(db, delivery: EmailDelivery) -> uuid.UUID 
 
 
 def mark_delivery_failed(db, delivery: EmailDelivery, safe_code: str, now: datetime | None = None) -> str:
-    if delivery.status in {"sent", "failed"}:
+    if delivery.status in {"sent", "failed", "cancelled"}:
         return delivery.safe_error_code or normalize_safe_code(safe_code)
     responsible_user_id = _responsible_notification_user_id(db, delivery)
     effective_safe_code = normalize_safe_code(safe_code) if responsible_user_id is not None else "email_notification_recipient_unavailable"

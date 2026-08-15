@@ -23,6 +23,7 @@ from server.app.recruiting.security import ContactCipher
 INTERVIEW_MESSAGE_KINDS = frozenset(
     {"interview_invitation", "interview_rescheduled", "interview_cancelled"}
 )
+PENDING_FEISHU_MEETING_TEXT = "飞书视频会议将通过日历邀请发送"
 AUTO_USABLE_CANDIDATE_EMAIL_SOURCES = frozenset({"native", "ocr"})
 
 
@@ -103,7 +104,7 @@ def _calendar_contacts(values: list[dict]) -> tuple[CalendarContact, ...]:
 
 def _interview_location_text(interview: Interview) -> str:
     if interview.method == "video":
-        return interview.meeting_url or "飞书视频会议将通过日历邀请发送"
+        return interview.meeting_url or PENDING_FEISHU_MEETING_TEXT
     if interview.method == "onsite":
         if not interview.location:
             raise InterviewMessageValidationError("interview_location_invalid")

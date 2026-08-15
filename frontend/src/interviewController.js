@@ -14,7 +14,7 @@ const API_TO_UI_STATUS = {
   no_show: "未到场",
 };
 const API_TO_UI_NOTIFICATION = { sent: "已发送", failed: "发送失败", queued: "待发送", not_sent: "待发送" };
-const API_TO_UI_EMAIL_DELIVERY = { queued: "待发送", sending: "待发送", sent: "已发送", failed: "发送失败", not_sent: "未发送" };
+const API_TO_UI_EMAIL_DELIVERY = { queued: "待发送", sending: "待发送", sent: "已发送", failed: "发送失败", cancelled: "已取消", not_sent: "未发送" };
 const EMAIL_DELIVERY_ERROR_TEXT = {
   email_not_configured: "邮件服务尚未配置，请人工通知候选人。",
   email_configuration_unavailable: "邮件服务配置不可用，请联系系统管理员。",
@@ -23,6 +23,7 @@ const EMAIL_DELIVERY_ERROR_TEXT = {
   smtp_rejected: "邮件服务拒绝发送，请联系系统管理员。",
   smtp_timeout: "邮件服务响应超时，可以稍后重新发送。",
   smtp_unavailable: "邮件服务暂时不可用，可以稍后重新发送。",
+  interview_message_superseded: "旧通知已被后续面试安排取代，未发送。",
 };
 const UI_TO_API_RATING = { "需提升": 1, "一般": 2, "良好": 3, "优秀": 4 };
 const API_TO_UI_RATING = { 1: "需提升", 2: "一般", 3: "良好", 4: "优秀" };

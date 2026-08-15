@@ -114,7 +114,7 @@ class EmailDelivery(Base):
         ForeignKeyConstraint(["organization_id", "template_id"], ["email_templates.organization_id", "email_templates.id"]),
         ForeignKeyConstraint(["organization_id", "parent_delivery_id"], ["email_deliveries.organization_id", "email_deliveries.id"]),
         ForeignKeyConstraint(["organization_id", "created_by"], ["users.organization_id", "users.id"]),
-        CheckConstraint("status in ('queued','sent','failed')", name="ck_email_deliveries_status"),
+        CheckConstraint("status in ('queued','sent','failed','cancelled')", name="ck_email_deliveries_status"),
         CheckConstraint("attempts between 0 and 3", name="ck_email_deliveries_attempts"),
         CheckConstraint("provider_config_version >= 1", name="ck_email_deliveries_provider_version"),
         CheckConstraint("version >= 1", name="ck_email_deliveries_version"),

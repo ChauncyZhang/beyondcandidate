@@ -103,6 +103,30 @@ def _fold_line(line: str) -> list[str]:
     return folded
 
 
+def replace_calendar_location(calendar: bytes, location: str) -> bytes:
+    try:
+        lines = calendar.decode("utf-8").split("\r\n")
+    except UnicodeDecodeError:
+        raise ValueError("calendar must be valid UTF-8") from None
+    replaced = False
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("LOCATION:"):
+            output.extend(_fold_line(f"LOCATION:{_escape_text(location)}"))
+            replaced = True
+            index += 1
+            while index < len(lines) and lines[index].startswith((" ", "\t")):
+                index += 1
+            continue
+        output.append(line)
+        index += 1
+    if not replaced:
+        raise ValueError("calendar location is missing")
+    return "\r\n".join(output).encode("utf-8")
+
+
 def _utc_stamp(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("calendar timestamps must include a timezone")

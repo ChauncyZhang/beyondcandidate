@@ -192,7 +192,7 @@ def delivery_history(request: Request, limit: int=Query(50,ge=1,le=100), status:
     principal=_principal(request)
     if isinstance(principal,JSONResponse): return principal
     if not _recruiting_admin(principal): return _error(request,404,"resource_not_found")
-    if status not in {None,"queued","sent","failed"}: return _error(request,422,"validation_failed")
+    if status not in {None,"queued","sent","failed","cancelled"}: return _error(request,422,"validation_failed")
     with request.app.state.identity_store.sync_session() as db:
         query=select(EmailDelivery).where(EmailDelivery.organization_id==principal.organization_id)
         if status: query=query.where(EmailDelivery.status==status)

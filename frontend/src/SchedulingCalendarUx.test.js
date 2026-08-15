@@ -25,6 +25,8 @@ test("availability is privacy safe and final save uses one authoritative request
   assert.doesNotMatch(scheduleSource, /await onCheckConflicts/);
   assert.match(scheduleSource, /await onSave\(record,/);
   assert.match(scheduleSource, /allowSoftConflict: false/);
+  assert.match(scheduleSource, /availabilityAbortController\.current\?\.abort\(\)/);
+  assert.match(scheduleSource, /\{ signal: abortController\.signal \}/);
 });
 
 test("calendar owns complete range loading and full week navigation", () => {

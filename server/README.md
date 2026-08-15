@@ -250,6 +250,30 @@ an attendee only after decrypting it at delivery time. Verify this path with:
 python -m pytest server/tests/test_feishu_contract.py server/tests/test_feishu_sync.py server/tests/test_interview_api.py
 ```
 
+Interview email delivery depends on the same versioned calendar state. A recurring failure mode is
+that a video-interview email is sent before Feishu has returned the native meeting URL, or an older
+invite is sent after a reschedule/cancellation. Before sending invitation and reschedule email,
+materialize any current safe `https` meeting URL into the plain-text body, HTML action links, and ICS
+attachment. If the matching Feishu sync row is still pending, retry only within the bounded job
+window; the last attempt must fail open with the placeholder so calendar integration cannot block the
+hiring workflow permanently. Compare the delivery ICS sequence with the current interview sequence
+and mark superseded deliveries `cancelled` before any provider call. Temporary SMTP failures should
+become terminal after the configured real send-attempt ceiling instead of retrying forever. Verify
+this path with:
+
+```powershell
+python -m pytest server/tests/test_email_worker.py server/tests/test_interview_api.py -q
+```
+
+Interview availability queries must also fail open around Feishu, not around internal conflicts. A
+slow or unavailable Feishu freebusy call should have a short total timeout and a bounded concurrency
+slot, then return internal ATS busy windows with external status `unknown`; it must not hold the
+schedule UI for provider latency or hide existing local interview conflicts. Verify this with:
+
+```powershell
+python -m pytest server/tests/test_feishu_availability.py -q
+```
+
 Production TLS must terminate upstream or use externally managed certificates mounted into
 Nginx with a production-specific server block. Never expose API, PostgreSQL, or MinIO ports.
 

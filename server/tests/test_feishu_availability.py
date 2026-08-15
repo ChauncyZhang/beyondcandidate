@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+from threading import Event, current_thread
+from time import monotonic
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,6 +10,7 @@ from server.app.integrations.feishu.models import FeishuIdentityBinding, FeishuO
 from server.app.integrations.feishu.provider import BusyWindow, FakeFeishuProvider, FeishuProviderError
 from server.app.identity.models import User
 from server.app.interviews.availability import INTERNAL_AVAILABILITY_PROVIDER
+from server.app.interviews.models import Interview, InterviewParticipant
 from server.tests.test_interview_api import interview_payload, login, make_app, seed_application
 
 
@@ -135,6 +138,92 @@ def test_enabled_feishu_reports_unbound_or_failed_calendar_as_unconfirmed(tmp_pa
             ends_at=starts_at + timedelta(days=7), buffer_minutes=15, exclude_interview_id=None,
         )
     assert rows == [{"participant_id": str(failing_seed["interviewer_id"]), "status": "unknown", "busy": []}]
+
+
+def test_slow_feishu_query_times_out_and_preserves_internal_availability(tmp_path) -> None:
+    class SlowFeishuProvider(FakeFeishuProvider):
+        def __init__(self):
+            super().__init__()
+            self.release = Event()
+            self.started = Event()
+            self.returned = Event()
+            self.ran_in_daemon_thread = False
+
+        def batch_freebusy(self, credentials, request):
+            self.ran_in_daemon_thread = current_thread().daemon
+            self.started.set()
+            self.release.wait(timeout=1)
+            windows = super().batch_freebusy(credentials, request)
+            self.returned.set()
+            return windows
+
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    tenant_id = organization_id(app, seed)
+    configured_provider(app, seed)
+    interview_start = datetime(2026, 7, 20, 10, tzinfo=timezone.utc)
+    with app.state.identity_store.sync_session() as db:
+        interview = Interview(
+            organization_id=tenant_id,
+            application_id=seed["application_id"],
+            round_name="一面",
+            method="video",
+            timezone="Asia/Shanghai",
+            starts_at=interview_start,
+            ends_at=interview_start + timedelta(minutes=45),
+            location=None,
+            meeting_url=None,
+            status="scheduled",
+            owner_id=seed["admin_id"],
+            created_by=seed["admin_id"],
+        )
+        db.add(interview)
+        db.flush()
+        db.add(InterviewParticipant(
+            organization_id=tenant_id,
+            interview_id=interview.id,
+            user_id=seed["interviewer_id"],
+            role="interviewer",
+            required_feedback=True,
+        ))
+        db.commit()
+    slow_provider = SlowFeishuProvider()
+    adapter = FeishuAwareAvailabilityProvider(
+        INTERNAL_AVAILABILITY_PROVIDER,
+        slow_provider,
+        app.state.feishu_secret_cipher,
+        external_timeout_seconds=0.02,
+    )
+    starts_at = datetime(2026, 7, 20, 8, tzinfo=timezone.utc)
+
+    started = monotonic()
+    with app.state.identity_store.sync_session() as db:
+        rows = adapter.availability(
+            db=db,
+            organization_id=tenant_id,
+            participant_ids=[seed["interviewer_id"]],
+            starts_at=starts_at,
+            ends_at=starts_at + timedelta(days=30),
+            buffer_minutes=15,
+            exclude_interview_id=None,
+        )
+
+    try:
+        assert monotonic() - started < 0.5
+        assert slow_provider.started.is_set()
+        assert slow_provider.ran_in_daemon_thread is True
+        assert rows == [{
+            "participant_id": str(seed["interviewer_id"]),
+            "status": "unknown",
+            "busy": [{
+                "starts_at": interview_start.isoformat(),
+                "ends_at": (interview_start + timedelta(minutes=45)).isoformat(),
+            }],
+        }]
+    finally:
+        slow_provider.release.set()
+        assert slow_provider.returned.wait(timeout=0.5)
+    assert len(slow_provider.freebusy_requests) == 1
 
 
 def test_conflict_preflight_rechecks_feishu_and_fails_open_when_unavailable(tmp_path) -> None:

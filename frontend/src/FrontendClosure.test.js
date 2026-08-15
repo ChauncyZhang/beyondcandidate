@@ -502,7 +502,7 @@ test("date selection loads availability and renders occupied slots red", { timeo
   } finally { await context.close(); }
 });
 
-test("a stale availability response cannot replace the current interviewers", { timeout: 60_000 }, async () => {
+test("a stale availability request cannot replace the current interviewers", { timeout: 60_000 }, async () => {
   const applicationId = "22222222-2222-4222-8222-222222222298";
   const candidateId = "33333333-3333-4333-8333-333333333298";
   const otherInterviewerId = "44444444-4444-4444-8444-444444444498";
@@ -534,11 +534,12 @@ test("a stale availability response cannot replace the current interviewers", { 
     await page.goto(`${baseUrl}interviews/new?candidate=${candidateId}`);
     await page.getByRole("button", { name: /下一步：选择面试官/ }).click();
     await page.locator(".interviewer-picker label").filter({ hasText: "Admin" }).click();
-    const firstResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url());
+    const firstRequestPromise = page.waitForRequest((request) => {
+      const url = new URL(request.url());
       return url.pathname === "/api/v1/interview-availability" && url.searchParams.get("participant_ids") === users[0].id;
     });
     await page.getByRole("button", { name: /下一步：选择日期时间/ }).click();
+    await firstRequestPromise;
     await page.getByText("正在读取所选面试官的日历", { exact: true }).waitFor();
     await page.getByRole("button", { name: "上一步", exact: true }).click();
     await page.locator(".interviewer-picker label").filter({ hasText: "Admin" }).click();
@@ -546,9 +547,8 @@ test("a stale availability response cannot replace the current interviewers", { 
     await page.getByRole("button", { name: /下一步：选择日期时间/ }).click();
     await page.locator(".schedule-slot-grid button.unconfirmed").first().waitFor();
     resolveFirstRequest();
-    const firstResponse = await firstResponsePromise;
-    await firstResponse.finished();
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(requestCount, 2);
     assert.equal(await page.locator(".schedule-slot-grid button.unconfirmed").count(), 189);
     assert.equal(await page.locator(".schedule-slot-grid button.conflict").count(), 0);
   } finally { await context.close(); }

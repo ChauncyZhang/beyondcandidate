@@ -131,6 +131,23 @@ test("normalizes masked candidate email delivery separately from Feishu notifica
   });
 });
 
+test("projects a superseded interview email as cancelled instead of failed", async () => {
+  const { client } = queuedClient([{ data: [apiInterview({
+    email_delivery: {
+      id: "77777777-7777-4777-8777-777777777777",
+      recipient: "c*******e@example.com",
+      status: "cancelled",
+      version: 2,
+      safe_error_code: "interview_message_superseded",
+    },
+  })] }]);
+
+  const delivery = (await createInterviewController({ client }).list()).records[0].emailDelivery;
+
+  assert.equal(delivery.statusLabel, "已取消");
+  assert.equal(delivery.errorText, "旧通知已被后续面试安排取代，未发送。");
+});
+
 test("never projects an unmasked recipient or raw delivery error text", async () => {
   const { client } = queuedClient([{ data: [apiInterview({
     email_delivery: {

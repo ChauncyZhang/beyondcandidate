@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import json
+import logging
+from threading import Event, Thread
 from uuid import uuid4
 
 import httpx
@@ -860,6 +862,81 @@ def test_http_provider_reuses_tenant_token_until_its_refresh_window() -> None:
     now[0] = 191.0
     provider.batch_freebusy(credentials, request)
     assert token_requests == 2
+
+
+def test_http_provider_token_refresh_for_one_app_does_not_block_another() -> None:
+    first_started = Event()
+    release_first = Event()
+    second_started = Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            app_id = json.loads(request.content)["app_id"]
+            if app_id == "app-one":
+                first_started.set()
+                assert release_first.wait(timeout=1)
+            else:
+                second_started.set()
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": f"token-{app_id}"})
+        if request.url.path.endswith("/freebusy/batch"):
+            return httpx.Response(200, json={"code": 0, "data": {}})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    start = datetime(2026, 7, 21, 6, tzinfo=timezone.utc)
+    freebusy = FreeBusyRequest(("ou_interviewer",), start, start + timedelta(hours=1))
+    errors: list[Exception] = []
+
+    def query(app_id: str) -> None:
+        try:
+            provider.batch_freebusy(
+                FeishuCredentials(app_id, "secret", "https://example.test/callback"),
+                freebusy,
+            )
+        except Exception as error:  # pragma: no cover - surfaced by the final assertion
+            errors.append(error)
+
+    first = Thread(target=query, args=("app-one",))
+    second = Thread(target=query, args=("app-two",))
+    first.start()
+    assert first_started.wait(timeout=0.5)
+    second.start()
+    try:
+        assert second_started.wait(timeout=0.5)
+    finally:
+        release_first.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+
+
+def test_http_provider_logs_business_error_duration_without_sensitive_context(caplog) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token"})
+        return httpx.Response(200, json={"code": 50000, "msg": "provider detail must not be logged"})
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    start = datetime(2026, 7, 21, 6, tzinfo=timezone.utc)
+    caplog.set_level(logging.INFO)
+
+    with pytest.raises(FeishuProviderError):
+        provider.batch_freebusy(
+            FeishuCredentials("cli", "secret", "https://example.test/callback"),
+            FreeBusyRequest(("ou_interviewer",), start, start + timedelta(hours=1)),
+        )
+
+    rejected = [record for record in caplog.records if record.message == "feishu_http_request_rejected"]
+    assert len(rejected) == 1
+    assert rejected[0].context == {
+        "operation": "freebusy",
+        "duration_ms": pytest.approx(0, abs=1000),
+        "status_code": 200,
+        "provider_code": 50000,
+    }
+    assert "provider detail" not in caplog.text
 
 
 def test_http_provider_does_not_reuse_token_after_secret_changes() -> None:

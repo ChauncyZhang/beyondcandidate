@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -11,6 +12,9 @@ from urllib.parse import urlencode, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
+
+
+logger = logging.getLogger(__name__)
 
 
 AUTHORIZE_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
@@ -225,33 +229,105 @@ class HttpFeishuProvider:
             follow_redirects=False,
         )
         self._clock = clock
-        self._tenant_token_lock = threading.Lock()
+        self._tenant_token_locks_guard = threading.Lock()
+        self._tenant_token_locks: dict[str, threading.Lock] = {}
         self._tenant_tokens: dict[str, tuple[bytes, str, float]] = {}
+
+    def _tenant_lock(self, app_id: str) -> threading.Lock:
+        with self._tenant_token_locks_guard:
+            return self._tenant_token_locks.setdefault(app_id, threading.Lock())
+
+    @staticmethod
+    def _operation(url: str) -> str:
+        path = urlsplit(url).path
+        if path.endswith("/tenant_access_token/internal"):
+            return "tenant_token"
+        if path.endswith("/freebusy/batch"):
+            return "freebusy"
+        if path.endswith("/oauth/token"):
+            return "oauth_token"
+        if path.endswith("/user_info"):
+            return "user_info"
+        if "/calendar/v4/" in path:
+            return "calendar"
+        if "/im/v1/messages" in path:
+            return "message"
+        return "other"
 
     def authorization_url(self, credentials: FeishuCredentials, state: str) -> str:
         return f"{AUTHORIZE_URL}?{urlencode({'client_id': credentials.app_id, 'response_type': 'code', 'redirect_uri': credentials.redirect_uri, 'state': state})}"
 
     def _json(self, method: str, url: str, **kwargs) -> dict:
+        started = self._clock()
+        operation = self._operation(url)
         try:
             response = self._client.request(method, url, **kwargs)
             response.raise_for_status()
             payload = response.json()
-        except (httpx.TimeoutException, httpx.NetworkError):
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            logger.warning(
+                "feishu_http_request_failed",
+                extra={"context": {
+                    "operation": operation,
+                    "duration_ms": round((self._clock() - started) * 1000),
+                    "error_type": type(error).__name__,
+                }},
+            )
             raise FeishuProviderError() from None
         except httpx.HTTPStatusError as error:
             retryable = error.response.status_code == 429 or error.response.status_code >= 500
+            logger.warning(
+                "feishu_http_request_failed",
+                extra={"context": {
+                    "operation": operation,
+                    "duration_ms": round((self._clock() - started) * 1000),
+                    "status_code": error.response.status_code,
+                }},
+            )
             raise FeishuProviderError("feishu_request_failed", retryable=retryable) from None
         except (ValueError, TypeError):
+            logger.warning(
+                "feishu_http_response_invalid",
+                extra={"context": {
+                    "operation": operation,
+                    "duration_ms": round((self._clock() - started) * 1000),
+                }},
+            )
             raise FeishuProviderError("feishu_response_invalid", retryable=False) from None
         if not isinstance(payload, dict) or payload.get("code", 0) != 0:
             code = payload.get("code") if isinstance(payload, dict) else None
             retryable = isinstance(code, int) and (code >= 50000 or code in {20007, 20050})
+            logger.warning(
+                "feishu_http_request_rejected",
+                extra={"context": {
+                    "operation": operation,
+                    "duration_ms": round((self._clock() - started) * 1000),
+                    "status_code": response.status_code,
+                    "provider_code": code if isinstance(code, int) else None,
+                }},
+            )
             raise FeishuProviderError("feishu_request_failed", retryable=retryable)
+        if operation in {"tenant_token", "freebusy"}:
+            logger.info(
+                "feishu_http_request_complete",
+                extra={"context": {
+                    "operation": operation,
+                    "duration_ms": round((self._clock() - started) * 1000),
+                    "status_code": response.status_code,
+                }},
+            )
         return payload
 
     def _tenant_token(self, credentials: FeishuCredentials, *, force_refresh: bool = False) -> str:
         secret_fingerprint = hashlib.sha256(credentials.app_secret.encode()).digest()
-        with self._tenant_token_lock:
+        lock_started = self._clock()
+        with self._tenant_lock(credentials.app_id):
+            lock_wait_ms = round((self._clock() - lock_started) * 1000)
+            if lock_wait_ms >= 100:
+                logger.warning(
+                    "feishu_tenant_token_lock_wait",
+                    extra={"context": {"duration_ms": lock_wait_ms}},
+                )
             cached = self._tenant_tokens.get(credentials.app_id)
             if (
                 not force_refresh

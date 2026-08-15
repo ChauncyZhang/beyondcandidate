@@ -16,7 +16,12 @@ from server.app.communications.provider import MailMessage, PermanentMailError, 
 from server.app.communications.security import EmailSecretCipher
 from server.app.communications.service import DeliveryCommand, DeliveryIdempotencyConflict, SenderPolicy, email_delivery_terminal_callback, enqueue_delivery, render_template
 from server.app.communications.worker import EmailDeliveryJobHandler
-from server.app.communications.worker import _interview_html_body, _offer_html_body, _render_offer_link
+from server.app.communications.worker import (
+    _interview_html_body,
+    _materialize_interview_meeting_link,
+    _offer_html_body,
+    _render_offer_link,
+)
 from server.app.offers.service import OfferTokenCodec
 from server.app.identity.models import AuditLog, Base, Organization, User, UserRole
 from server.app.integrations.feishu.models import FeishuOrganizationConfig
@@ -236,6 +241,27 @@ def test_interview_message_keeps_an_existing_video_meeting_url() -> None:
     assert meeting_url.encode() in message.attachment_content
 
 
+def test_materialized_feishu_link_updates_plain_text_and_calendar_attachment() -> None:
+    meeting_url = "https://vc.feishu.cn/j/" + "1234567890" * 10
+    placeholder = "飞书视频会议将通过日历邀请发送"
+    body, attachment = _materialize_interview_meeting_link(
+        f"地点/链接：{placeholder}",
+        f"BEGIN:VCALENDAR\r\nLOCATION:{placeholder}\r\nEND:VCALENDAR\r\n".encode(),
+        meeting_url,
+    )
+
+    assert body == f"地点/链接：{meeting_url}"
+    unfolded_attachment = attachment.replace(b"\r\n ", b"")
+    assert meeting_url.encode() in unfolded_attachment
+    assert placeholder not in body
+    assert placeholder.encode() not in attachment
+    assert all(
+        len(line) <= 75
+        for line in attachment.split(b"\r\n")
+        if line.startswith((b"LOCATION:", b" "))
+    )
+
+
 def test_smtp_provider_adds_html_alternative_without_removing_plain_text(monkeypatch):
     captured = {}
 
@@ -302,6 +328,29 @@ def test_worker_retries_temporary_smtp_failure_without_marking_sent(tmp_path):
     with sessions() as db:
         stored = db.get(EmailDelivery, delivery_id)
         assert (stored.status, stored.safe_error_code, stored.attempts, stored.version) == ("queued", "smtp_timeout", 1, 3)
+
+
+def test_worker_stops_after_three_real_smtp_attempts(tmp_path):
+    sessions, cipher, delivery_id, job = delivery_store(tmp_path)
+    provider = FakeMailProvider(
+        [TemporaryMailError("smtp_timeout") for _ in range(3)]
+    )
+    handler = EmailDeliveryJobHandler(sessions, provider, cipher)
+
+    for _ in range(2):
+        with pytest.raises(RetryableJobError, match="smtp_timeout"):
+            asyncio.run(handler(job))
+    with pytest.raises(PermanentJobError, match="smtp_timeout"):
+        asyncio.run(handler(job))
+
+    assert len(provider.messages) == 3
+    with sessions() as db:
+        stored = db.get(EmailDelivery, delivery_id)
+        assert (
+            stored.status,
+            stored.safe_error_code,
+            stored.attempts,
+        ) == ("failed", "smtp_timeout", 3)
 
 
 def test_worker_uses_fixed_sender_hr_reply_to_and_immutable_snapshots(tmp_path):

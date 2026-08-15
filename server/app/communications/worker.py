@@ -6,11 +6,15 @@ from urllib.parse import urlsplit
 
 from sqlalchemy import select
 
+from server.app.communications.interview_messages import PENDING_FEISHU_MEETING_TEXT
 from server.app.communications.models import EmailDelivery, EmailProviderConfig
 from server.app.communications.provider import MailMessage, PermanentMailError, SmtpMailProvider, TemporaryMailError
 from server.app.communications.security import EmailSecretCipher
 from server.app.communications.service import EMAIL_JOB_PAYLOAD, communications_terminal_callbacks, mark_delivery_failed
 from server.app.identity.models import Organization
+from server.app.integrations.feishu.models import FeishuInterviewSync
+from server.app.interviews.domain import replace_calendar_location
+from server.app.interviews.models import Interview
 from server.app.queue.payloads import UnsafePayload
 from server.app.queue.service import PermanentJobError, RetryableJobError
 
@@ -23,6 +27,11 @@ INTERVIEW_EMAIL_STYLES = {
     "interview_rescheduled": ("面试安排更新", "面试时间已变更", "#b54708", "#fff4e5"),
     "interview_cancelled": ("面试取消通知", "本次面试已取消", "#b42318", "#fff0ee"),
 }
+INTERVIEW_MEETING_LINK_EMAIL_TYPES = {
+    "interview_invitation",
+    "interview_rescheduled",
+}
+MAX_FEISHU_LINK_WAIT_ATTEMPTS = 2
 
 
 def _render_offer_link(body: str, token_id: uuid.UUID, codec, public_base_url: str) -> str:
@@ -57,6 +66,82 @@ def _safe_web_link(value: str) -> str | None:
     except ValueError:
         return None
     return value if parsed.scheme in {"http", "https"} and parsed.netloc else None
+
+
+def _materialize_interview_meeting_link(
+    body: str,
+    attachment_content: bytes | None,
+    meeting_url: str,
+) -> tuple[str, bytes | None]:
+    body = body.replace(PENDING_FEISHU_MEETING_TEXT, meeting_url)
+    if attachment_content is not None:
+        attachment_content = replace_calendar_location(
+            attachment_content,
+            meeting_url,
+        )
+    return body, attachment_content
+
+
+def _calendar_sequence(attachment_content: bytes | None) -> int | None:
+    if attachment_content is None:
+        return None
+    try:
+        calendar = attachment_content.decode("utf-8").replace("\r\n ", "")
+    except UnicodeDecodeError:
+        return None
+    for line in calendar.split("\r\n"):
+        if line.startswith("SEQUENCE:"):
+            value = line.removeprefix("SEQUENCE:")
+            return int(value) if value.isdigit() else None
+    return None
+
+
+def _prepare_interview_delivery(
+    db,
+    delivery: EmailDelivery,
+    job,
+    body: str,
+    attachment_content: bytes | None,
+) -> tuple[str, bytes | None, bool]:
+    if delivery.resource_type not in INTERVIEW_MEETING_LINK_EMAIL_TYPES:
+        return body, attachment_content, False
+    interview = db.scalar(
+        select(Interview).where(
+            Interview.organization_id == delivery.organization_id,
+            Interview.id == delivery.resource_id,
+        )
+    )
+    if interview is None:
+        return body, attachment_content, False
+    delivery_sequence = _calendar_sequence(attachment_content)
+    if (
+        delivery_sequence is not None
+        and delivery_sequence != interview.calendar_sequence
+    ):
+        return body, attachment_content, True
+    if interview.method != "video":
+        return body, attachment_content, False
+    meeting_url = _safe_web_link(interview.meeting_url or "")
+    if meeting_url is not None:
+        body, attachment_content = _materialize_interview_meeting_link(
+            body,
+            attachment_content,
+            meeting_url,
+        )
+        return body, attachment_content, False
+    sync = db.scalar(
+        select(FeishuInterviewSync).where(
+            FeishuInterviewSync.organization_id == delivery.organization_id,
+            FeishuInterviewSync.interview_id == interview.id,
+        )
+    )
+    if (
+        sync is not None
+        and sync.sync_status in {"pending", "syncing"}
+        and int(getattr(job, "attempts", 0)) <= MAX_FEISHU_LINK_WAIT_ATTEMPTS
+    ):
+        raise RetryableJobError("feishu_meeting_link_pending")
+    return body, attachment_content, False
 
 
 def _interview_html_body(*, brand_name: str, subject: str, body: str, kind: str) -> str:
@@ -146,6 +231,8 @@ class EmailDeliveryJobHandler:
                 raise PermanentJobError("email_delivery_unavailable")
             if delivery.status == "sent":
                 return
+            if delivery.status == "cancelled":
+                return
             if delivery.status == "failed":
                 raise PermanentJobError(delivery.safe_error_code or "email_delivery_failed")
             latest_config = db.scalar(select(EmailProviderConfig).where(EmailProviderConfig.organization_id == organization_id).order_by(EmailProviderConfig.version.desc()).limit(1))
@@ -170,9 +257,22 @@ class EmailDeliveryJobHandler:
                     mark_delivery_failed(db, delivery, "email_secret_unavailable")
                     setup_error = "email_secret_unavailable"
                 else:
+                    body = delivery.rendered_body
+                    if delivery.resource_type in INTERVIEW_EMAIL_STYLES:
+                        body, attachment_content, superseded = _prepare_interview_delivery(
+                            db,
+                            delivery,
+                            job,
+                            body,
+                            attachment_content,
+                        )
+                        if superseded:
+                            delivery.status = "cancelled"
+                            delivery.safe_error_code = "interview_message_superseded"
+                            delivery.version += 1
+                            return
                     delivery.attempts += 1
                     delivery.version += 1
-                    body = delivery.rendered_body
                     html_body = None
                     if delivery.resource_type == "offer_access_token":
                         from server.app.offers.models import OfferAccessToken
@@ -215,13 +315,19 @@ class EmailDeliveryJobHandler:
         try:
             receipt = await provider.send(message)
         except TemporaryMailError as error:
+            terminal = False
             with self._sessions.begin() as db:
                 delivery = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == organization_id, EmailDelivery.id == delivery_id).with_for_update())
                 if delivery is not None and delivery.status == "queued":
-                    delivery.safe_error_code = error.safe_code
-                    delivery.version += 1
+                    if delivery.attempts >= 3:
+                        mark_delivery_failed(db, delivery, error.safe_code)
+                        terminal = True
+                    else:
+                        delivery.safe_error_code = error.safe_code
+                        delivery.version += 1
             logger.error("email_delivery_attempt_failed", extra={"context": {"delivery_id": str(delivery_id), "safe_error_code": error.safe_code}})
-            raise RetryableJobError(error.safe_code) from None
+            exception = PermanentJobError if terminal else RetryableJobError
+            raise exception(error.safe_code) from None
         except PermanentMailError as error:
             with self._sessions.begin() as db:
                 delivery = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == organization_id, EmailDelivery.id == delivery_id).with_for_update())
