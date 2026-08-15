@@ -454,6 +454,27 @@
 .interviewer-picker label > strong,
 .interviewer-picker label > small { font-size: 14px; }
 
+.participant-directory-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.participant-directory-status.error {
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid #f0c8c8;
+  border-radius: 7px;
+  background: #fff7f7;
+  color: var(--danger);
+}
+
+.participant-directory-status.error > span { display: flex; align-items: center; gap: 7px; }
+.participant-directory-status .button { min-height: 34px; padding: 0 11px; }
+
 .availability-toolbar { margin-bottom: 12px; }
 .availability-toolbar > button:not(.button),
 .availability-toolbar input { min-height: 38px; border-color: var(--line); border-radius: 7px; background: var(--surface); }

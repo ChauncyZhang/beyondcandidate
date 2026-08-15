@@ -110,7 +110,10 @@ async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = f
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: interviews, meta: { count: interviews.length, next_cursor: null } }) });
     }
     if (pathname === "/api/v1/me/tasks" && interviews) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [] }) });
-    if (/^\/api\/v1\/applications\/[^/]+\/interview-participant-options$/.test(pathname) && participantOptions) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: participantOptions }) });
+    if (/^\/api\/v1\/applications\/[^/]+\/interview-participant-options$/.test(pathname) && participantOptions) {
+      const options = typeof participantOptions === "function" ? await participantOptions(request) : participantOptions;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: options }) });
+    }
     if (pathname === "/api/v1/interview-availability" && availability) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: typeof availability === "function" ? await availability(request.url()) : availability }) });
     if (pathname === "/api/v1/workbench" && workbench) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: workbench }) });
     if (pathname === "/api/v1/offer-approvals/pending" && approvals) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: approvals }) });
@@ -499,6 +502,36 @@ test("date selection loads availability and renders occupied slots red", { timeo
     assert.equal(interviewRequestBody.location, null);
     assert.equal(interviewRequestBody.meeting_url, null);
     assert.equal(requests.filter((item) => item === "POST /api/v1/interview-conflicts").length, 0);
+  } finally { await context.close(); }
+});
+
+test("a stalled participant directory times out and can be retried", { timeout: 60_000 }, async () => {
+  const applicationId = "22222222-2222-4222-8222-222222222297";
+  const candidateId = "33333333-3333-4333-8333-333333333297";
+  const candidates = [{
+    id: candidateId,
+    display_name: "目录超时候选人",
+    current_title: "AI 工程师",
+    location: "深圳",
+    application: { id: applicationId, job_id: notificationJobId, job_status: "open", job_title: "AI 工程师", stage: "interview_pending", next_interview_round: "一面", source: "本地上传" },
+  }];
+  let requestCount = 0;
+  const participantOptions = async () => {
+    requestCount += 1;
+    if (requestCount === 1) await new Promise((resolve) => setTimeout(resolve, 5_300));
+    return [{ id: users[0].id, display_name: "Admin", roles: ["interviewer"] }];
+  };
+  const { context, page } = await openPage({ viewport: { width: 1440, height: 900 }, candidates, interviews: [], participantOptions });
+  try {
+    await page.goto(`${baseUrl}interviews/new?candidate=${candidateId}`);
+    await page.getByRole("button", { name: /下一步：选择面试官/ }).click();
+    const timeoutAlert = page.getByRole("alert").filter({ hasText: "面试官目录加载失败或超时" });
+    await timeoutAlert.waitFor({ timeout: 8_000 });
+    assert.equal(await page.locator(".interviewer-picker label").count(), 0);
+    await timeoutAlert.getByRole("button", { name: "重新加载", exact: true }).click();
+    await page.locator(".interviewer-picker label").filter({ hasText: "Admin" }).waitFor();
+    assert.equal(await timeoutAlert.count(), 0);
+    assert.equal(requestCount, 2);
   } finally { await context.close(); }
 });
 

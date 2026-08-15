@@ -31,7 +31,6 @@ INTERVIEW_MEETING_LINK_EMAIL_TYPES = {
     "interview_invitation",
     "interview_rescheduled",
 }
-MAX_FEISHU_LINK_WAIT_ATTEMPTS = 2
 
 
 def _render_offer_link(body: str, token_id: uuid.UUID, codec, public_base_url: str) -> str:
@@ -135,13 +134,11 @@ def _prepare_interview_delivery(
             FeishuInterviewSync.interview_id == interview.id,
         )
     )
-    if (
-        sync is not None
-        and sync.sync_status in {"pending", "syncing"}
-        and int(getattr(job, "attempts", 0)) <= MAX_FEISHU_LINK_WAIT_ATTEMPTS
-    ):
+    if sync is not None and sync.sync_status in {"pending", "syncing"} and int(
+        getattr(job, "attempts", 0)
+    ) < int(getattr(job, "max_attempts", 1)):
         raise RetryableJobError("feishu_meeting_link_pending")
-    return body, attachment_content, False
+    raise PermanentJobError("interview_meeting_link_unavailable")
 
 
 def _interview_html_body(*, brand_name: str, subject: str, body: str, kind: str) -> str:

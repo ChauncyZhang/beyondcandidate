@@ -196,7 +196,7 @@ class FeishuCalendarOutboxHandler:
                 if action == "cancel":
                     sync.sync_status = "cancelled"
                 else:
-                    sync.external_calendar_id = credentials.calendar_id
+                    sync.external_calendar_id = result.calendar_id or credentials.calendar_id
                     sync.external_event_id = result.event_id
                     sync.sync_status = "synced"
                     if request.video_conference and interview.method == "video":

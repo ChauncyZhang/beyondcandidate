@@ -24,9 +24,18 @@ MAX_FREEBUSY_RANGE = timedelta(days=14)
 
 
 class FeishuProviderError(RuntimeError):
-    def __init__(self, safe_code: str = "feishu_unavailable", *, retryable: bool = True):
+    def __init__(
+        self,
+        safe_code: str = "feishu_unavailable",
+        *,
+        retryable: bool = True,
+        status_code: int | None = None,
+        provider_code: int | None = None,
+    ):
         self.safe_code = safe_code
         self.retryable = retryable
+        self.status_code = status_code
+        self.provider_code = provider_code
         super().__init__(safe_code)
 
 
@@ -88,6 +97,7 @@ class CalendarEvent:
     attendee_emails: tuple[str, ...]
     meeting_url: str | None = None
     cancelled: bool = False
+    calendar_id: str | None = None
 
 
 def chunk_freebusy_requests(
@@ -276,15 +286,28 @@ class HttpFeishuProvider:
             raise FeishuProviderError() from None
         except httpx.HTTPStatusError as error:
             retryable = error.response.status_code == 429 or error.response.status_code >= 500
+            try:
+                error_payload = error.response.json()
+            except (TypeError, ValueError):
+                error_payload = {}
+            provider_code = (
+                error_payload.get("code") if isinstance(error_payload, dict) else None
+            )
             logger.warning(
                 "feishu_http_request_failed",
                 extra={"context": {
                     "operation": operation,
                     "duration_ms": round((self._clock() - started) * 1000),
                     "status_code": error.response.status_code,
+                    "provider_code": provider_code if isinstance(provider_code, int) else None,
                 }},
             )
-            raise FeishuProviderError("feishu_request_failed", retryable=retryable) from None
+            raise FeishuProviderError(
+                "feishu_request_failed",
+                retryable=retryable,
+                status_code=error.response.status_code,
+                provider_code=provider_code if isinstance(provider_code, int) else None,
+            ) from None
         except (ValueError, TypeError):
             logger.warning(
                 "feishu_http_response_invalid",
@@ -605,7 +628,18 @@ class HttpFeishuProvider:
             raise FeishuProviderError("feishu_response_invalid", retryable=False) from None
         return tuple(windows)
 
-    def create_event(self, credentials: FeishuCredentials, request: CalendarEventRequest, *, idempotency_key: str) -> CalendarEvent:
+    def _resolve_primary_calendar(self, credentials: FeishuCredentials) -> FeishuCredentials:
+        payload = self._json(
+            "POST",
+            f"{OPEN_API_BASE}/calendar/v4/calendars/primary",
+            headers=self._headers(credentials),
+        )
+        calendar_id = payload.get("data", {}).get("calendar_id")
+        if not isinstance(calendar_id, str) or not calendar_id:
+            raise FeishuProviderError("feishu_response_invalid", retryable=False)
+        return replace(credentials, calendar_id=calendar_id)
+
+    def _create_event_once(self, credentials: FeishuCredentials, request: CalendarEventRequest, *, idempotency_key: str) -> CalendarEvent:
         payload = self._json("POST", f"{OPEN_API_BASE}/calendar/v4/calendars/{credentials.calendar_id}/events", params={"idempotency_key": idempotency_key}, headers=self._headers(credentials), json=self._event_body(request))
         event_data = payload.get("data", {}).get("event", {})
         event_id = event_data.get("event_id") if isinstance(event_data, dict) else None
@@ -622,6 +656,28 @@ class HttpFeishuProvider:
             request.attendee_open_ids,
             request.attendee_emails,
             self._meeting_url(event_data),
+            calendar_id=credentials.calendar_id,
+        )
+
+    def create_event(self, credentials: FeishuCredentials, request: CalendarEventRequest, *, idempotency_key: str) -> CalendarEvent:
+        try:
+            return self._create_event_once(
+                credentials,
+                request,
+                idempotency_key=idempotency_key,
+            )
+        except FeishuProviderError as error:
+            if (
+                credentials.calendar_id != "primary"
+                or error.retryable
+                or error.status_code != 400
+            ):
+                raise
+        resolved = self._resolve_primary_calendar(credentials)
+        return self._create_event_once(
+            resolved,
+            request,
+            idempotency_key=idempotency_key,
         )
 
     def update_event(self, credentials: FeishuCredentials, event_id: str, request: CalendarEventRequest, *, idempotency_key: str) -> CalendarEvent:
@@ -637,6 +693,7 @@ class HttpFeishuProvider:
             request.attendee_open_ids,
             request.attendee_emails,
             self._meeting_url(payload.get("data", {}).get("event")),
+            calendar_id=credentials.calendar_id,
         )
 
     def cancel_event(self, credentials: FeishuCredentials, event_id: str, *, idempotency_key: str) -> None:

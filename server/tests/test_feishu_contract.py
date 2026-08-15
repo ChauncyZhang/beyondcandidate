@@ -509,6 +509,46 @@ def test_http_provider_creates_native_vchat_and_parses_meeting_url() -> None:
     assert result.meeting_url == "https://vc.feishu.cn/j/123456789"
 
 
+def test_http_provider_resolves_primary_calendar_when_create_rejects_alias() -> None:
+    requests: list[tuple[str, str]] = []
+    actual_calendar_id = "feishu.cn_actual@group.calendar.feishu.cn"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token"})
+        if request.method == "POST" and request.url.path.endswith("/calendars/primary/events"):
+            return httpx.Response(400, json={"code": 190002, "msg": "invalid parameters in request"})
+        if request.method == "POST" and request.url.path.endswith("/calendars/primary"):
+            return httpx.Response(200, json={"code": 0, "data": {"calendar_id": actual_calendar_id}})
+        if request.method == "POST" and request.url.path.endswith(f"/calendars/{actual_calendar_id}/events"):
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {"event": {"event_id": "evt_video", "vchat": {
+                    "vc_type": "vc",
+                    "meeting_url": "https://vc.feishu.cn/j/987654321",
+                }}},
+            })
+        if request.method == "GET" and request.url.path.endswith("/events/evt_video/attendees"):
+            return httpx.Response(200, json={"code": 0, "data": {"items": [], "has_more": False}})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    result = provider.create_event(
+        FeishuCredentials("cli", "secret", "https://example.test/callback"),
+        _calendar_event_request(
+            attendee_open_ids=(),
+            attendee_emails=(),
+            video_conference=True,
+        ),
+        idempotency_key="video-event-key",
+    )
+
+    assert ("POST", "/open-apis/calendar/v4/calendars/primary") in requests
+    assert result.calendar_id == actual_calendar_id
+    assert result.meeting_url == "https://vc.feishu.cn/j/987654321"
+
+
 def test_http_provider_update_explicitly_removes_native_vchat() -> None:
     patch_body = None
 

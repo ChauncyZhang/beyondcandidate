@@ -255,8 +255,8 @@ that a video-interview email is sent before Feishu has returned the native meeti
 invite is sent after a reschedule/cancellation. Before sending invitation and reschedule email,
 materialize any current safe `https` meeting URL into the plain-text body, HTML action links, and ICS
 attachment. If the matching Feishu sync row is still pending, retry only within the bounded job
-window; the last attempt must fail open with the placeholder so calendar integration cannot block the
-hiring workflow permanently. Compare the delivery ICS sequence with the current interview sequence
+window; if no safe meeting URL is available at the final attempt, terminate the delivery without
+sending placeholder meeting details. Compare the delivery ICS sequence with the current interview sequence
 and mark superseded deliveries `cancelled` before any provider call. Temporary SMTP failures should
 become terminal after the configured real send-attempt ceiling instead of retrying forever. Verify
 this path with:

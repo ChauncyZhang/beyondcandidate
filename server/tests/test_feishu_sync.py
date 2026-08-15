@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
@@ -187,8 +188,20 @@ def test_reschedule_notifies_new_and_removed_interviewers_separately(tmp_path) -
 
 
 def test_outbox_handler_creates_event_and_persists_retry_safe_sync_status(tmp_path) -> None:
+    class ResolvedCalendarProvider(FakeFeishuProvider):
+        def create_event(self, credentials, request, *, idempotency_key):
+            event = super().create_event(
+                credentials,
+                request,
+                idempotency_key=idempotency_key,
+            )
+            return replace(
+                event,
+                calendar_id="feishu.cn_actual@group.calendar.feishu.cn",
+            )
+
     app = make_app(tmp_path)
-    app.state.feishu_provider = FakeFeishuProvider()
+    app.state.feishu_provider = ResolvedCalendarProvider()
     seed = seed_application(app)
     with app.state.identity_store.sync_session() as db:
         interviewer = db.get(User, seed["interviewer_id"])
@@ -238,6 +251,7 @@ def test_outbox_handler_creates_event_and_persists_retry_safe_sync_status(tmp_pa
         sync = db.scalar(select(FeishuInterviewSync).where(FeishuInterviewSync.interview_id == interview_id))
         assert sync.sync_status == "synced"
         assert sync.attempts == 1
+        assert sync.external_calendar_id == "feishu.cn_actual@group.calendar.feishu.cn"
         assert sync.external_event_id in app.state.feishu_provider.events
         event = app.state.feishu_provider.events[sync.external_event_id]
         assert event.attendee_open_ids == ("ou_interviewer",)

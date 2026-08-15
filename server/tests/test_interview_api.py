@@ -536,17 +536,48 @@ def test_video_interview_email_waits_while_feishu_link_is_pending(tmp_path) -> N
         delivery = database.get(EmailDelivery, delivery_id)
         assert (delivery.status, delivery.attempts) == ("queued", 0)
 
-    # The last bounded attempt must still send the invitation when Feishu is
-    # unavailable, so calendar integration cannot block the hiring workflow.
+    with app.state.identity_store.sync_session() as database:
+        sync = database.scalar(
+            select(FeishuInterviewSync).where(
+                FeishuInterviewSync.interview_id == interview_id
+            )
+        )
+        sync.sync_status = "failed"
+        database.commit()
+
+    # Reproduce the production failure ordering: Feishu has already failed
+    # before the email worker's first attempt.
+    with pytest.raises(PermanentJobError, match="interview_meeting_link_unavailable"):
+        asyncio.run(
+            EmailDeliveryJobHandler(
+                app.state.identity_store.sync_session,
+                provider,
+                app.state.email_secret_cipher,
+            )(job)
+        )
+    assert provider.messages == []
+
+    with app.state.identity_store.sync_session() as database:
+        sync = database.scalar(
+            select(FeishuInterviewSync).where(
+                FeishuInterviewSync.interview_id == interview_id
+            )
+        )
+        sync.sync_status = "pending"
+        database.commit()
+
+    # Never send a video invitation with a placeholder instead of an actionable
+    # meeting link. The queue terminal callback surfaces this failure to HR.
     job.attempts = job.max_attempts
-    asyncio.run(
-        EmailDeliveryJobHandler(
-            app.state.identity_store.sync_session,
-            provider,
-            app.state.email_secret_cipher,
-        )(job)
-    )
-    assert "地点/链接：飞书视频会议将通过日历邀请发送" in provider.messages[0].body
+    with pytest.raises(PermanentJobError, match="interview_meeting_link_unavailable"):
+        asyncio.run(
+            EmailDeliveryJobHandler(
+                app.state.identity_store.sync_session,
+                provider,
+                app.state.email_secret_cipher,
+            )(job)
+        )
+    assert provider.messages == []
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -26,6 +26,8 @@ import { feedbackRatingDimensions, formatSubmittedFeedbackRatings } from "./feed
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { interviewStatusLabel } from "./recruitingTerminology.js";
 export { copyInterviewText, getScheduleConflictType, getScheduleSavedMessage } from "./ScheduleWorkspace.jsx";
+
+const PARTICIPANT_DIRECTORY_TIMEOUT_MS = 5_000;
 
 /* feedback-draft-helpers:start */
 export const INTERVIEW_FEEDBACK_DRAFT_PREFIX = "ats.interview-feedback-draft.v1:";
@@ -365,30 +367,55 @@ export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSel
   const participantApplicationId = selectedInterview?.applicationId || scheduleCandidate?.applicationId || scheduleCandidate?.application?.id || "";
   const [participantDirectory, setParticipantDirectory] = useState([]);
   const [participantStatus, setParticipantStatus] = useState("idle");
+  const [participantReloadKey, setParticipantReloadKey] = useState(0);
+  const participantDirectoryCache = useRef(new Map());
   const [emailCorrection, setEmailCorrection] = useState(null);
   const [emailDialogOpen, setEmailDialogOpen] = useState(false);
   const [resendState, setResendState] = useState({});
 
   useEffect(() => {
     let active = true;
+    const requestController = new AbortController();
+    let timedOut = false;
     if (mode !== "schedule" || !participantApplicationId) {
       setParticipantDirectory([]);
       setParticipantStatus("idle");
-      return () => { active = false; };
+      return () => {
+        active = false;
+        requestController.abort();
+      };
     }
-    setParticipantDirectory([]);
-    setParticipantStatus("loading");
-    controller.listParticipantOptions(participantApplicationId).then((options) => {
+
+    const cached = participantDirectoryCache.current.get(participantApplicationId);
+    setParticipantDirectory(cached || []);
+    setParticipantStatus(cached ? "ready" : "loading");
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      requestController.abort();
+    }, PARTICIPANT_DIRECTORY_TIMEOUT_MS);
+
+    controller.listParticipantOptions(participantApplicationId, { signal: requestController.signal }).then((options) => {
       if (!active) return;
+      participantDirectoryCache.current.set(participantApplicationId, options);
       setParticipantDirectory(options);
       setParticipantStatus("ready");
     }).catch((requestError) => {
-      if (!active || requestError?.name === "AbortError") return;
+      if (!active || (requestError?.name === "AbortError" && !timedOut)) return;
+      if (cached) {
+        setParticipantStatus("ready");
+        return;
+      }
       setParticipantDirectory([]);
       setParticipantStatus("error");
+    }).finally(() => {
+      window.clearTimeout(timeout);
     });
-    return () => { active = false; };
-  }, [controller, mode, participantApplicationId]);
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+      requestController.abort();
+    };
+  }, [controller, mode, participantApplicationId, participantReloadKey]);
 
   const participantOptions = useMemo(() => {
     const people = new Map(participantDirectory.map((person) => [person.id, person]));
@@ -479,7 +506,7 @@ export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSel
   const correctionNotice = emailCorrection && correctionActions.correct && <div className="interview-email-correction" role="alert"><CircleAlert size={18} /><div><strong>候选人邮箱尚未确认</strong><p>{resendCorrection ? "邮件未重新发送，面试记录和失败状态保持不变。修正并确认邮箱后，请再次点击重新发送。" : "本次操作未保存；当前排期内容已保留。修正并确认邮箱后，请再次提交。"}</p></div><button className="button secondary" type="button" onClick={() => setEmailDialogOpen(true)}>修正邮箱</button></div>;
   const correctionDialog = emailDialogOpen && emailCorrection && candidateEmailController && <CandidateEmailDialog candidate={{ id: emailCorrection.id, name: emailCorrection.name, applicationId: emailCorrection.applicationId, serverBacked: true }} controller={candidateEmailController} onClose={() => setEmailDialogOpen(false)} onConfirmed={() => { if (resendCorrection && emailCorrection.interviewId) setResendState((current) => ({ ...current, [emailCorrection.interviewId]: { status: "ready", error: "" } })); setEmailDialogOpen(false); setEmailCorrection(null); onNotify(resendCorrection ? "候选人邮箱已确认，请再次点击重新发送" : "候选人邮箱已确认，当前排期内容仍已保留，请再次提交"); }} />;
 
-  if (mode === "schedule" && canSchedule) return <div className="interview-schedule-recovery">{correctionNotice}<ScheduleWorkspace key={selectedInterview?.id || scheduleCandidateId || "new-interview"} record={selectedInterview} candidateId={scheduleCandidateId} candidates={candidates} participantOptions={participantOptions} participantStatus={participantStatus} onBack={backToList} backLabel={backLabel} onSave={saveRecord} onGetAvailability={(filters, options) => controller.availability(filters, options)} onNotify={onNotify} />{correctionDialog}</div>;
+  if (mode === "schedule" && canSchedule) return <div className="interview-schedule-recovery">{correctionNotice}<ScheduleWorkspace key={selectedInterview?.id || scheduleCandidateId || "new-interview"} record={selectedInterview} candidateId={scheduleCandidateId} candidates={candidates} participantOptions={participantOptions} participantStatus={participantStatus} onRetryParticipants={() => setParticipantReloadKey((value) => value + 1)} onBack={backToList} backLabel={backLabel} onSave={saveRecord} onGetAvailability={(filters, options) => controller.availability(filters, options)} onNotify={onNotify} />{correctionDialog}</div>;
   if (mode === "feedback" && selectedInterview) return <FeedbackForm record={selectedInterview} onBack={backToList} backLabel={backLabel} onSaved={async (_record, feedback) => { await onRecordsChanged({ ...selectedInterview, feedback, feedbackStatus: "已提交" }); }} onNotify={onNotify} actorName={actorName} userId={actorId} controller={controller} />;
   return <>{correctionNotice}<InterviewList records={records} status={status} error={error} onRetry={onRetry} nextCursor={nextCursor} loadingMore={loadingMore} onLoadMore={onLoadMore} onLoadRange={(range, options) => controller.listRange({ ...range, timezone: "Asia/Shanghai" }, options)} onSchedule={openSchedule} onFeedback={openFeedback} onDownload={(record) => void downloadCalendar(record)} onTransition={transitionRecord} onResendEmail={resendCandidateEmail} resendState={resendState} canSchedule={canSchedule} interviewerId={actorId} pageActionHost={pageActionHost} />{correctionDialog}</>;
 }

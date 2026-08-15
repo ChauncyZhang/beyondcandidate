@@ -7,7 +7,13 @@ const scheduleSource = readFileSync(new URL("./ScheduleWorkspace.jsx", import.me
 
 test("schedule workspace loads participant options for the selected application", () => {
   assert.match(source, /controller\.listParticipantOptions\(participantApplicationId/);
+  assert.match(source, /signal: requestController\.signal/);
+  assert.match(source, /PARTICIPANT_DIRECTORY_TIMEOUT_MS = 5_000/);
+  assert.match(source, /requestController\.abort\(\)/);
+  assert.match(source, /setParticipantReloadKey\(\(value\) => value \+ 1\)/);
   assert.match(source, /setParticipantDirectory\(options\)/);
+  assert.match(scheduleSource, /面试官目录加载失败或超时，请重新加载/);
+  assert.match(scheduleSource, /onRetryParticipants/);
   assert.doesNotMatch(source, /if \(actorId\) people\.set/);
   assert.doesNotMatch(source, /records\.flatMap\(\(record\) => record\.participants/);
 });
