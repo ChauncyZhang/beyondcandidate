@@ -411,15 +411,24 @@ class HttpFeishuProvider:
         return {"Authorization": f"Bearer {self._tenant_token(credentials)}", "Content-Type": "application/json; charset=utf-8"}
 
     @staticmethod
-    def _event_body(request: CalendarEventRequest) -> dict:
-        return {
+    def _event_body(
+        request: CalendarEventRequest,
+        *,
+        clear_blank_location: bool = False,
+    ) -> dict:
+        body = {
             "summary": request.summary[:255],
             "description": request.description,
             "start_time": {"timestamp": str(int(request.starts_at.timestamp())), "timezone": request.timezone},
             "end_time": {"timestamp": str(int(request.ends_at.timestamp())), "timezone": request.timezone},
-            "location": {"name": request.location[:512]},
             "vchat": {"vc_type": "vc" if request.video_conference else "no_meeting"},
         }
+        location = request.location.strip()
+        if location:
+            body["location"] = {"name": location[:512]}
+        elif clear_blank_location:
+            body["location"] = {}
+        return body
 
     @staticmethod
     def _meeting_url(event: object) -> str | None:
@@ -697,7 +706,12 @@ class HttpFeishuProvider:
         )
 
     def update_event(self, credentials: FeishuCredentials, event_id: str, request: CalendarEventRequest, *, idempotency_key: str) -> CalendarEvent:
-        payload = self._json("PATCH", f"{OPEN_API_BASE}/calendar/v4/calendars/{credentials.calendar_id}/events/{event_id}", headers=self._headers(credentials), json=self._event_body(request))
+        payload = self._json(
+            "PATCH",
+            f"{OPEN_API_BASE}/calendar/v4/calendars/{credentials.calendar_id}/events/{event_id}",
+            headers=self._headers(credentials),
+            json=self._event_body(request, clear_blank_location=True),
+        )
         self._reconcile_attendees(
             credentials,
             event_id,

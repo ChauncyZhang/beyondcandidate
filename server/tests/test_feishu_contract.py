@@ -454,8 +454,9 @@ def test_http_provider_update_reconciles_internal_and_external_attendees_idempot
 
 def _calendar_event_request(
     *,
-    attendee_open_ids: tuple[str, ...],
-    attendee_emails: tuple[str, ...],
+    attendee_open_ids: tuple[str, ...] = (),
+    attendee_emails: tuple[str, ...] = (),
+    location: str = "Room 1",
     video_conference: bool = False,
 ) -> CalendarEventRequest:
     return CalendarEventRequest(
@@ -465,7 +466,7 @@ def _calendar_event_request(
         ends_at=datetime(2026, 7, 20, 2, tzinfo=timezone.utc),
         timezone="Asia/Shanghai",
         description="Interview",
-        location="Room 1",
+        location=location,
         attendee_open_ids=attendee_open_ids,
         attendee_emails=attendee_emails,
         video_conference=video_conference,
@@ -506,6 +507,70 @@ def test_http_provider_creates_native_vchat_and_parses_meeting_url() -> None:
 
     assert json.loads(event_writes[0].content)["vchat"] == {"vc_type": "vc"}
     assert len(event_writes) == 1
+    assert result.meeting_url == "https://vc.feishu.cn/j/123456789"
+
+
+def test_http_provider_omits_blank_location_for_video_interview() -> None:
+    event_writes: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token"})
+        if request.method == "POST" and request.url.path.endswith("/events"):
+            event_writes.append(request)
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {"event": {"event_id": "evt_video", "vchat": {
+                    "vc_type": "vc",
+                    "meeting_url": "https://vc.feishu.cn/j/123456789",
+                }}},
+            })
+        if request.method == "GET" and request.url.path.endswith("/attendees"):
+            return httpx.Response(200, json={"code": 0, "data": {"items": [], "has_more": False}})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    provider.create_event(
+        FeishuCredentials("cli", "secret", "https://example.test/callback"),
+        _calendar_event_request(location="   ", video_conference=True),
+        idempotency_key="event-key-with-at-least-thirty-two-characters",
+    )
+
+    body = json.loads(event_writes[0].content)
+    assert "location" not in body
+    assert body["vchat"] == {"vc_type": "vc"}
+
+
+def test_http_provider_clears_blank_location_when_video_interview_is_updated() -> None:
+    event_writes: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token"})
+        if request.method == "PATCH" and request.url.path.endswith("/events/evt_video"):
+            event_writes.append(request)
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {"event": {"event_id": "evt_video", "vchat": {
+                    "vc_type": "vc",
+                    "meeting_url": "https://vc.feishu.cn/j/123456789",
+                }}},
+            })
+        if request.method == "GET" and request.url.path.endswith("/attendees"):
+            return httpx.Response(200, json={"code": 0, "data": {"items": [], "has_more": False}})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    result = provider.update_event(
+        FeishuCredentials("cli", "secret", "https://example.test/callback"),
+        "evt_video",
+        _calendar_event_request(location="   ", video_conference=True),
+        idempotency_key="event-key-with-at-least-thirty-two-characters",
+    )
+
+    body = json.loads(event_writes[0].content)
+    assert body["location"] == {}
+    assert body["vchat"] == {"vc_type": "vc"}
     assert result.meeting_url == "https://vc.feishu.cn/j/123456789"
 
 
