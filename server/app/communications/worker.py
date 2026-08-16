@@ -10,7 +10,7 @@ from server.app.communications.interview_messages import PENDING_FEISHU_MEETING_
 from server.app.communications.models import EmailDelivery, EmailProviderConfig
 from server.app.communications.provider import MailMessage, PermanentMailError, SmtpMailProvider, TemporaryMailError
 from server.app.communications.security import EmailSecretCipher
-from server.app.communications.service import EMAIL_JOB_PAYLOAD, communications_terminal_callbacks, mark_delivery_failed
+from server.app.communications.service import EMAIL_JOB_PAYLOAD, INTERVIEW_FEISHU_WAIT_ATTEMPTS, communications_terminal_callbacks, mark_delivery_failed
 from server.app.identity.models import Organization
 from server.app.integrations.feishu.models import FeishuInterviewSync
 from server.app.interviews.domain import replace_calendar_location
@@ -136,9 +136,9 @@ def _prepare_interview_delivery(
     )
     if sync is not None and sync.sync_status in {"pending", "syncing"} and int(
         getattr(job, "attempts", 0)
-    ) < int(getattr(job, "max_attempts", 1)):
+    ) <= INTERVIEW_FEISHU_WAIT_ATTEMPTS:
         raise RetryableJobError("feishu_meeting_link_pending")
-    raise PermanentJobError("interview_meeting_link_unavailable")
+    return body, attachment_content, False
 
 
 def _interview_html_body(*, brand_name: str, subject: str, body: str, kind: str) -> str:

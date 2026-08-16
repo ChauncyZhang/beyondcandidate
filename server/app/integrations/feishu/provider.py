@@ -634,7 +634,23 @@ class HttpFeishuProvider:
             f"{OPEN_API_BASE}/calendar/v4/calendars/primary",
             headers=self._headers(credentials),
         )
-        calendar_id = payload.get("data", {}).get("calendar_id")
+        data = payload.get("data", {})
+        calendar_id = data.get("calendar_id") if isinstance(data, dict) else None
+        calendars = data.get("calendars") if isinstance(data, dict) else None
+        if (
+            not (isinstance(calendar_id, str) and calendar_id)
+            and isinstance(calendars, list)
+        ):
+            for item in calendars:
+                calendar = item.get("calendar") if isinstance(item, dict) else None
+                candidate = (
+                    calendar.get("calendar_id")
+                    if isinstance(calendar, dict)
+                    else None
+                )
+                if isinstance(candidate, str) and candidate:
+                    calendar_id = candidate
+                    break
         if not isinstance(calendar_id, str) or not calendar_id:
             raise FeishuProviderError("feishu_response_invalid", retryable=False)
         return replace(credentials, calendar_id=calendar_id)

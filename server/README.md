@@ -274,6 +274,20 @@ schedule UI for provider latency or hide existing local interview conflicts. Ver
 python -m pytest server/tests/test_feishu_availability.py -q
 ```
 
+Candidate detail interview actions are application-scoped. A recurring failure mode is that the
+candidate detail page only sees the global interview list's first page, so an existing interview for
+the selected application cannot be rescheduled or given feedback, or another application for the
+same candidate leaks into the history. Keep `GET /api/v1/interviews` filterable by
+`application_id`, include that filter in the signed cursor facts, have the frontend controller page
+through every interview for the selected application, and derive candidate history/actions from
+matching server-backed `candidateId` plus `applicationId`. Verify this with:
+
+```powershell
+python -m pytest server/tests/test_interview_api.py -q
+cd frontend
+node --test --test-concurrency=1 src/interviewController.test.js src/AppInterviewIntegration.test.js src/ScreeningViews.test.js
+```
+
 Production TLS must terminate upstream or use externally managed certificates mounted into
 Nginx with a production-specific server block. Never expose API, PostgreSQL, or MinIO ports.
 

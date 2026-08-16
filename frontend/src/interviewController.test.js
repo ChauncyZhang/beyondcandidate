@@ -57,11 +57,11 @@ test("lists interviews from the server envelope and maps display fields", async 
   const controller = createInterviewController({ client });
   const signal = new AbortController().signal;
 
-  const result = await controller.list({ status: "pending_feedback", interviewerId: USER_ID, limit: 25, cursor: "CURSOR-1" }, { signal });
+  const result = await controller.list({ applicationId: APPLICATION_ID, status: "pending_feedback", interviewerId: USER_ID, limit: 25, cursor: "CURSOR-1" }, { signal });
 
   assert.deepEqual(calls, [{
     kind: "request",
-    path: `/api/v1/interviews?interviewer_id=${USER_ID}&status=pending_feedback&cursor=CURSOR-1&limit=25`,
+    path: `/api/v1/interviews?application_id=${APPLICATION_ID}&interviewer_id=${USER_ID}&status=pending_feedback&cursor=CURSOR-1&limit=25`,
     options: { signal },
   }]);
   assert.equal(result.records.length, 1);
@@ -103,6 +103,22 @@ test("lists interviews from the server envelope and maps display fields", async 
   });
   assert.equal(result.count, 1);
   assert.equal(result.nextCursor, "CURSOR-2");
+});
+
+test("loads every interview for one application without relying on the global first page", async () => {
+  const secondInterview = apiInterview({ id: "11111111-1111-4111-8111-111111111112" });
+  const { client, calls } = queuedClient([
+    { data: [apiInterview()], meta: { next_cursor: "NEXT" } },
+    { data: [secondInterview], meta: { next_cursor: null } },
+  ]);
+
+  const records = await createInterviewController({ client }).listForApplication(APPLICATION_ID);
+
+  assert.deepEqual(records.map((item) => item.id), [INTERVIEW_ID, secondInterview.id]);
+  assert.deepEqual(calls.map((call) => call.path), [
+    `/api/v1/interviews?application_id=${APPLICATION_ID}&limit=100`,
+    `/api/v1/interviews?application_id=${APPLICATION_ID}&cursor=NEXT&limit=100`,
+  ]);
 });
 
 test("normalizes masked candidate email delivery separately from Feishu notification state", async () => {
@@ -617,16 +633,22 @@ test("rejects missing resource identity and version before network I/O", async (
 
 test("candidate interview history is derived only from matching server records", () => {
   const records = [
-    { id: INTERVIEW_ID, serverBacked: true, candidateId: CANDIDATE_ID, round: "一面", date: "2026-07-15", time: "10:00", interviewers: ["张小北"], status: "已完成", feedbackStatus: "已提交", feedback: { conclusion: "推荐", strengths: "技术基础扎实" } },
+    { id: INTERVIEW_ID, serverBacked: true, applicationId: APPLICATION_ID, candidateId: CANDIDATE_ID, round: "一面", date: "2026-07-15", time: "10:00", startsAt: "2026-07-15T02:00:00Z", interviewers: ["张小北"], interviewerIds: [USER_ID], status: "已完成", feedbackStatus: "已提交", feedback: { conclusion: "推荐", strengths: "技术基础扎实" } },
+    { id: "other-application", serverBacked: true, applicationId: "other-application", candidateId: CANDIDATE_ID, round: "其他职位面试", date: "2026-07-16", time: "11:00", interviewers: ["王磊"], status: "已安排", feedbackStatus: "未开始", feedback: null },
     { id: "other", serverBacked: true, candidateId: "other-candidate", round: "二面", date: "2026-07-16", time: "11:00", interviewers: ["王磊"], status: "已安排", feedbackStatus: "未开始", feedback: null },
     { id: "local", serverBacked: false, candidateId: CANDIDATE_ID, round: "本地夹具" },
   ];
 
-  assert.deepEqual(deriveCandidateInterviews(CANDIDATE_ID, records), [{
+  assert.deepEqual(deriveCandidateInterviews(CANDIDATE_ID, records, APPLICATION_ID), [{
     interviewId: INTERVIEW_ID,
+    applicationId: APPLICATION_ID,
     round: "一面",
     time: "2026-07-15 10:00",
+    startsAt: "2026-07-15T02:00:00Z",
     interviewer: "张小北",
+    interviewerIds: [USER_ID],
+    status: "已完成",
+    feedbackStatus: "已提交",
     result: "推荐",
     feedback: "技术基础扎实",
   }]);

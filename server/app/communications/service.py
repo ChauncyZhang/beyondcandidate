@@ -20,6 +20,8 @@ from server.app.queue.service import normalize_safe_code
 
 VARIABLE = re.compile(r"{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}")
 EMAIL_JOB_PAYLOAD = PayloadSchema({"organization_id": OpaqueIdField(), "delivery_id": OpaqueIdField()})
+INTERVIEW_FEISHU_WAIT_ATTEMPTS = 4
+INTERVIEW_EMAIL_JOB_MAX_ATTEMPTS = INTERVIEW_FEISHU_WAIT_ATTEMPTS + 3
 logger = logging.getLogger(__name__)
 
 
@@ -202,7 +204,7 @@ def enqueue_delivery(db, command: DeliveryCommand, *, cipher: EmailSecretCipher,
             raise DeliveryIdempotencyConflict("idempotency_conflict") from None
         return existing
     job_max_attempts = (
-        5
+        INTERVIEW_EMAIL_JOB_MAX_ATTEMPTS
         if command.resource_type in {"interview_invitation", "interview_rescheduled"}
         else 3
     )

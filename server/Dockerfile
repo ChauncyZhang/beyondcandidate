@@ -22,5 +22,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY server/requirements-dev.txt /opt/beyondcandidate/server/requirements-dev.txt
 COPY deploy /opt/beyondcandidate/deploy
+COPY THIRD_PARTY_NOTICES.md /opt/beyondcandidate/THIRD_PARTY_NOTICES.md
 RUN pip install --no-cache-dir -r server/requirements-dev.txt
 CMD ["python", "-m", "pytest", "server/tests", "-q"]

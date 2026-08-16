@@ -520,7 +520,15 @@ def test_http_provider_resolves_primary_calendar_when_create_rejects_alias() -> 
         if request.method == "POST" and request.url.path.endswith("/calendars/primary/events"):
             return httpx.Response(400, json={"code": 190002, "msg": "invalid parameters in request"})
         if request.method == "POST" and request.url.path.endswith("/calendars/primary"):
-            return httpx.Response(200, json={"code": 0, "data": {"calendar_id": actual_calendar_id}})
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {
+                    "calendars": [{
+                        "calendar": {"calendar_id": actual_calendar_id},
+                        "user_id": "ou_bot",
+                    }],
+                },
+            })
         if request.method == "POST" and request.url.path.endswith(f"/calendars/{actual_calendar_id}/events"):
             return httpx.Response(200, json={
                 "code": 0,

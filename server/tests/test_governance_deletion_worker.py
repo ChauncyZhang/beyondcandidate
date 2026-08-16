@@ -150,7 +150,7 @@ class FakeGovernanceEngine:
 
 
 def _approved_request(app):
-    requester_id = seed_user(app, "recruiter", "worker-requester@deletion.test")
+    requester_id = seed_user(app, "recruiting_admin", "worker-requester@deletion.test")
     seed_user(app, "system_admin", "worker-approver@deletion.test")
     candidate_id = candidate_for(app, requester_id)
     with app.state.identity_store.sync_session() as db:

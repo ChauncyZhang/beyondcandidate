@@ -213,14 +213,21 @@ export function normalizeInterview(value) {
   };
 }
 
-export function deriveCandidateInterviews(candidateId, records) {
+export function deriveCandidateInterviews(candidateId, records, applicationId = "") {
   return safeArray(records)
-    .filter((record) => record?.serverBacked === true && record.candidateId === candidateId)
+    .filter((record) => record?.serverBacked === true
+      && record.candidateId === candidateId
+      && (!applicationId || record.applicationId === applicationId))
     .map((record) => ({
       interviewId: record.id,
+      applicationId: record.applicationId,
       round: record.round,
       time: `${record.date} ${record.time}`.trim(),
+      startsAt: record.startsAt,
       interviewer: safeArray(record.interviewers).join("、") || "未分配",
+      interviewerIds: safeArray(record.interviewerIds),
+      status: record.status,
+      feedbackStatus: record.feedbackStatus,
       result: record.feedback?.conclusion || record.feedbackStatus || record.status,
       feedback: record.feedback?.strengths || "暂无已提交反馈",
     }));
@@ -388,6 +395,7 @@ export function createInterviewController({ client = apiClient, idempotencyKey =
     const params = new URLSearchParams();
     if (safeString(filters.from)) params.set("from", filters.from);
     if (safeString(filters.to)) params.set("to", filters.to);
+    if (safeString(filters.applicationId)) params.set("application_id", filters.applicationId);
     if (safeString(filters.interviewerId)) params.set("interviewer_id", filters.interviewerId);
     if (safeString(filters.status)) params.set("status", filters.status);
     if (safeString(filters.cursor)) params.set("cursor", filters.cursor);
@@ -399,6 +407,18 @@ export function createInterviewController({ client = apiClient, idempotencyKey =
       count: Number.isInteger(response?.meta?.count) ? response.meta.count : records.length,
       nextCursor: safeString(response?.meta?.next_cursor) || null,
     };
+  }
+
+  async function listForApplication(applicationId, { signal } = {}) {
+    const id = requireId(applicationId, "APPLICATION_ID_REQUIRED");
+    const records = [];
+    let cursor = "";
+    do {
+      const page = await list({ applicationId: id, cursor: cursor || undefined, limit: 100 }, { signal });
+      records.push(...page.records);
+      cursor = page.nextCursor || "";
+    } while (cursor);
+    return records;
   }
 
   function rangeTimestamp(date, end = false, timezone = "Asia/Shanghai") {
@@ -589,7 +609,7 @@ export function createInterviewController({ client = apiClient, idempotencyKey =
     return normalizeMaterials(response?.data);
   }
 
-  return { list, listRange, availability, get, save, checkConflicts, transition, resendEmail, downloadCalendar, getResumeFile, downloadResumeFile, getMyFeedback, saveMyFeedback, submitMyFeedback, amendFeedback, listMyTasks, listParticipantOptions, listFeedbacks, getMaterials };
+  return { list, listForApplication, listRange, availability, get, save, checkConflicts, transition, resendEmail, downloadCalendar, getResumeFile, downloadResumeFile, getMyFeedback, saveMyFeedback, submitMyFeedback, amendFeedback, listMyTasks, listParticipantOptions, listFeedbacks, getMaterials };
 }
 
 export const interviewController = createInterviewController();

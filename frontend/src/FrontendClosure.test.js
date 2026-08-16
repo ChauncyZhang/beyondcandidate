@@ -398,6 +398,7 @@ test("interview list keeps delivery and task columns separate with desktop horiz
   const { context, page } = await openPage({ viewport: { width: 1280, height: 760 }, interviews });
   try {
     await page.goto(`${baseUrl}interviews`);
+    await page.getByLabel("日期筛选").selectOption("全部日期");
     const row = page.locator(".interview-table-row").first();
     await row.waitFor();
     const table = page.locator(".interview-table");

@@ -284,6 +284,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
   const [candidateRecords, setCandidateRecords] = useState(initialCandidateRecords);
   const [candidateOrigin, setCandidateOrigin] = useState(null);
   const [candidateDetailState, setCandidateDetailState] = useState(null);
+  const [candidateInterviewRecords, setCandidateInterviewRecords] = useState([]);
   const candidateLoadRef = useRef(null);
   const candidatePreset = route.kind === "candidates" && route.mode === "list" ? route.filters : null;
   const interviewMode = route.kind === "interviews" && ["new", "reschedule"].includes(route.mode) ? "schedule" : route.kind === "interviews" && route.mode === "feedback" ? "feedback" : "list";
@@ -373,8 +374,19 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
   const feedbackCompletedCount = interviewRecords.filter((record) => record.feedbackStatus === "已提交").length;
   const feedbackCompletionRate = interviewRecords.length ? Math.round((feedbackCompletedCount / interviewRecords.length) * 100) : 0;
   const workbenchCandidateCount = visibleStageMeta.reduce((total, [, count]) => total + count, 0);
-  const selectedInterview = interviewRecords.find((record) => record.id === selectedInterviewId) || null;
-  const selectedCandidateWithInterviews = useMemo(() => selectedCandidate ? { ...selectedCandidate, interviews: deriveCandidateInterviews(selectedCandidate.id, interviewRecords) } : null, [interviewRecords, selectedCandidate]);
+  const candidateInterviewSource = useMemo(() => Array.from(new Map(
+    [...interviewRecords, ...candidateInterviewRecords].map((record) => [record.id, record]),
+  ).values()), [candidateInterviewRecords, interviewRecords]);
+  const interviewWorkspaceRecords = interviewOrigin ? candidateInterviewSource : interviewRecords;
+  const selectedInterview = candidateInterviewSource.find((record) => record.id === selectedInterviewId) || null;
+  const selectedCandidateWithInterviews = useMemo(() => selectedCandidate ? {
+    ...selectedCandidate,
+    interviews: deriveCandidateInterviews(
+      selectedCandidate.id,
+      candidateInterviewSource,
+      selectedCandidate.applicationId || selectedCandidate.application?.id || "",
+    ),
+  } : null, [candidateInterviewSource, selectedCandidate]);
   const interviewCandidates = useMemo(() => {
     const serverCandidates = selectSchedulableCandidates(interviewCandidateRecords);
     const selected = selectedCandidateWithInterviews?.serverBacked
@@ -587,6 +599,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
     if (route.kind !== "candidates" || route.mode !== "detail" || !route.id) return;
     const local = candidateRecords.find((candidate) => candidate.id === route.id || candidate.candidateId === route.id);
     if (local && local.serverBacked !== true) {
+      setCandidateInterviewRecords([]);
       setSelectedCandidate(local);
       setCandidateDetailState(null);
       return;
@@ -803,6 +816,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
     const abortController = new AbortController();
     candidateLoadRef.current = abortController;
     setCandidateDetailState({ status: "loading", context, error: "" });
+    setCandidateInterviewRecords([]);
     setSelectedCandidate(null);
     try {
       const candidate = await candidateController.loadReview({
@@ -810,8 +824,26 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
         actor: { id: session.user?.id, name: roleIdentity.name },
       }, { signal: abortController.signal });
       if (candidateLoadRef.current !== abortController) return;
+      const applicationId = candidate.applicationId || candidate.application?.id || context.applicationId;
+      let interviewsStatus = "ready";
+      if (applicationId) {
+        try {
+          const scopedInterviews = await interviewController.listForApplication(applicationId, { signal: abortController.signal });
+          if (candidateLoadRef.current !== abortController) return;
+          setCandidateInterviewRecords(scopedInterviews);
+        } catch (error) {
+          if (error?.name === "AbortError" || candidateLoadRef.current !== abortController) return;
+          interviewsStatus = "error";
+        }
+      }
       setSelectedCandidate(candidate);
-      setCandidateDetailState({ status: "ready", context, error: "" });
+      setCandidateDetailState({
+        status: "ready",
+        context,
+        error: "",
+        interviewsStatus,
+        interviewsError: interviewsStatus === "error" ? "面试记录加载失败，改期和评价暂不可用。" : "",
+      });
     } catch (error) {
       if (error?.name === "AbortError" || candidateLoadRef.current !== abortController) return;
       setCandidateDetailState({ status: "error", context, error: "请检查网络连接后重试；未加载任何本地示例数据。" });
@@ -878,6 +910,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
       setScreeningViewState(candidateOrigin.screeningViewState || null);
       setCandidateOrigin(null);
     }
+    setCandidateInterviewRecords([]);
     setSelectedCandidate(null);
     setCandidateDetailState(null);
     navigate(candidateOrigin ? routeForNav(candidateOrigin.activeNav) : "/candidates", { replace: true });
@@ -887,6 +920,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
     if (route.returnTo) {
       candidateLoadRef.current?.abort();
       candidateLoadRef.current = null;
+      setCandidateInterviewRecords([]);
       setSelectedCandidate(null);
       setCandidateDetailState(null);
       setCandidateOrigin(null);
@@ -907,7 +941,11 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
     setInterviewOrigin(null);
   }
 
-  function openScheduleInterview(candidate = null, interview = null) {
+  function openScheduleInterview(candidate = null, interviewOrId = null) {
+    const interview = typeof interviewOrId === "string"
+      ? candidateInterviewSource.find((item) => item.id === interviewOrId)
+      : interviewOrId;
+    if (interviewOrId && !interview) { notify("未找到对应面试记录"); return; }
     void loadInterviewCandidates();
     setInterviewOrigin(activeNav === "面试" ? null : { activeNav, candidateMode, selectedCandidate, screeningTask });
     setScreeningTask(null);
@@ -917,7 +955,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
   }
 
   function openFeedbackInterview(interviewOrId) {
-    const interview = typeof interviewOrId === "string" ? interviewRecords.find((item) => item.id === interviewOrId) : interviewOrId;
+    const interview = typeof interviewOrId === "string" ? candidateInterviewSource.find((item) => item.id === interviewOrId) : interviewOrId;
     if (!interview) { notify("未找到对应面试记录"); return; }
     setInterviewOrigin(activeNav === "面试" ? null : { activeNav, candidateMode, selectedCandidate, screeningTask });
     setScreeningTask(null);
@@ -1014,6 +1052,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
                 closeNavigation({ restoreFocus: true });
                 setScreeningTask(null);
                 setCandidateOrigin(null);
+                setCandidateInterviewRecords([]);
                 setSelectedCandidate(null);
                 setInterviewOrigin(null);
                 setScheduleCandidateId(null);
@@ -1210,11 +1249,11 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
         {!screeningTask && activeNav === "筛选任务" && route.mode === "detail" && screeningLoadState.status === "error" && <div className="workbench-status error" role="alert"><CircleAlert size={22} /><div><strong>筛选任务无法加载</strong><p>{screeningLoadState.error}</p></div><button className="button secondary" type="button" onClick={() => navigate("/screening/tasks", { replace: true })}>返回任务列表</button></div>}
 
         {!screeningTask && activeNav === "候选人" && (
-          <CandidatesWorkspace mode={candidateMode} setMode={setCandidateMode} selectedCandidate={selectedCandidateWithInterviews} setSelectedCandidate={setSelectedCandidate} records={candidateRecords} setRecords={updateCandidateRecords} onNotify={notify} onBackDetail={requestBackFromCandidateDetail} detailBackLabel={route.returnTo?.startsWith("/screening/tasks/") ? "返回筛选任务" : candidateOrigin?.activeNav === "工作台" ? "返回工作台" : candidateOrigin?.activeNav === "人才库" ? "返回人才库" : candidateOrigin ? "返回筛选任务" : "返回候选人列表"} onOpenCandidate={openCandidate} onScheduleInterview={(candidate) => openScheduleInterview(candidate)} onOpenInterviewFeedback={openFeedbackInterview} onAddToTalentPool={addCandidatesToTalentPool} filters={candidatePreset || {}} onFiltersChange={(filters) => navigate(candidateListPath(filters), { replace: true })} detailTab={route.tab} onDetailTabChange={(tab) => selectedCandidateWithInterviews && navigate(candidateDetailPath({ ...selectedCandidateWithInterviews, approvalId: route.approvalId }, tab, route.returnTo), { replace: true })} actorName={roleIdentity.name} currentRole={currentRole} controller={candidateController} offerController={offerController} offerApprovalId={route.approvalId} detailState={candidateDetailState} onRetryDetail={() => candidateDetailState?.context ? loadServerCandidate(candidateDetailState.context) : Promise.resolve()} pageActionHost={pageActionHost} onImport={() => setImportOpen(true)} />
+          <CandidatesWorkspace mode={candidateMode} setMode={setCandidateMode} selectedCandidate={selectedCandidateWithInterviews} setSelectedCandidate={setSelectedCandidate} records={candidateRecords} setRecords={updateCandidateRecords} onNotify={notify} onBackDetail={requestBackFromCandidateDetail} detailBackLabel={route.returnTo?.startsWith("/screening/tasks/") ? "返回筛选任务" : candidateOrigin?.activeNav === "工作台" ? "返回工作台" : candidateOrigin?.activeNav === "人才库" ? "返回人才库" : candidateOrigin ? "返回筛选任务" : "返回候选人列表"} onOpenCandidate={openCandidate} onScheduleInterview={(candidate, interview) => openScheduleInterview(candidate, interview)} onOpenInterviewFeedback={openFeedbackInterview} onAddToTalentPool={addCandidatesToTalentPool} filters={candidatePreset || {}} onFiltersChange={(filters) => navigate(candidateListPath(filters), { replace: true })} detailTab={route.tab} onDetailTabChange={(tab) => selectedCandidateWithInterviews && navigate(candidateDetailPath({ ...selectedCandidateWithInterviews, approvalId: route.approvalId }, tab, route.returnTo), { replace: true })} actorName={roleIdentity.name} currentUserId={session.user?.id} currentRole={currentRole} controller={candidateController} offerController={offerController} offerApprovalId={route.approvalId} detailState={candidateDetailState} onRetryDetail={() => candidateDetailState?.context ? loadServerCandidate(candidateDetailState.context) : Promise.resolve()} pageActionHost={pageActionHost} onImport={() => setImportOpen(true)} />
         )}
 
         {!screeningTask && activeNav === "面试" && (
-          <InterviewsWorkspace mode={interviewMode} setMode={setInterviewMode} selectedInterviewId={selectedInterviewId} setSelectedInterviewId={updateSelectedInterviewId} scheduleCandidateId={scheduleCandidateId} records={interviewRecords} status={interviewState.status} error={interviewState.error} onRetry={() => void loadInterviews()} nextCursor={interviewState.nextCursor} loadingMore={interviewState.loadingMore} onLoadMore={() => void loadInterviews({ cursor: interviewState.nextCursor, append: true })} candidates={interviewCandidates} onNotify={notify} onBack={requestBackFromInterview} backLabel={interviewOrigin?.activeNav === "候选人" ? "返回候选人详情" : interviewOrigin?.activeNav === "工作台" ? "返回工作台" : interviewOrigin?.activeNav === "人才库" ? "返回人才库" : "返回面试列表"} onOpenSubView={() => {}} onRecordsChanged={refreshInterviewsAfterMutation} canSchedule={canPerformAction(currentRole, "安排面试")} canCorrectCandidateEmail={canPerformAction(currentRole, "安排面试")} candidateEmailController={candidateController} actorName={roleIdentity.name} actorId={session.user?.id} controller={interviewController} pageActionHost={pageActionHost} />
+          <InterviewsWorkspace mode={interviewMode} setMode={setInterviewMode} selectedInterviewId={selectedInterviewId} setSelectedInterviewId={updateSelectedInterviewId} scheduleCandidateId={scheduleCandidateId} records={interviewWorkspaceRecords} status={interviewState.status} error={interviewState.error} onRetry={() => void loadInterviews()} nextCursor={interviewState.nextCursor} loadingMore={interviewState.loadingMore} onLoadMore={() => void loadInterviews({ cursor: interviewState.nextCursor, append: true })} candidates={interviewCandidates} onNotify={notify} onBack={requestBackFromInterview} backLabel={interviewOrigin?.activeNav === "候选人" ? "返回候选人详情" : interviewOrigin?.activeNav === "工作台" ? "返回工作台" : interviewOrigin?.activeNav === "人才库" ? "返回人才库" : "返回面试列表"} onOpenSubView={() => {}} onRecordsChanged={refreshInterviewsAfterMutation} canSchedule={canPerformAction(currentRole, "安排面试")} canCorrectCandidateEmail={canPerformAction(currentRole, "安排面试")} candidateEmailController={candidateController} actorName={roleIdentity.name} actorId={session.user?.id} controller={interviewController} pageActionHost={pageActionHost} />
         )}
 
         {!screeningTask && activeNav === "人才库" && (

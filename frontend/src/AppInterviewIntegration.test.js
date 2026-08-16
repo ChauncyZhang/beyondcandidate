@@ -46,3 +46,14 @@ test("returning from an interview mutation reloads the originating candidate det
     /function requestBackFromInterview\(\)[\s\S]*?interviewOrigin\?\.activeNav === "候选人"[\s\S]*?loadServerCandidate\(candidateDetailState\.context\)/,
   );
 });
+
+test("candidate detail loads application-scoped interviews and opens their actions directly", () => {
+  assert.match(appSource, /interviewController\.listForApplication\(applicationId/);
+  assert.match(appSource, /setCandidateInterviewRecords\(scopedInterviews\)/);
+  assert.match(appSource, /\[\.\.\.interviewRecords, \.\.\.candidateInterviewRecords\]/);
+  assert.match(appSource, /candidateInterviewSource\.find\(\(item\) => item\.id === interviewOrId\)/);
+  assert.match(appSource, /records=\{interviewWorkspaceRecords\}/);
+  assert.match(appSource, /interviewsStatus = "error"/);
+  assert.match(appSource, /typeof interviewOrId === "string"/);
+  assert.match(appSource, /currentUserId=\{session\.user\?\.id\}/);
+});

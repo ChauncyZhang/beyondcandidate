@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 
 from server.app.communications.models import EmailDelivery, EmailProviderConfig
-from server.app.communications.provider import PermanentMailError, ProviderReceipt
+from server.app.communications.provider import PermanentMailError, ProviderReceipt, TemporaryMailError
+from server.app.communications.service import INTERVIEW_EMAIL_JOB_MAX_ATTEMPTS, INTERVIEW_FEISHU_WAIT_ATTEMPTS
 from server.app.communications.worker import EmailDeliveryJobHandler
 from server.app.core.settings import Settings
 from server.app.identity.models import AuditLog, Job, JobCollaborator, Organization, User, UserRole, UserStatus
@@ -451,7 +452,7 @@ def test_video_interview_email_materializes_feishu_link_before_sending(tmp_path)
                 BackgroundJob.type == "communications.send_email"
             )
         )
-        assert job.max_attempts == 5
+        assert job.max_attempts == INTERVIEW_EMAIL_JOB_MAX_ATTEMPTS
         database.commit()
 
     provider = RecordingProvider()
@@ -470,7 +471,15 @@ def test_video_interview_email_materializes_feishu_link_before_sending(tmp_path)
     assert meeting_url.encode() in message.attachment_content
 
 
-def test_video_interview_email_waits_while_feishu_link_is_pending(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "terminal_sync_status,exhaust_job_attempts",
+    [("failed", False), ("pending", True)],
+)
+def test_video_interview_email_waits_then_falls_back_without_link(
+    tmp_path,
+    terminal_sync_status,
+    exhaust_job_attempts,
+) -> None:
     class RecordingProvider:
         def __init__(self):
             self.messages = []
@@ -542,34 +551,80 @@ def test_video_interview_email_waits_while_feishu_link_is_pending(tmp_path) -> N
                 FeishuInterviewSync.interview_id == interview_id
             )
         )
-        sync.sync_status = "failed"
+        sync.sync_status = terminal_sync_status
         database.commit()
+    if exhaust_job_attempts:
+        job.attempts = INTERVIEW_FEISHU_WAIT_ATTEMPTS + 1
 
-    # Reproduce the production failure ordering: Feishu has already failed
-    # before the email worker's first attempt.
-    with pytest.raises(PermanentJobError, match="interview_meeting_link_unavailable"):
-        asyncio.run(
-            EmailDeliveryJobHandler(
-                app.state.identity_store.sync_session,
-                provider,
-                app.state.email_secret_cipher,
-            )(job)
-        )
-    assert provider.messages == []
+    asyncio.run(
+        EmailDeliveryJobHandler(
+            app.state.identity_store.sync_session,
+            provider,
+            app.state.email_secret_cipher,
+        )(job)
+    )
 
+    assert len(provider.messages) == 1
+    assert "飞书视频会议将通过日历邀请发送" in provider.messages[0].body
+    assert "飞书视频会议将通过日历邀请发送".encode() in (
+        provider.messages[0].attachment_content or b""
+    ).replace(b"\r\n ", b"")
     with app.state.identity_store.sync_session() as database:
-        sync = database.scalar(
-            select(FeishuInterviewSync).where(
-                FeishuInterviewSync.interview_id == interview_id
+        delivery = database.get(EmailDelivery, delivery_id)
+        assert (delivery.status, delivery.attempts) == ("sent", 1)
+
+
+def test_video_interview_email_keeps_smtp_retries_after_feishu_wait_expires(tmp_path) -> None:
+    class FlakyProvider:
+        def __init__(self):
+            self.messages = []
+
+        async def send(self, message):
+            self.messages.append(message)
+            if len(self.messages) == 1:
+                raise TemporaryMailError("smtp_timeout")
+            return ProviderReceipt("provider-receipt")
+
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    payload = interview_payload(seed)
+    payload.pop("meeting_url")
+    with TestClient(app) as client:
+        headers = login(client, "interview-admin@example.test")
+        assert client.put(
+            "/api/v1/settings/integrations/feishu",
+            headers=headers,
+            json={
+                "app_id": "cli_test",
+                "app_secret": "app-secret-value",
+                "redirect_uri": "https://hr.example.test/api/v1/auth/feishu/callback",
+                "calendar_id": "primary",
+                "enabled": True,
+            },
+        ).status_code == 200
+        created, _ = create_interview(
+            client,
+            seed,
+            key="video-email-smtp-retry-after-feishu-wait",
+            payload=payload,
+        )
+
+    interview_id = UUID(created.json()["data"]["id"])
+    with app.state.identity_store.sync_session() as database:
+        job = database.scalar(
+            select(BackgroundJob).where(
+                BackgroundJob.type == "communications.send_email"
             )
         )
-        sync.sync_status = "pending"
-        database.commit()
+        delivery = database.scalar(
+            select(EmailDelivery).where(EmailDelivery.resource_id == interview_id)
+        )
+        delivery_id = delivery.id
+        assert job.max_attempts == INTERVIEW_EMAIL_JOB_MAX_ATTEMPTS
 
-    # Never send a video invitation with a placeholder instead of an actionable
-    # meeting link. The queue terminal callback surfaces this failure to HR.
-    job.attempts = job.max_attempts
-    with pytest.raises(PermanentJobError, match="interview_meeting_link_unavailable"):
+    provider = FlakyProvider()
+    job.attempts = INTERVIEW_FEISHU_WAIT_ATTEMPTS + 1
+    with pytest.raises(RetryableJobError, match="smtp_timeout"):
         asyncio.run(
             EmailDeliveryJobHandler(
                 app.state.identity_store.sync_session,
@@ -577,7 +632,21 @@ def test_video_interview_email_waits_while_feishu_link_is_pending(tmp_path) -> N
                 app.state.email_secret_cipher,
             )(job)
         )
-    assert provider.messages == []
+    assert job.attempts < job.max_attempts
+
+    job.attempts += 1
+    asyncio.run(
+        EmailDeliveryJobHandler(
+            app.state.identity_store.sync_session,
+            provider,
+            app.state.email_secret_cipher,
+        )(job)
+    )
+
+    assert len(provider.messages) == 2
+    with app.state.identity_store.sync_session() as database:
+        delivery = database.get(EmailDelivery, delivery_id)
+        assert (delivery.status, delivery.attempts) == ("sent", 2)
 
 
 @pytest.mark.parametrize(
@@ -2916,12 +2985,24 @@ def test_interview_list_uses_stable_signed_cursor_pagination(tmp_path) -> None:
             params={"limit": 2, "cursor": first.json()["meta"]["next_cursor"]},
             headers=headers,
         )
+        scoped = client.get(
+            "/api/v1/interviews",
+            params={"application_id": str(seed["application_id"]), "limit": 100},
+            headers=headers,
+        )
+        unrelated = client.get(
+            "/api/v1/interviews",
+            params={"application_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+            headers=headers,
+        )
 
     assert first.status_code == second.status_code == 200
     assert first.json()["meta"]["limit"] == second.json()["meta"]["limit"] == 2
     assert first.json()["meta"]["next_cursor"] is not None
     assert second.json()["meta"]["next_cursor"] is None
     assert [item["id"] for item in first.json()["data"] + second.json()["data"]] == expected_ids
+    assert [item["id"] for item in scoped.json()["data"]] == expected_ids
+    assert unrelated.json()["data"] == []
 
 
 def test_interview_list_rejects_invalid_cross_filter_and_cross_tenant_cursors(tmp_path) -> None:
@@ -2961,6 +3042,15 @@ def test_interview_list_rejects_invalid_cross_filter_and_cross_tenant_cursors(tm
             params={"status": "confirmed", "cursor": token},
             headers=headers,
         )
+        application_mismatch = client.get(
+            "/api/v1/interviews",
+            params={
+                "status": "scheduled",
+                "application_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "cursor": token,
+            },
+            headers=headers,
+        )
         too_small = client.get("/api/v1/interviews", params={"limit": 0}, headers=headers)
         too_large = client.get("/api/v1/interviews", params={"limit": 101}, headers=headers)
 
@@ -2984,7 +3074,7 @@ def test_interview_list_rejects_invalid_cross_filter_and_cross_tenant_cursors(tm
 
     assert first.status_code == 200
     assert token is not None
-    for response in (invalid, mismatch, cross_tenant, too_small, too_large):
+    for response in (invalid, mismatch, application_mismatch, cross_tenant, too_small, too_large):
         assert response.status_code == 422
         assert response.json()["code"] == "validation_failed"
 

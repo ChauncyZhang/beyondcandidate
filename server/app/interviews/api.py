@@ -945,6 +945,7 @@ def list_interviews(
     request: Request,
     date_from: datetime | None = Query(default=None, alias="from"),
     date_to: datetime | None = Query(default=None, alias="to"),
+    application_id: UUID | None = None,
     interviewer_id: UUID | None = None,
     status: str | None = None,
     cursor: str | None = None,
@@ -966,6 +967,7 @@ def list_interviews(
         json.dumps(
             {
                 "from": _aware(date_from).astimezone(timezone.utc).isoformat() if date_from else None,
+                "application_id": str(application_id) if application_id else None,
                 "interviewer_id": str(interviewer_id) if interviewer_id else None,
                 "status": status,
                 "to": _aware(date_to).astimezone(timezone.utc).isoformat() if date_to else None,
@@ -991,6 +993,8 @@ def list_interviews(
             statement = statement.where(Interview.ends_at >= date_from)
         if date_to is not None:
             statement = statement.where(Interview.starts_at <= date_to)
+        if application_id is not None:
+            statement = statement.where(Interview.application_id == application_id)
         if status is not None:
             statement = statement.where(Interview.status == status)
         if interviewer_id is not None:

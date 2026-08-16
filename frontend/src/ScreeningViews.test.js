@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
+const candidateSource = readFileSync(new URL("./CandidateViews.jsx", import.meta.url), "utf8");
 let helpers;
 let candidateHelpers;
 let controllerHelpers;
@@ -535,4 +536,21 @@ test("server candidate detail exposes the connected interview path and reports c
   assert.equal(candidateHelpers.canScheduleCandidateInterview("已通过", "HR 招聘专员", true, "open"), false);
   assert.equal(candidateHelpers.canScheduleCandidateInterview("待安排", "HR 招聘专员", true, "closed"), false);
   assert.equal(candidateHelpers.canScheduleCandidateInterview("待安排", "HR 招聘专员", true, "archived"), false);
+  const scheduledInterview = {
+    interviewId: "interview-1",
+    startsAt: "2026-08-17T02:00:00Z",
+    status: "已安排",
+    feedbackStatus: "未开始",
+    interviewerIds: ["user-1"],
+  };
+  assert.deepEqual(
+    candidateHelpers.candidateInterviewActions(scheduledInterview, "HR 招聘专员", "user-1", true, true).map((item) => item.kind),
+    ["reschedule", "feedback"],
+  );
+  assert.deepEqual(candidateHelpers.candidateInterviewActions(scheduledInterview, "用人经理", "user-2", true, true), []);
+  assert.equal(candidateHelpers.selectCurrentCandidateInterview([
+    { ...scheduledInterview, interviewId: "later", startsAt: "2026-08-18T02:00:00Z" },
+    scheduledInterview,
+  ], new Date("2026-08-16T00:00:00Z")).interviewId, "interview-1");
+  assert.match(candidateSource, /currentInterviewActions = interviewLoadFailed \? \[\] : candidateInterviewActions/);
 });
