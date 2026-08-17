@@ -59,14 +59,11 @@ const workflowActions = {
   review_rejected: { label: "简历评审不通过", title: "确认简历评审不通过", description: "请记录不通过原因，提交后将进入已淘汰。", target: "已淘汰", capability: "评审候选人", reasonRequired: true },
   hiring_approved: { label: "决定进入录用", title: "确认进入录用流程", description: "提交后，候选人将进入待录用确认，HR 会在工作台收到待办。", target: "已通过", capability: "确认录用决策" },
   hiring_rejected: { label: "决定不录用", title: "确认本次不录用", description: "请记录决策原因，提交后将进入已淘汰。", target: "已淘汰", capability: "确认录用决策", reasonRequired: true },
-  offer_accepted: { label: "确认候选人接受录用", title: "确认候选人接受录用", description: "请仅在候选人已接受录用后确认。提交后流程结束。", target: "已录用", capability: "确认录用结果" },
-  offer_declined: { label: "候选人拒绝录用", title: "确认候选人拒绝录用", description: "请记录候选人拒绝录用的原因，提交后流程结束。", target: "已撤回", capability: "确认录用结果", reasonRequired: true },
 };
 
 const stageWorkflowActions = {
   待复核: ["review_approved", "review_rejected"],
   待决策: ["hiring_approved", "hiring_rejected"],
-  已通过: ["offer_accepted", "offer_declined"],
 };
 
 const llmDimensionLabels = {
@@ -93,7 +90,7 @@ export function candidateNextStep(stage, jobStatus = "open") {
     待安排: "HR 安排下一场面试",
     面试中: "完成当前面试与面试官反馈",
     待决策: "等待用人经理作出录用决策",
-    已通过: "HR 确认候选人是否接受录用",
+    已通过: "HR 在 Offer 页完成审批、发送与候选人确认",
     已录用: "流程已完成",
     已淘汰: "流程已结束",
     已撤回: "流程已结束",

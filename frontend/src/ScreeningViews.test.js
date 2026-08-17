@@ -527,6 +527,8 @@ test("server candidate detail exposes the connected interview path and reports c
   assert.deepEqual(candidateHelpers.candidateStageFilterOptions(), ["新简历", "待复核", "AI 初筛暂缓", "待沟通", "待安排", "面试中", "待决策", "已通过", "已录用", "已淘汰", "已撤回"]);
   assert.deepEqual(candidateHelpers.candidateWorkflowActions("待决策", "用人经理").map((item) => item.id), ["hiring_approved", "hiring_rejected"]);
   assert.deepEqual(candidateHelpers.candidateWorkflowActions("待安排", "HR 招聘专员"), []);
+  assert.deepEqual(candidateHelpers.candidateWorkflowActions("已通过", "招聘管理员"), []);
+  assert.equal(candidateHelpers.candidateNextStep("已通过"), "HR 在 Offer 页完成审批、发送与候选人确认");
   assert.equal(candidateHelpers.candidateNextStep("面试中"), "完成当前面试与面试官反馈");
   assert.equal(candidateHelpers.candidateNextStep("待安排", "archived"), "当前职位不在招聘中，不能安排新的面试");
   assert.equal(candidateHelpers.canScheduleCandidateInterview("待安排", "HR 招聘专员", true, "open"), true);

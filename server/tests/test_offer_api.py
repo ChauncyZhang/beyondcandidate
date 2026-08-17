@@ -141,10 +141,12 @@ def test_proxy_response_requires_management_headers_and_projects_immutable_resul
     assert "token" not in queued[0].body.lower() and "接受" in queued[0].body
     with app.state.identity_store.sync_session() as db:
         response = db.scalar(select(OfferResponse).where(OfferResponse.offer_id == UUID(offer_id)))
-        owner_id = db.get(Application, UUID(seed["application_id"])).owner_id
+        application = db.get(Application, UUID(seed["application_id"]))
+        owner_id = application.owner_id
         owner_events = db.scalars(select(UserNotification.event_type).where(UserNotification.user_id == owner_id)).all()
         proxy_events = db.scalars(select(UserNotification.event_type).where(UserNotification.user_id == proxy_id)).all()
         assert response.source == "hr_proxy" and response.communication_channel == "wechat"
+        assert application.stage == "hired"
         assert owner_events.count("offer_accepted") == 1
         assert proxy_events.count("offer_accepted") == 0
 

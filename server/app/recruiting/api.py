@@ -121,8 +121,6 @@ class WorkflowAction(StrictModel):
         "review_rejected",
         "hiring_approved",
         "hiring_rejected",
-        "offer_accepted",
-        "offer_declined",
     ]
     reason_text: str | None = Field(default=None, max_length=1000)
 
@@ -2140,7 +2138,7 @@ def apply_application_workflow_action(application_id: UUID, payload: WorkflowAct
     principal = _principal(request); expected = _expected_version(request, if_match); key = _idempotency(request, idempotency_key)
     for value in (principal, expected, key):
         if isinstance(value, JSONResponse): return value
-    required_action = RecruitingAction.TRANSITION if payload.action.startswith("offer_") else RecruitingAction.RECOMMEND
+    required_action = RecruitingAction.RECOMMEND
     with request.app.state.identity_store.sync_session() as db:
         review_task_assignee_id = None
         if payload.action.startswith("review_"):

@@ -174,14 +174,23 @@ def test_workflow_actions_require_the_expected_business_stage_and_rejection_reas
             headers={**manager_headers, "If-Match": '"1"', "Idempotency-Key": "wrong-stage"},
         )
         admin_headers = login(client, "admin@example.test")
-        hired = client.post(
+        direct_offer_acceptance = client.post(
             f"/api/v1/applications/{passed_id}/workflow-actions",
             json={"action": "offer_accepted"},
             headers={**admin_headers, "If-Match": '"1"', "Idempotency-Key": "offer-accepted"},
+        )
+        direct_offer_decline = client.post(
+            f"/api/v1/applications/{passed_id}/workflow-actions",
+            json={"action": "offer_declined", "reason_text": "candidate declined"},
+            headers={**admin_headers, "If-Match": '"1"', "Idempotency-Key": "offer-declined"},
         )
 
     assert missing_reason.status_code == 409
     assert missing_reason.json()["code"] == "invalid_state_transition"
     assert approved.status_code == 200 and approved.json()["data"]["stage"] == "passed"
     assert wrong_stage.status_code == 409 and wrong_stage.json()["code"] == "invalid_state_transition"
-    assert hired.status_code == 200 and hired.json()["data"]["stage"] == "hired"
+    assert direct_offer_acceptance.status_code == 422
+    assert direct_offer_decline.status_code == 422
+    with app.state.identity_store.sync_session() as db:
+        application = db.get(Application, UUID(passed_id))
+        assert application.stage == "passed" and application.version == 1

@@ -378,8 +378,8 @@ export function createCandidateController({ client = apiClient, idempotencyKey =
 
   async function workflowAction(application, action, reason = "", { signal } = {}) {
     const detail = safeString(reason).trim();
-    const supported = new Set(["review_approved", "review_rejected", "hiring_approved", "hiring_rejected", "offer_accepted", "offer_declined"]);
-    const reasonRequired = new Set(["review_rejected", "hiring_rejected", "offer_declined"]);
+    const supported = new Set(["review_approved", "review_rejected", "hiring_approved", "hiring_rejected"]);
+    const reasonRequired = new Set(["review_rejected", "hiring_rejected"]);
     if (!application?.id || !Number.isInteger(application.version) || !supported.has(action)) throw codedError("WORKFLOW_ACTION_INVALID", "workflow action invalid");
     if (reasonRequired.has(action) && !detail) throw codedError("WORKFLOW_REASON_REQUIRED", "workflow reason required");
     const body = { action };

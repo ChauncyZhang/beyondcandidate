@@ -393,6 +393,8 @@ test("workflow actions use semantic commands, require business reasons, and send
   const controller = createCandidateController({ client, idempotencyKey: () => "transition-key" });
 
   await assert.rejects(controller.workflowAction({ id: "application-1", version: 2 }, "review_rejected", "   "), (error) => error?.code === "WORKFLOW_REASON_REQUIRED");
+  await assert.rejects(controller.workflowAction({ id: "application-1", version: 2 }, "offer_accepted"), (error) => error?.code === "WORKFLOW_ACTION_INVALID");
+  await assert.rejects(controller.workflowAction({ id: "application-1", version: 2 }, "offer_declined", "候选人拒绝"), (error) => error?.code === "WORKFLOW_ACTION_INVALID");
   const advanced = await controller.workflowAction({ id: "application-1", version: 2 }, "review_approved", "经验匹配");
 
   assert.equal(advanced.stage, "interview_pending");
