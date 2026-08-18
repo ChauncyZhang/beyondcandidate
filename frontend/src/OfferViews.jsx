@@ -154,21 +154,24 @@ export function hasOfferDraftChanges(offer, draft) {
 }
 
 function OfferHistory({ history }) {
-  if (!history) return null;
+  const approvals = history?.approvals || [];
+  const responses = history?.responses || [];
+  if (approvals.length === 0 && responses.length === 0) return null;
   return <section className="offer-history" aria-labelledby="offer-history-title">
-    <header><History size={18} /><h4 id="offer-history-title">版本与审批历史</h4></header>
-    <div className="offer-version-list">
-      {(history.versions || []).slice().reverse().map((version) => <article key={version.id}>
-        <span className="offer-version-main"><strong>版本 {version.versionNumber ?? version.version_number}</strong><span>{version.pdfReady ?? version.pdf_ready ? "HTML Offer · PDF 可下载" : "HTML Offer"}</span></span>
-        <small>{version.createdAt || version.created_at ? new Date(version.createdAt || version.created_at).toLocaleString("zh-CN", { hour12: false }) : "时间未记录"}</small>
-      </article>)}
-    </div>
-    {(history.approvals || []).length > 0 && <ol className="offer-approval-history">
-      {history.approvals.map((approval) => <li key={approval.id}><span>第 {approval.sequence} 步</span><strong>{approval.status === "approved" ? "已批准" : approval.status === "rejected" ? "要求修改" : "待审批"}</strong>{approval.reason && <p>{approval.reason}</p>}</li>)}
+    <header><History size={18} /><div><h4 id="offer-history-title">审批记录</h4><p>保留每次审批结果和退回意见，便于后续核对。</p></div></header>
+    {approvals.length > 0 && <ol className="offer-approval-history">
+      {approvals.map((approval) => {
+        const statusLabel = approval.status === "approved" ? "已批准" : approval.status === "rejected" ? "已退回修改" : approval.status === "waiting" ? "等待前序审批" : "待审批";
+        const decidedAt = approval.decidedAt || approval.decided_at;
+        return <li key={approval.id} className={`offer-approval-entry ${approval.status}`}>
+          <div className="offer-approval-entry-heading"><span>第 {approval.roundNumber ?? approval.round_number ?? 1} 轮 · 第 {approval.sequence} 步</span><strong>{statusLabel}</strong><small>{decidedAt ? displayDate(decidedAt) : "尚未处理"}</small></div>
+          {approval.status === "rejected" && <div className="offer-rejection-reason"><strong>退回原因</strong><p>{approval.reason || "审批人未填写具体原因，请联系审批人确认。"}</p><small>请根据以上意见修改 Offer，保存新内容后重新提交审批。</small></div>}
+        </li>;
+      })}
     </ol>}
-    {(history.responses || []).length > 0 && <div className="offer-response-history" aria-label="候选人确认历史">
+    {responses.length > 0 && <div className="offer-response-history" aria-label="候选人确认历史">
       <h5>确认结果历史（不可编辑）</h5>
-      {history.responses.map((response, index) => <OfferResponseRecord key={response.id || `${response.source}-${response.respondedAt || index}`} response={response} />)}
+      {responses.map((response, index) => <OfferResponseRecord key={response.id || `${response.source}-${response.respondedAt || index}`} response={response} />)}
     </div>}
   </section>;
 }
@@ -435,6 +438,7 @@ function OfferDraftForm({ offer, templates, applicationId, controller, role, onS
   const busy = status !== "idle";
   const canSubmit = !offer || canRenderOfferAction(role, offer, "submit");
   return <form className="offer-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+    {offer?.status === "changes_requested" && <header className="offer-form-heading"><Undo2 size={20} /><div><h4>修改 Offer</h4><p>请按审批意见调整下方内容。修改完成后点击“保存并提交审批”，系统会重新发起审批。</p></div></header>}
     <div className="offer-form-grid">
       <label className="offer-compact-field">Offer 模板<select aria-label="Offer 模板" disabled={busy} value={draft.templateId} onChange={(event) => change("templateId", event.target.value)}><option value="">使用职位默认模板</option>{templates.map((item) => <option key={item.id} value={item.id} disabled={item.status === "inactive" && item.id !== draft.templateId}>{item.name}{item.status === "inactive" ? "（已停用）" : ""}</option>)}</select><small>{templates.length ? "可覆盖职位默认模板。" : "未加载到可选模板，将使用职位默认模板。"}</small></label>
       <label className="offer-compact-field">候选人回复截止时间<input aria-label="候选人回复截止时间" required type="datetime-local" disabled={busy} value={draft.candidateResponseDeadline} onChange={(event) => change("candidateResponseDeadline", event.target.value)} /><small>候选人需要在此时间前完成确认。</small></label>
@@ -476,6 +480,8 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
   const [action, setAction] = useState("");
   const [proxyOpen, setProxyOpen] = useState(false);
   const proxyButtonRef = useRef(null);
+  const trackedOfferId = state.offer?.id;
+  const deliveryPending = state.offer?.status === "ready_to_send" && Boolean(state.offer?.sendQueued ?? state.offer?.send_queued);
 
   function closeProxyDialog() {
     setProxyOpen(false);
@@ -497,6 +503,28 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
 
   useEffect(() => { void load(); }, [applicationId, offerId, controller, role]);
 
+  useEffect(() => {
+    if (!trackedOfferId || !deliveryPending) return undefined;
+    let active = true;
+    let inFlight = false;
+    async function poll() {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const refreshed = await controller.getOffer(trackedOfferId);
+        if (!active) return;
+        setState((current) => current.offer?.id === trackedOfferId ? { ...current, offer: refreshed, error: "" } : current);
+        if (refreshed.status === "sent") onNotify("Offer 邮件已发送");
+      } catch {
+        // Keep the current queued state and retry; a transient refresh failure must not duplicate delivery.
+      } finally {
+        inFlight = false;
+      }
+    }
+    const timer = setInterval(poll, 2_000);
+    return () => { active = false; clearInterval(timer); };
+  }, [controller, deliveryPending, onNotify, trackedOfferId]);
+
   async function run(name, command, message) {
     setAction(name);
     try { const offer = await command(); setState((current) => ({ ...current, offer })); onNotify(message); await load(); }
@@ -515,18 +543,16 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
   const sendQueued = Boolean(offer.sendQueued ?? offer.send_queued);
   const decisionApprovalId = approvalId || offer.pendingApprovalId || offer.pending_approval_id;
   const canDecide = canRenderOfferAction(role, offer, "decide") && Boolean(decisionApprovalId);
+  const latestRejectionReason = state.history?.approvals?.slice().reverse().find((item) => item.status === "rejected")?.reason;
+  const deadline = displayDate(offer.candidateResponseDeadline || offer.candidate_response_deadline);
   return <div className="offer-workspace">
-    <header className="offer-heading"><div><h3>Offer 管理</h3><p>{[offer.candidateName, offer.jobTitle].filter(Boolean).join(" · ") || "Offer 版本、审批、发送和候选人招聘状态相互独立。"}</p></div><span className={`offer-status ${offer.status}`}>{offerStatusLabel(offer.status)}</span></header>
+    <header className="offer-heading"><div><h3>Offer 管理</h3><p>{[offer.candidateName, offer.jobTitle].filter(Boolean).join(" · ") || "办理 Offer 审批、发送与候选人确认。"}</p><span className="offer-heading-meta"><Clock3 size={15} />候选人回复截止：{deadline}</span></div><span className={`offer-status ${offer.status}`}>{offerStatusLabel(offer.status)}</span></header>
     <OfferProgress status={offer.status} />
     {state.error && <div className="offer-error" role="alert"><AlertTriangle size={17} />{state.error}<button type="button" onClick={() => void load()}>刷新</button></div>}
-    <div className="offer-summary">
-      <span><FileCheck2 size={18} /><span><small>当前版本</small><strong>v{offer.currentVersionNumber ?? offer.current_version_number ?? "—"}</strong></span></span>
-      <span><Clock3 size={18} /><span><small>回复截止</small><strong>{new Date(offer.candidateResponseDeadline || offer.candidate_response_deadline).toLocaleString("zh-CN", { hour12: false })}</strong></span></span>
-      <span><FileText size={18} /><span><small>候选人页面</small><strong>HTML Offer</strong></span></span>
-    </div>
-    {offer.status === "pending_approval" && <div className="offer-pending-notice" role="status"><Clock3 size={20} /><span><strong>{canDecide ? "该 Offer 等待你审批" : "Offer 已提交审批"}</strong><small>{canDecide ? "请核对下方 Offer 内容并完成审批；批准后将交由 HR 明确发送。" : "当前暂不需要 HR 操作。审批通过后，本页会出现“确认并发送 Offer”按钮。"}</small></span><button className="button secondary" type="button" disabled={state.status === "loading"} onClick={() => void load()}><RefreshCw size={16} />刷新状态</button></div>}
-    {offer.status === "ready_to_send" && <div className="offer-ready-notice" role="status"><CheckCircle2 size={20} /><span><strong>{sendQueued ? "发送请求已提交" : contentReady ? "审批已完成，但尚未发送" : "Offer 信息不完整"}</strong><small>{sendQueued ? "邮件正在投递，发送完成后状态会自动更新。" : !contentReady ? "请返回修改并补全 Offer 标题、正文和薪酬方案。" : canRenderOfferAction(role, offer, "send") ? "发送功能已开放。系统不会自动发送，请 HR 核对 HTML Offer 页面和候选人邮箱后明确点击发送。" : "当前账号无发送权限，请联系负责 HR 操作。"}</small></span></div>}
-    {offer.status === "changes_requested" && <div className="offer-changes-notice"><Undo2 size={20} /><span><strong>审批人要求修改</strong><small>{state.history?.approvals?.slice().reverse().find((item) => item.status === "rejected")?.reason || "请查看下方审批历史。"}</small></span></div>}
+    {offer.status === "pending_approval" && <div className="offer-pending-notice" role="status"><Clock3 size={20} /><div className="offer-notice-content"><strong>{canDecide ? "该 Offer 等待你审批" : "Offer 已提交审批"}</strong><small>{canDecide ? "请核对下方 Offer 内容并完成审批；批准后将交由 HR 明确发送。" : "当前暂不需要 HR 操作。审批通过后，本页会出现“确认并发送 Offer”按钮。"}</small></div><button className="button secondary" type="button" disabled={state.status === "loading"} onClick={() => void load()}><RefreshCw size={16} />刷新状态</button></div>}
+    {offer.status === "ready_to_send" && <div className={`offer-ready-notice${sendQueued ? " is-sending" : ""}`} role="status" aria-live="polite"><CheckCircle2 size={20} /><div className="offer-notice-content"><strong>{sendQueued ? "发送请求已提交" : contentReady ? "审批已完成，但尚未发送" : "Offer 信息不完整"}</strong><small>{sendQueued ? "邮件正在投递，页面会自动更新发送结果。" : !contentReady ? "请返回修改并补全 Offer 标题、正文和薪酬方案。" : canRenderOfferAction(role, offer, "send") ? "请 HR 核对 Offer 内容和候选人邮箱后，点击“确认并发送 Offer”。" : "当前账号无发送权限，请联系负责 HR 操作。"}</small></div></div>}
+    {offer.status === "sent" && <div className="offer-sent-notice" role="status"><CheckCircle2 size={20} /><div className="offer-notice-content"><strong>Offer 已发送</strong><small>邮件已投递，正在等待候选人确认；候选人需在 {deadline} 前回复。</small></div></div>}
+    {offer.status === "changes_requested" && <div className="offer-changes-notice" role="alert"><Undo2 size={20} /><div className="offer-notice-content"><strong>审批未通过，需要修改 Offer</strong><p><b>退回原因：</b>{latestRejectionReason || "审批人未填写具体原因，请联系审批人确认。"}</p><small>请在下方修改内容，保存后重新提交审批。</small></div></div>}
     {["accepted", "declined"].includes(offer.status) && <section className="offer-result" aria-labelledby="offer-result-title"><h4 id="offer-result-title">最终确认结果</h4><OfferResponseRecord response={offer.response || state.history?.responses?.at(-1)} current /></section>}
     {!sensitive ? <div className="offer-redacted" role="status"><ShieldCheck size={22} /><strong>敏感内容已由服务端隐藏</strong><span>当前账号只能查看 Offer 状态，薪酬和正文不会在浏览器中展示。</span></div> : <>
       {["draft", "changes_requested"].includes(offer.status) && canRenderOfferAction(role, offer, "update") && <OfferDraftForm offer={offer} templates={state.templates} applicationId={applicationId} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} />}

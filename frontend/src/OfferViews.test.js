@@ -27,23 +27,29 @@ test("Offer workspace makes approval state and the next HR action explicit", () 
 test("Offer form and history use stable aligned structures", () => {
   assert.match(source, /className="offer-compact-field">候选人回复截止时间/);
   assert.match(source, /候选人需要在此时间前完成确认/);
-  assert.match(source, /className="offer-version-main"/);
+  assert.match(source, /审批记录/);
+  assert.match(source, /退回原因/);
+  assert.match(source, /请根据以上意见修改 Offer/);
+  assert.doesNotMatch(source, /className="offer-version-list"/);
+  assert.doesNotMatch(source, /className="offer-summary"/);
+  assert.doesNotMatch(source, /候选人页面/);
 });
 
 test("approved Offer remains explicitly unsent until HR acts", () => {
   assert.match(source, /审批已完成，但尚未发送/);
-  assert.match(source, /系统不会自动发送/);
-  assert.match(source, /发送功能已开放/);
+  assert.match(source, /点击“确认并发送 Offer”/);
   assert.match(source, /offer\.status === "ready_to_send" && !canRenderOfferAction\(role, offer, "send"\)/);
   assert.match(source, /已加入发送队列/);
-  assert.match(source, /HTML Offer 页面/);
-  assert.match(source, /HTML Offer · PDF 可下载/);
+  assert.match(source, /核对 Offer 内容和候选人邮箱/);
   assert.match(source, /发送请求已提交/);
   assert.match(source, /邮件发送中/);
   assert.match(source, /请先补全 Offer/);
+  assert.match(source, /setInterval\(poll, 2_000\)/);
+  assert.match(source, /Offer 邮件已发送/);
+  assert.match(source, /正在等待候选人确认/);
   assert.doesNotMatch(source, /PDF 生成中/);
   assert.doesNotMatch(source, /disabled=\{Boolean\(action\) \|\| !\(offer\.pdfReady \?\? offer\.pdf_ready\)\}/);
-  assert.doesNotMatch(source, /发送功能暂未开放|Task 9 安全令牌流程接入后开放|Offer 已发送/);
+  assert.doesNotMatch(source, /发送功能暂未开放|Task 9 安全令牌流程接入后开放/);
 });
 
 test("special Offer requires an explicit explanation", () => {
@@ -99,7 +105,7 @@ test("accepted and declined results show immutable source and audit details", ()
   assert.match(source, /HR 代为登记/);
   for (const label of ["操作人", "沟通渠道", "沟通时间", "到岗日期", "备注"]) assert.match(source, new RegExp(label));
   assert.match(source, /确认结果历史（不可编辑）/);
-  assert.match(source, /history\.responses\.map/);
+  assert.match(source, /responses\.map/);
 });
 
 test("approval workbench loads independently and navigates to candidate Offer", () => {

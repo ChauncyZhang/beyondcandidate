@@ -96,14 +96,15 @@ function candidateEmail(version = 2) {
   };
 }
 
-async function openCandidate({ role = "recruiter", conflictOnce = false, conflictCode = "resource_version_conflict", holdPut = false, viewport = { width: 1280, height: 800 }, stage = "contact", offer = null, offerHistory = null, offerPatchConflictToPending = false, offerSubmitConflictToPending = false, offerSubmitErrorCode = "", offerApproverConflictToPending = false } = {}) {
+async function openCandidate({ role = "recruiter", conflictOnce = false, conflictCode = "resource_version_conflict", holdPut = false, viewport = { width: 1280, height: 800 }, stage = "contact", offer = null, offerHistory = null, offerPatchConflictToPending = false, offerSubmitConflictToPending = false, offerSubmitErrorCode = "", offerApproverConflictToPending = false, offerSendPollsUntilSent = null } = {}) {
   const context = await browser.newContext({ viewport });
-  const requests = { emailGet: 0, emailPut: [], governanceGet: 0, offerPatch: 0, offerSubmit: 0, approverOptions: 0, approverPut: [] };
+  const requests = { emailGet: 0, emailPut: [], governanceGet: 0, offerGetAfterSend: 0, offerPatch: 0, offerSubmit: 0, offerSend: 0, approverOptions: 0, approverPut: [] };
   let releasePut;
   let putGate = holdPut ? new Promise((resolve) => { releasePut = resolve; }) : null;
   requests.releasePut = () => { releasePut?.(); releasePut = null; };
   let email = candidateEmail();
   let currentOffer = offer ? { ...offer, allowed_actions: { ...offer.allowed_actions } } : null;
+  let offerSendRequested = false;
   let approverConfigured = false;
   let shouldConflict = conflictOnce;
   await context.route("**/api/v1/**", async (route) => {
@@ -134,7 +135,32 @@ async function openCandidate({ role = "recruiter", conflictOnce = false, conflic
       return json({ deletion_status: null, deletion_request_id: null, legal_hold_active: false });
     }
     if (pathname === "/api/v1/offers") return json(currentOffer ? [currentOffer] : []);
-    if (currentOffer && pathname === `/api/v1/offers/${currentOffer.id}` && request.method() === "GET") return json(currentOffer);
+    if (currentOffer && pathname === `/api/v1/offers/${currentOffer.id}` && request.method() === "GET") {
+      if (offerSendRequested) {
+        requests.offerGetAfterSend += 1;
+        if (offerSendPollsUntilSent !== null && requests.offerGetAfterSend >= offerSendPollsUntilSent) {
+          currentOffer = {
+            ...currentOffer,
+            status: "sent",
+            send_queued: false,
+            version: currentOffer.version + 1,
+            allowed_actions: { update: false, submit: false, withdraw: false, send: false, decide: false, proxy_response: true },
+          };
+        }
+      }
+      return json(currentOffer);
+    }
+    if (currentOffer && pathname === `/api/v1/offers/${currentOffer.id}/send` && request.method() === "POST") {
+      requests.offerSend += 1;
+      offerSendRequested = true;
+      currentOffer = {
+        ...currentOffer,
+        send_queued: true,
+        version: currentOffer.version + 1,
+        allowed_actions: { update: false, submit: false, withdraw: false, send: false, decide: false, proxy_response: false },
+      };
+      return json(currentOffer);
+    }
     if (currentOffer && pathname === `/api/v1/offers/${currentOffer.id}` && request.method() === "PATCH") {
       requests.offerPatch += 1;
       if (offerPatchConflictToPending) {
@@ -237,12 +263,80 @@ test("passed candidate exposes the Offer workflow and pending approval layout on
       assert.equal(await page.getByRole("button", { name: "确认并发送 Offer", exact: true }).count(), 0);
       assert.equal(await page.getByRole("button", { name: "批准 Offer", exact: true }).count(), 1);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth), true);
-      const version = page.locator(".offer-version-list article");
-      const bounds = await version.boundingBox();
-      const maxVersionRowHeight = viewport.width < 640 ? 105 : 80;
-      assert.ok(bounds && bounds.height <= maxVersionRowHeight && bounds.width > 0, `unexpected version row bounds: ${JSON.stringify(bounds)}`);
+      assert.equal(await page.getByText("审批记录", { exact: true }).count(), 1);
+      assert.equal(await page.getByText("版本与审批历史", { exact: true }).count(), 0);
+      assert.equal(await page.getByText("候选人页面", { exact: true }).count(), 0);
+      const notice = page.locator(".offer-pending-notice");
+      const iconBounds = await notice.locator(":scope > svg").boundingBox();
+      const contentBounds = await notice.locator(".offer-notice-content").boundingBox();
+      assert.ok(iconBounds && contentBounds && contentBounds.x > iconBounds.x + iconBounds.width, "notice icon and content must be aligned in separate columns");
     } finally { await context.close(); }
   }
+});
+
+test("queued Offer automatically changes to sent after background delivery completes", { timeout: 60_000 }, async () => {
+  const readyOffer = {
+    id: "offer-ready-1",
+    application_id: applicationId,
+    job_id: jobId,
+    candidate_name: "陈曦",
+    job_title: "AI 工程师",
+    status: "ready_to_send",
+    version: 4,
+    current_version_id: "offer-version-2",
+    current_version_number: 2,
+    candidate_response_deadline: "2026-08-30T10:00:00+08:00",
+    can_view_sensitive_content: true,
+    content_ready: true,
+    send_queued: false,
+    content: { title: "正式录用通知", body: "欢迎加入团队。", compensation: "按正式 Offer 执行", benefits: "五险一金" },
+    allowed_actions: { update: false, submit: false, withdraw: false, send: true, decide: false, proxy_response: false },
+  };
+  const { context, page, requests } = await openCandidate({ role: "recruiting_admin", stage: "passed", offer: readyOffer, offerSendPollsUntilSent: 2 });
+  try {
+    await page.getByRole("button", { name: "办理 Offer", exact: true }).click();
+    await page.getByRole("button", { name: "确认并发送 Offer", exact: true }).click();
+    await page.getByText("发送请求已提交", { exact: true }).waitFor();
+    await page.getByText("Offer 已发送", { exact: true }).waitFor({ timeout: 8_000 });
+    assert.equal(await page.getByText("正在等待候选人确认", { exact: false }).count(), 1);
+    assert.equal(requests.offerSend, 1, "polling must not submit a duplicate send request");
+    assert.ok(requests.offerGetAfterSend >= 2, "the page should poll until delivery reaches sent");
+  } finally { await context.close(); }
+});
+
+test("rejected Offer explains the reason and how HR resubmits it", { timeout: 60_000 }, async () => {
+  const rejectedOffer = {
+    id: "offer-rejected-1",
+    application_id: applicationId,
+    job_id: jobId,
+    candidate_name: "陈曦",
+    job_title: "AI 工程师",
+    status: "changes_requested",
+    version: 5,
+    current_version_id: "offer-version-2",
+    current_version_number: 2,
+    candidate_response_deadline: "2026-08-30T10:00:00+08:00",
+    can_view_sensitive_content: true,
+    content_ready: true,
+    content: { title: "正式录用通知", body: "欢迎加入团队。", compensation: "按正式 Offer 执行", benefits: "五险一金" },
+    allowed_actions: { update: true, submit: true, withdraw: true, send: false, decide: false, proxy_response: false },
+  };
+  const history = {
+    versions: [{ id: "offer-version-2", version_number: 2 }],
+    approvals: [{ id: "approval-2", round_number: 1, sequence: 1, status: "rejected", reason: "请补充试用期薪资说明", decided_at: "2026-08-18T14:02:02+08:00" }],
+    events: [],
+    responses: [],
+  };
+  const { context, page } = await openCandidate({ role: "recruiting_admin", stage: "passed", offer: rejectedOffer, offerHistory: history });
+  try {
+    await page.getByRole("button", { name: "办理 Offer", exact: true }).click();
+    await page.getByText("审批未通过，需要修改 Offer", { exact: true }).waitFor();
+    assert.match(await page.locator(".offer-changes-notice").innerText(), /退回原因：请补充试用期薪资说明/);
+    assert.equal(await page.getByText("请补充试用期薪资说明", { exact: true }).count(), 1);
+    assert.equal(await page.getByRole("heading", { name: "修改 Offer", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("button", { name: "保存并提交审批", exact: true }).count(), 1);
+    assert.equal(await page.getByText("版本与审批历史", { exact: true }).count(), 0);
+  } finally { await context.close(); }
 });
 
 test("unchanged Offer submits the current version without creating a duplicate version", { timeout: 60_000 }, async () => {
