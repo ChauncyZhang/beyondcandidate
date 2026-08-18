@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
 const candidateSource = readFileSync(new URL("./CandidateViews.jsx", import.meta.url), "utf8");
+const stylesSource = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 let helpers;
 let candidateHelpers;
 let controllerHelpers;
@@ -21,6 +22,11 @@ before(async () => {
   helpers = await vite.ssrLoadModule("/src/ScreeningViews.jsx");
   candidateHelpers = await vite.ssrLoadModule("/src/CandidateViews.jsx");
   controllerHelpers = await vite.ssrLoadModule("/src/screeningController.js");
+});
+
+test("screening lifecycle status remains on one line", () => {
+  assert.match(stylesSource, /\.task-status \{[^}]*display: inline-flex;[^}]*white-space: nowrap;/);
+  assert.match(stylesSource, /grid-template-columns: minmax\(210px,1\.35fr\) 132px 120px 120px/);
 });
 
 after(async () => {

@@ -28,6 +28,9 @@ function apiOffer(changes = {}) {
     content: { body: "欢迎加入", compensation: { salary: "30k" } },
     can_view_sensitive_content: true,
     pdf_ready: true,
+    content_ready: true,
+    send_queued: false,
+    pending_approval_id: null,
     allowed_actions: { update: true, submit: true, withdraw: true, send: false, decide: false, proxy_response: false },
     ...changes,
   };
@@ -77,11 +80,11 @@ test("application lookup uses the exact query contract and returns newest Offer 
 
 test("direct Offer lookup uses offer identity and preserves projected display and template fields", async () => {
   const signal = new AbortController().signal;
-  const { client, calls } = queuedClient([{ data: apiOffer() }]);
+  const { client, calls } = queuedClient([{ data: apiOffer({ pending_approval_id: APPROVAL_ID, send_queued: true }) }]);
   const offer = await createOfferController({ client }).getOffer(OFFER_ID, { signal });
 
-  assert.deepEqual({ candidateName: offer.candidateName, jobTitle: offer.jobTitle, templateId: offer.templateId }, {
-    candidateName: "林夕", jobTitle: "平台工程师", templateId: TEMPLATE_ID,
+  assert.deepEqual({ candidateName: offer.candidateName, jobTitle: offer.jobTitle, templateId: offer.templateId, pendingApprovalId: offer.pendingApprovalId, contentReady: offer.contentReady, sendQueued: offer.sendQueued }, {
+    candidateName: "林夕", jobTitle: "平台工程师", templateId: TEMPLATE_ID, pendingApprovalId: APPROVAL_ID, contentReady: true, sendQueued: true,
   });
   assert.deepEqual(calls, [{ path: `/api/v1/offers/${OFFER_ID}`, options: { signal } }]);
 });

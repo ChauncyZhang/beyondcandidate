@@ -11,7 +11,23 @@ const settingsSource = readFileSync(new URL("./SettingsViews.jsx", import.meta.u
 test("candidate detail exposes a routed Offer tab backed by the dedicated controller", () => {
   assert.match(candidateSource, /"Offer"/);
   assert.match(candidateSource, /<CandidateOfferView candidate=\{candidate\} role=\{role\} controller=\{offerController\} approvalId=\{offerApprovalId\}/);
+  assert.match(candidateSource, /candidate\.stage === "已通过" && canPerformAction\(role, "管理 Offer"\)/);
+  assert.match(candidateSource, /onClick=\{\(\) => onTabChange\("Offer"\)\}[\s\S]*办理 Offer/);
   assert.match(appSource, /offerController=\{offerController\}/);
+});
+
+test("Offer workspace makes approval state and the next HR action explicit", () => {
+  assert.match(source, /OFFER_PROGRESS_STEPS = Object\.freeze\(\["填写 Offer", "审批", "发送", "候选人确认"\]\)/);
+  assert.match(source, /offer\.status === "pending_approval" && <div className="offer-pending-notice"/);
+  assert.match(source, /当前暂不需要 HR 操作/);
+  assert.match(source, /审批通过后，本页会出现“确认并发送 Offer”按钮/);
+  assert.match(source, /刷新状态/);
+});
+
+test("Offer form and history use stable aligned structures", () => {
+  assert.match(source, /className="offer-compact-field">候选人回复截止时间/);
+  assert.match(source, /候选人需要在此时间前完成确认/);
+  assert.match(source, /className="offer-version-main"/);
 });
 
 test("approved Offer remains explicitly unsent until HR acts", () => {

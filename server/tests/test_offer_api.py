@@ -198,6 +198,8 @@ def test_offer_lifecycle_is_idempotent_versioned_and_sends_html_without_pdf(tmp_
     assert approver_offer.status_code == 200
     assert approver_offer.json()["data"]["content"] == content
     assert approver_offer.json()["data"]["can_view_sensitive_content"] is True
+    assert approver_offer.json()["data"]["pending_approval_id"] == approval_id
+    assert submitted.json()["data"]["pending_approval_id"] is None
     pending_item = pending.json()["data"][0]
     assert pending_item["candidate_response_deadline"].startswith("2099-08-20T00:00:00")
     assert [{key: value for key, value in item.items() if key != "candidate_response_deadline"} for item in pending.json()["data"]] == [{

@@ -83,6 +83,9 @@ function normalizeOffer(value) {
     content: canViewSensitiveContent ? safeObject(value?.content) : { redacted: true },
     canViewSensitiveContent,
     pdfReady: value?.pdf_ready === true,
+    contentReady: value?.content_ready === true,
+    sendQueued: value?.send_queued === true,
+    pendingApprovalId: safeString(value?.pending_approval_id),
     allowedActions: normalizeAllowedActions(value?.allowed_actions),
     response: normalizeResponse(value?.response),
   };

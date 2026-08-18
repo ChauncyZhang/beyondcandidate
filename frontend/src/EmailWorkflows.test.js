@@ -96,7 +96,7 @@ function candidateEmail(version = 2) {
   };
 }
 
-async function openCandidate({ role = "recruiter", conflictOnce = false, conflictCode = "resource_version_conflict", holdPut = false, viewport = { width: 1280, height: 800 } } = {}) {
+async function openCandidate({ role = "recruiter", conflictOnce = false, conflictCode = "resource_version_conflict", holdPut = false, viewport = { width: 1280, height: 800 }, stage = "contact", offer = null, offerHistory = null } = {}) {
   const context = await browser.newContext({ viewport });
   const requests = { emailGet: 0, emailPut: [], governanceGet: 0 };
   let releasePut;
@@ -110,7 +110,7 @@ async function openCandidate({ role = "recruiter", conflictOnce = false, conflic
     const json = (data, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ data }) });
     if (pathname === "/api/v1/me") return route.fulfill({ status: 200, contentType: "application/json", headers: { "x-csrf-token": "candidate-email" }, body: JSON.stringify({ data: { id: "user-1", display_name: "HR", roles: [role] } }) });
     if (pathname === `/api/v1/candidates/${candidateId}`) return json({ id: candidateId, display_name: "陈曦", current_title: "算法工程师", location: "上海", version: 1, contacts: [{ kind: "email", value: "n***@example.com" }] });
-    if (pathname === `/api/v1/candidates/${candidateId}/applications`) return json([{ id: applicationId, candidate_id: candidateId, job_id: jobId, job_title: "AI 工程师", job_status: "open", stage: "contact", source: "upload", owner_id: "user-1", owner_name: "HR", version: 2 }]);
+    if (pathname === `/api/v1/candidates/${candidateId}/applications`) return json([{ id: applicationId, candidate_id: candidateId, job_id: jobId, job_title: "AI 工程师", job_status: "open", stage, source: "upload", owner_id: "user-1", owner_name: "HR", version: 2 }]);
     if (pathname === `/api/v1/candidates/${candidateId}/resumes` || pathname === `/api/v1/candidates/${candidateId}/timeline` || pathname === `/api/v1/candidates/${candidateId}/notes`) return json([]);
     if (pathname === `/api/v1/candidates/${candidateId}/email` && request.method() === "GET") {
       requests.emailGet += 1;
@@ -131,6 +131,9 @@ async function openCandidate({ role = "recruiter", conflictOnce = false, conflic
       requests.governanceGet += 1;
       return json({ deletion_status: null, deletion_request_id: null, legal_hold_active: false });
     }
+    if (pathname === "/api/v1/offers") return json(offer ? [offer] : []);
+    if (offer && pathname === `/api/v1/offers/${offer.id}/history`) return json(offerHistory || { versions: [], approvals: [], events: [], responses: [] });
+    if (pathname === "/api/v1/offer-templates") return json([]);
     if (pathname === "/api/v1/jobs") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [], meta: { next_cursor: null } }) });
     return route.fulfill({ status: 503, contentType: "application/problem+json", body: JSON.stringify({ status: 503, code: "service_unavailable" }) });
   });
@@ -139,6 +142,50 @@ async function openCandidate({ role = "recruiter", conflictOnce = false, conflic
   await page.getByRole("heading", { name: "陈曦", exact: true }).waitFor();
   return { context, page, requests };
 }
+
+test("passed candidate exposes the Offer workflow and pending approval layout on desktop and mobile", { timeout: 60_000 }, async () => {
+  const pendingOffer = {
+    id: "offer-1",
+    application_id: applicationId,
+    job_id: jobId,
+    candidate_name: "陈曦",
+    job_title: "AI 工程师",
+    status: "pending_approval",
+    version: 3,
+    current_version_id: "offer-version-1",
+    current_version_number: 1,
+    candidate_response_deadline: "2026-08-30T10:00:00+08:00",
+    can_view_sensitive_content: true,
+    content_ready: true,
+    pending_approval_id: "approval-1",
+    content: { title: "正式录用通知", body: "欢迎加入团队。", compensation: "按正式 Offer 执行", benefits: "五险一金" },
+    allowed_actions: { update: false, submit: false, withdraw: true, send: false, decide: true, proxy_response: false },
+  };
+  const history = {
+    versions: [{ id: "offer-version-1", version_number: 1, pdf_ready: false, created_at: "2026-08-18T00:44:42+08:00" }],
+    approvals: [{ id: "approval-1", sequence: 1, status: "pending" }],
+    events: [],
+    responses: [],
+  };
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+    const { context, page } = await openCandidate({ role: "recruiting_admin", viewport, stage: "passed", offer: pendingOffer, offerHistory: history });
+    try {
+      const primary = page.getByRole("button", { name: "办理 Offer", exact: true });
+      await primary.waitFor();
+      await primary.click();
+      await page.getByText("该 Offer 等待你审批", { exact: true }).waitFor();
+      assert.deepEqual(await page.locator(".offer-progress strong").allTextContents(), ["填写 Offer", "审批", "发送", "候选人确认"]);
+      assert.equal(await page.getByRole("button", { name: "刷新状态", exact: true }).count(), 1);
+      assert.equal(await page.getByRole("button", { name: "确认并发送 Offer", exact: true }).count(), 0);
+      assert.equal(await page.getByRole("button", { name: "批准 Offer", exact: true }).count(), 1);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth), true);
+      const version = page.locator(".offer-version-list article");
+      const bounds = await version.boundingBox();
+      const maxVersionRowHeight = viewport.width < 640 ? 105 : 80;
+      assert.ok(bounds && bounds.height <= maxVersionRowHeight && bounds.width > 0, `unexpected version row bounds: ${JSON.stringify(bounds)}`);
+    } finally { await context.close(); }
+  }
+});
 
 test("system administrator edits sender without replacing the SMTP password, saves reply-to, tests saved config, and recovers a stale version", { timeout: 60_000 }, async () => {
   const { context, page, requests } = await openSettings({ conflictOnce: true, startPath: "settings/ai" });

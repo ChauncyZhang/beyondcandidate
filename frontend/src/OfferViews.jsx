@@ -34,6 +34,22 @@ const STATUS_LABELS = Object.freeze({
   expired: "已过期",
 });
 
+const OFFER_PROGRESS_STEPS = Object.freeze(["填写 Offer", "审批", "发送", "候选人确认"]);
+
+function offerProgressIndex(status) {
+  if (["pending_approval"].includes(status)) return 1;
+  if (["ready_to_send"].includes(status)) return 2;
+  if (["sent", "accepted", "declined"].includes(status)) return 3;
+  return 0;
+}
+
+function OfferProgress({ status = "draft" }) {
+  const current = offerProgressIndex(status);
+  return <ol className="offer-progress" aria-label="Offer 办理进度">
+    {OFFER_PROGRESS_STEPS.map((label, index) => <li key={label} className={index < current ? "complete" : index === current ? "current" : ""} aria-current={index === current ? "step" : undefined}><span>{index < current ? <CheckCircle2 size={16} /> : index + 1}</span><strong>{label}</strong></li>)}
+  </ol>;
+}
+
 export function offerStatusLabel(status) {
   return STATUS_LABELS[status] || "状态未知";
 }
@@ -135,8 +151,7 @@ function OfferHistory({ history }) {
     <header><History size={18} /><h4 id="offer-history-title">版本与审批历史</h4></header>
     <div className="offer-version-list">
       {(history.versions || []).slice().reverse().map((version) => <article key={version.id}>
-        <strong>版本 {version.versionNumber ?? version.version_number}</strong>
-        <span>{version.pdfReady ?? version.pdf_ready ? "HTML Offer · PDF 可下载" : "HTML Offer"}</span>
+        <span className="offer-version-main"><strong>版本 {version.versionNumber ?? version.version_number}</strong><span>{version.pdfReady ?? version.pdf_ready ? "HTML Offer · PDF 可下载" : "HTML Offer"}</span></span>
         <small>{version.createdAt || version.created_at ? new Date(version.createdAt || version.created_at).toLocaleString("zh-CN", { hour12: false }) : "时间未记录"}</small>
       </article>)}
     </div>
@@ -292,8 +307,8 @@ function OfferDraftForm({ offer, templates, applicationId, controller, role, onS
   const canSubmit = !offer || canRenderOfferAction(role, offer, "submit");
   return <form className="offer-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
     <div className="offer-form-grid">
-      <label>Offer 模板<select aria-label="Offer 模板" disabled={busy} value={draft.templateId} onChange={(event) => change("templateId", event.target.value)}><option value="">使用职位默认模板</option>{templates.map((item) => <option key={item.id} value={item.id} disabled={item.status === "inactive" && item.id !== draft.templateId}>{item.name}{item.status === "inactive" ? "（已停用）" : ""}</option>)}</select><small>{templates.length ? "可覆盖职位默认模板。" : "未加载到可选模板，将使用职位默认模板。"}</small></label>
-      <label>候选人回复截止时间<input aria-label="候选人回复截止时间" required type="datetime-local" disabled={busy} value={draft.candidateResponseDeadline} onChange={(event) => change("candidateResponseDeadline", event.target.value)} /></label>
+      <label className="offer-compact-field">Offer 模板<select aria-label="Offer 模板" disabled={busy} value={draft.templateId} onChange={(event) => change("templateId", event.target.value)}><option value="">使用职位默认模板</option>{templates.map((item) => <option key={item.id} value={item.id} disabled={item.status === "inactive" && item.id !== draft.templateId}>{item.name}{item.status === "inactive" ? "（已停用）" : ""}</option>)}</select><small>{templates.length ? "可覆盖职位默认模板。" : "未加载到可选模板，将使用职位默认模板。"}</small></label>
+      <label className="offer-compact-field">候选人回复截止时间<input aria-label="候选人回复截止时间" required type="datetime-local" disabled={busy} value={draft.candidateResponseDeadline} onChange={(event) => change("candidateResponseDeadline", event.target.value)} /><small>候选人需要在此时间前完成确认。</small></label>
       <label className="offer-full-field">Offer 标题<input aria-label="Offer 标题" required disabled={busy} value={draft.title} onChange={(event) => change("title", event.target.value)} placeholder="例如：正式录用通知" /></label>
       <label className="offer-full-field">Offer 正文<textarea aria-label="Offer 正文" required rows="7" disabled={busy} value={draft.body} onChange={(event) => change("body", event.target.value)} placeholder="填写岗位、汇报关系、入职安排等内容" /></label>
       <label>薪酬方案<textarea aria-label="薪酬方案" required rows="4" disabled={busy} value={draft.compensation} onChange={(event) => change("compensation", event.target.value)} /></label>
@@ -363,20 +378,23 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
   if (state.status === "error" && !state.offer) return <div className="offer-state error" role="alert"><AlertTriangle size={24} /><strong>Offer 无法加载</strong><span>{state.error}</span><button className="button secondary" type="button" onClick={() => void load()}><RefreshCw size={16} />重试</button></div>;
 
   const offer = state.offer;
-  if (!offer) return <div className="offer-workspace"><header className="offer-heading"><div><h3>Offer 管理</h3><p>为候选人创建版本化 Offer，并在审批通过后由 HR 明确发送。</p></div></header>{canPerformAction(role, "管理 Offer") ? <OfferDraftForm applicationId={applicationId} templates={state.templates} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} /> : <div className="offer-state"><FileText size={24} /><strong>暂无 Offer</strong><span>当前角色不能创建 Offer。</span></div>}</div>;
+  if (!offer) return <div className="offer-workspace"><header className="offer-heading"><div><h3>Offer 管理</h3><p>填写并提交审批；审批通过后由 HR 核对并发送给候选人。</p></div></header><OfferProgress />{canPerformAction(role, "管理 Offer") ? <OfferDraftForm applicationId={applicationId} templates={state.templates} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} /> : <div className="offer-state"><FileText size={24} /><strong>暂无 Offer</strong><span>当前角色不能创建 Offer。</span></div>}</div>;
 
   const sensitive = Boolean(offer.canViewSensitiveContent ?? offer.can_view_sensitive_content);
   const contentReady = Boolean(offer.contentReady ?? offer.content_ready);
   const sendQueued = Boolean(offer.sendQueued ?? offer.send_queued);
   const decisionApprovalId = approvalId || offer.pendingApprovalId || offer.pending_approval_id;
+  const canDecide = canRenderOfferAction(role, offer, "decide") && Boolean(decisionApprovalId);
   return <div className="offer-workspace">
     <header className="offer-heading"><div><h3>Offer 管理</h3><p>{[offer.candidateName, offer.jobTitle].filter(Boolean).join(" · ") || "Offer 版本、审批、发送和候选人招聘状态相互独立。"}</p></div><span className={`offer-status ${offer.status}`}>{offerStatusLabel(offer.status)}</span></header>
+    <OfferProgress status={offer.status} />
     {state.error && <div className="offer-error" role="alert"><AlertTriangle size={17} />{state.error}<button type="button" onClick={() => void load()}>刷新</button></div>}
     <div className="offer-summary">
       <span><FileCheck2 size={18} /><span><small>当前版本</small><strong>v{offer.currentVersionNumber ?? offer.current_version_number ?? "—"}</strong></span></span>
       <span><Clock3 size={18} /><span><small>回复截止</small><strong>{new Date(offer.candidateResponseDeadline || offer.candidate_response_deadline).toLocaleString("zh-CN", { hour12: false })}</strong></span></span>
       <span><FileText size={18} /><span><small>候选人页面</small><strong>HTML Offer</strong></span></span>
     </div>
+    {offer.status === "pending_approval" && <div className="offer-pending-notice" role="status"><Clock3 size={20} /><span><strong>{canDecide ? "该 Offer 等待你审批" : "Offer 已提交审批"}</strong><small>{canDecide ? "请核对下方 Offer 内容并完成审批；批准后将交由 HR 明确发送。" : "当前暂不需要 HR 操作。审批通过后，本页会出现“确认并发送 Offer”按钮。"}</small></span><button className="button secondary" type="button" disabled={state.status === "loading"} onClick={() => void load()}><RefreshCw size={16} />刷新状态</button></div>}
     {offer.status === "ready_to_send" && <div className="offer-ready-notice" role="status"><CheckCircle2 size={20} /><span><strong>{sendQueued ? "发送请求已提交" : contentReady ? "审批已完成，但尚未发送" : "Offer 信息不完整"}</strong><small>{sendQueued ? "邮件正在投递，发送完成后状态会自动更新。" : !contentReady ? "请返回修改并补全 Offer 标题、正文和薪酬方案。" : canRenderOfferAction(role, offer, "send") ? "发送功能已开放。系统不会自动发送，请 HR 核对 HTML Offer 页面和候选人邮箱后明确点击发送。" : "当前账号无发送权限，请联系负责 HR 操作。"}</small></span></div>}
     {offer.status === "changes_requested" && <div className="offer-changes-notice"><Undo2 size={20} /><span><strong>审批人要求修改</strong><small>{state.history?.approvals?.slice().reverse().find((item) => item.status === "rejected")?.reason || "请查看下方审批历史。"}</small></span></div>}
     {["accepted", "declined"].includes(offer.status) && <section className="offer-result" aria-labelledby="offer-result-title"><h4 id="offer-result-title">最终确认结果</h4><OfferResponseRecord response={offer.response || state.history?.responses?.at(-1)} current /></section>}
@@ -384,7 +402,7 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
       {["draft", "changes_requested"].includes(offer.status) && canRenderOfferAction(role, offer, "update") && <OfferDraftForm offer={offer} templates={state.templates} applicationId={applicationId} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} />}
       {!(["draft", "changes_requested"].includes(offer.status) && canRenderOfferAction(role, offer, "update")) && <section className="offer-preview" aria-labelledby="offer-preview-title"><header><h4 id="offer-preview-title">Offer 预览</h4>{offer.isSpecial ?? offer.is_special ? <span>特殊 Offer</span> : null}</header><h5>{offer.content?.title || "正式录用通知"}</h5><p className="offer-body-copy">{offer.content?.body || "正文未填写"}</p><dl><div><dt>薪酬方案</dt><dd>{offer.content?.compensation || "未填写"}</dd></div><div><dt>福利与补充说明</dt><dd>{offer.content?.benefits || "未填写"}</dd></div>{(offer.specialReason || offer.special_reason) && <div><dt>特殊说明</dt><dd>{offer.specialReason || offer.special_reason}</dd></div>}</dl></section>}
     </>}
-    {canRenderOfferAction(role, offer, "decide") && decisionApprovalId && <ApprovalDecision offer={offer} approvalId={decisionApprovalId} controller={controller} onSaved={(saved) => setState((current) => ({ ...current, offer: saved }))} onNotify={onNotify} />}
+    {canDecide && <ApprovalDecision offer={offer} approvalId={decisionApprovalId} controller={controller} onSaved={(saved) => setState((current) => ({ ...current, offer: saved }))} onNotify={onNotify} />}
     <div className="offer-actions">
       {canRenderOfferAction(role, offer, "withdraw") && <button className="button secondary" type="button" disabled={Boolean(action)} onClick={() => void run("withdraw", () => controller.withdraw(offer), "Offer 已撤回")}><XCircle size={16} />{action === "withdraw" ? "撤回中…" : "撤回 Offer"}</button>}
       {canRenderOfferAction(role, offer, "send") && <button className="button primary" type="button" disabled={Boolean(action)} onClick={() => void run("send", () => controller.send(offer), "已加入发送队列")}><Send size={16} />{action === "send" ? "提交中…" : "确认并发送 Offer"}</button>}

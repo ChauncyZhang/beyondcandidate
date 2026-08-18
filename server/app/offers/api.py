@@ -151,7 +151,8 @@ def _offer_view(db, offer, principal):
     job = db.scalar(select(Job).where(Job.organization_id == offer.organization_id, Job.id == offer.job_id))
     can_manage = _can_manage(db, principal, offer)
     can_view_sensitive = can_manage or _is_approval_participant(db, principal, offer)
-    is_assignee = db.scalar(select(OfferApproval.id).where(OfferApproval.organization_id == offer.organization_id, OfferApproval.offer_id == offer.id, OfferApproval.assignee_id == principal.user_id, OfferApproval.status == "pending")) is not None
+    pending_approval_id = db.scalar(select(OfferApproval.id).where(OfferApproval.organization_id == offer.organization_id, OfferApproval.offer_id == offer.id, OfferApproval.assignee_id == principal.user_id, OfferApproval.status == "pending"))
+    is_assignee = pending_approval_id is not None
     response = db.scalar(select(OfferResponse).where(OfferResponse.organization_id == offer.organization_id, OfferResponse.offer_id == offer.id))
     content = current.content if current and can_view_sensitive else {"redacted": True}
     content_ready = bool(current and _offer_content_ready(current.content))
@@ -174,6 +175,7 @@ def _offer_view(db, offer, principal):
         "can_view_sensitive_content": can_view_sensitive,
         "pdf_ready": bool(current and current.pdf_object_key),
         "content_ready": content_ready, "send_queued": send_queued,
+        "pending_approval_id": str(pending_approval_id) if pending_approval_id else None,
         "response": _offer_response_view(response),
         "allowed_actions": {
             "update": can_manage and offer.status in {"draft", "changes_requested", "ready_to_send", "sent"},
