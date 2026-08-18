@@ -273,6 +273,34 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
     return offerMutation((id) => `/api/v1/offers/${encodeURIComponent(id)}/approvals`, offer, { method: "POST" }, signal);
   }
 
+  async function listApproverOptions(offerId, { signal } = {}) {
+    const id = requireId(offerId);
+    const response = await client.request(`/api/v1/offers/${encodeURIComponent(id)}/approver-options`, requestOptions(signal));
+    return {
+      options: safeArray(response?.data).map((item) => ({ id: safeString(item?.id), name: safeString(item?.name) })).filter((item) => item.id && item.name),
+      jobVersion: safeVersion(response?.meta?.job_version),
+    };
+  }
+
+  async function setDefaultApprover(offer, approverId, jobVersion, { signal } = {}) {
+    const id = requireId(offer?.id);
+    const offerVersion = requireVersion(offer?.version);
+    const expectedJobVersion = requireVersion(jobVersion);
+    const normalizedApproverId = requireId(approverId, "OFFER_APPROVER_REQUIRED");
+    try {
+      const response = await client.request(`/api/v1/offers/${encodeURIComponent(id)}/default-approver`, requestOptions(signal, {
+        method: "PUT",
+        body: { approver_id: normalizedApproverId, offer_version: offerVersion },
+        ifMatch: `"${expectedJobVersion}"`,
+        idempotencyKey: idempotencyKey(),
+      }));
+      return safeObject(response?.data);
+    } catch (error) {
+      if (error?.code === "job_version_conflict") throw error;
+      return refreshOfferConflict(error, id, signal);
+    }
+  }
+
   function decide(approvalId, offer, decision, reason, signal) {
     const id = requireId(approvalId, "OFFER_APPROVAL_ID_REQUIRED");
     return offerMutation(() => `/api/v1/offer-approvals/${encodeURIComponent(id)}/decisions`, offer, {
@@ -390,6 +418,8 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
     createOffer,
     updateDraft,
     submitApproval,
+    listApproverOptions,
+    setDefaultApprover,
     approve,
     requestChanges,
     send,

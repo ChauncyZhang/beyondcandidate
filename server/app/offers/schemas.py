@@ -88,6 +88,11 @@ class OfferApprovalDecision(OfferSchema):
         return self
 
 
+class OfferDefaultApproverCommand(OfferSchema):
+    approver_id: UUID
+    offer_version: int = Field(ge=0)
+
+
 class PublicOfferResponse(OfferSchema):
     decision: str
     expected_start_date: date | None = None

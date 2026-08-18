@@ -23,7 +23,9 @@ class OfferVersionConflict(ResourceVersionConflict):
 
 
 class OfferApprovalError(Exception):
-    pass
+    def __init__(self, message: str = "", *, code: str = "invalid_offer_state"):
+        super().__init__(message)
+        self.code = code
 
 
 class OfferResponseUnavailable(OfferVersionConflict):
@@ -418,10 +420,10 @@ def submit_offer(db, organization_id, offer_id, actor_user_id, *, expected_versi
         raise OfferApprovalError("offer is not editable")
     job = db.scalar(select(Job).where(Job.organization_id == organization_id, Job.id == offer.job_id))
     if job is None or job.offer_approver_id is None:
-        raise OfferApprovalError("job default approver is required")
+        raise OfferApprovalError("job default approver is required", code="offer_approver_required")
     from server.app.recruiting.service import is_eligible_offer_approver
     if not is_eligible_offer_approver(db, organization_id, job.offer_approver_id):
-        raise OfferApprovalError("job default approver is not eligible")
+        raise OfferApprovalError("job default approver is not eligible", code="offer_approver_ineligible")
     current = _current_version(db, offer)
     _require_active_template(db, organization_id, current.template_id)
     if offer.status == "changes_requested" and db.scalar(select(exists().where(

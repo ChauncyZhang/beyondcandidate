@@ -435,6 +435,12 @@ input::placeholder, textarea::placeholder { color: #9b9ba1; }
 .offer-proxy-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
 .offer-proxy-dialog h2, .offer-proxy-dialog header p { margin: 0; }
 .offer-proxy-dialog h2 { font-size: 19px; }
+.offer-approver-dialog h2 { display: flex; align-items: center; gap: 8px; }
+.offer-approver-dialog .offer-approver-context { display: flex; align-items: flex-start; gap: 10px; padding: 13px; border: 1px solid #cfe0f4; border-radius: 8px; color: var(--blue); background: #f3f8fe; }
+.offer-approver-dialog .offer-approver-context span { display: grid; gap: 3px; }
+.offer-approver-dialog .offer-approver-context strong { color: var(--ink); }
+.offer-approver-dialog .offer-approver-context small { color: var(--muted); font-weight: 400; }
+.offer-approver-loading { display: flex; align-items: center; gap: 8px; min-height: 42px; color: var(--muted); }
 .offer-proxy-dialog header p { margin-top: 5px; color: var(--muted); font-size: 13px; }
 .offer-proxy-dialog > header button { width: 34px; height: 34px; flex: 0 0 auto; border: 0; border-radius: 6px; color: var(--muted); background: transparent; font-size: 24px; }
 .offer-proxy-dialog > header button:hover { background: #f3f3f5; }

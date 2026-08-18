@@ -8,9 +8,9 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy import exists, or_, select
 
 from server.app.identity.api import problem
-from server.app.identity.models import AuditLog, Job, Organization, User
+from server.app.identity.models import AuditLog, Job, Organization, User, UserRole, UserStatus
 from server.app.offers.models import Offer, OfferAccessToken, OfferApproval, OfferEvent, OfferResponse, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
-from server.app.offers.schemas import OfferApprovalDecision, OfferCommand, OfferTemplateCommand, OfferVersionCommand, ProxyOfferResponse, PublicOfferResponse, SpecialOfferApproversCommand
+from server.app.offers.schemas import OfferApprovalDecision, OfferCommand, OfferDefaultApproverCommand, OfferTemplateCommand, OfferVersionCommand, ProxyOfferResponse, PublicOfferResponse, SpecialOfferApproversCommand
 from server.app.offers.service import (
     OfferApprovalError,
     OfferNotFound,
@@ -242,8 +242,8 @@ def _run_mutation(request, principal, operation, key, semantic, action):
             db.rollback(); return _error(request, 404, "resource_not_found")
         except OfferVersionConflict:
             db.rollback(); return _error(request, 409, "resource_version_conflict")
-        except OfferApprovalError:
-            db.rollback(); return _error(request, 409, "invalid_offer_state")
+        except OfferApprovalError as error:
+            db.rollback(); return _error(request, 409, error.code)
     return _response(body["data"], status, etag=body["data"].get("version"))
 
 
@@ -311,6 +311,114 @@ def submit_offer_api(offer_id: UUID, request: Request, if_match: str | None = He
         offer = _offer(db, principal, offer_id)
         if offer is None or not _can_manage(db, principal, offer): return _error(request, 404, "resource_not_found")
     return _run_mutation(request, principal, f"offer.submit:{offer_id}", key, {"expected_version": expected}, lambda db: lambda: (200, {"data": _offer_view(db, submit_offer(db, principal.organization_id, offer_id, principal.user_id, expected_version=expected, trace_id=request.state.trace_id), principal)}))
+
+
+@router.get("/api/v1/offers/{offer_id}/approver-options")
+def list_offer_approver_options(offer_id: UUID, request: Request):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
+    with request.app.state.identity_store.sync_session() as db:
+        offer = _offer(db, principal, offer_id)
+        if offer is None or not _can_manage(db, principal, offer):
+            return _error(request, 404, "resource_not_found")
+        job = db.scalar(select(Job).where(
+            Job.organization_id == principal.organization_id,
+            Job.id == offer.job_id,
+        ))
+        if job is None:
+            return _error(request, 404, "resource_not_found")
+        rows = db.execute(select(User.id, User.display_name).where(
+            User.organization_id == principal.organization_id,
+            User.status == UserStatus.ACTIVE,
+            exists().where(
+                UserRole.user_id == User.id,
+                UserRole.role.in_(("recruiting_admin", "hiring_manager")),
+            ),
+        ).order_by(User.display_name.asc(), User.id.asc())).all()
+        return _response(
+            [{"id": str(user_id), "name": display_name} for user_id, display_name in rows],
+            meta={"count": len(rows), "job_version": job.version},
+            etag=job.version,
+        )
+
+
+@router.put("/api/v1/offers/{offer_id}/default-approver")
+def set_offer_default_approver(
+    offer_id: UUID,
+    payload: OfferDefaultApproverCommand,
+    request: Request,
+    if_match: str | None = Header(None, alias="If-Match"),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+):
+    principal, expected_job_version, key = _principal(request), _version(request, if_match), _idempotency(request, idempotency_key)
+    if any(isinstance(item, JSONResponse) for item in (principal, expected_job_version, key)):
+        return next(item for item in (principal, expected_job_version, key) if isinstance(item, JSONResponse))
+
+    def action(db):
+        def configure():
+            offer = _offer(db, principal, offer_id)
+            if offer is None or not _can_manage(db, principal, offer):
+                raise OfferNotFound
+            job = db.scalar(select(Job).where(
+                Job.organization_id == principal.organization_id,
+                Job.id == offer.job_id,
+            ).with_for_update())
+            if job is None:
+                raise OfferNotFound
+            if job.version != expected_job_version:
+                raise OfferApprovalError("job changed while configuring offer approver", code="job_version_conflict")
+            offer = _offer(db, principal, offer_id, lock=True)
+            if offer is None or not _can_manage(db, principal, offer):
+                raise OfferNotFound
+            if offer.version != payload.offer_version:
+                raise OfferVersionConflict
+            if offer.status not in {"draft", "changes_requested"}:
+                raise OfferApprovalError("offer is not editable")
+            if not is_eligible_offer_approver(db, principal.organization_id, payload.approver_id):
+                raise OfferApprovalError("job default approver is not eligible", code="offer_approver_ineligible")
+            if job.offer_approver_id != payload.approver_id:
+                previous_id = job.offer_approver_id
+                job.offer_approver_id = payload.approver_id
+                job.version += 1
+                db.add(AuditLog(
+                    organization_id=principal.organization_id,
+                    actor_user_id=principal.user_id,
+                    category="recruiting",
+                    event_type="job.offer_approver_updated",
+                    outcome="success",
+                    resource_type="job",
+                    resource_id=job.id,
+                    trace_id=request.state.trace_id,
+                    metadata_json={
+                        "previous_approver_id": str(previous_id) if previous_id else None,
+                        "approver_id": str(payload.approver_id),
+                        "source": "offer_submission",
+                    },
+                ))
+            db.flush()
+            return 200, {"data": {
+                "offer_id": str(offer.id),
+                "job_id": str(job.id),
+                "approver_id": str(job.offer_approver_id),
+                "job_version": job.version,
+                "offer_version": offer.version,
+                "version": job.version,
+            }}
+        return configure
+
+    return _run_mutation(
+        request,
+        principal,
+        f"offer.default_approver:{offer_id}",
+        key,
+        {
+            "expected_job_version": expected_job_version,
+            "offer_version": payload.offer_version,
+            "approver_id": str(payload.approver_id),
+        },
+        action,
+    )
 
 
 @router.post("/api/v1/offer-approvals/{approval_id}/decisions")

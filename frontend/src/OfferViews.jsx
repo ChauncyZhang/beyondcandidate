@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   Trash2,
   Undo2,
+  UserCheck,
   XCircle,
 } from "lucide-react";
 import { apiClient } from "./apiClient.js";
@@ -64,6 +65,8 @@ export function offerErrorMessage(error, action = "操作") {
   if (error?.code === "resource_version_conflict") return "Offer 已被其他成员更新。当前填写内容已保留，请刷新最新版本后核对。";
   if (error?.code === "candidate_email_unconfirmed") return "候选人邮箱尚未确认，请先确认邮箱后再发送。";
   if (error?.code === "offer_send_unavailable") return "当前版本暂不可发送，请稍后重试。";
+  if (error?.code === "offer_approver_required") return "当前职位尚未配置默认 Offer 审批人，请先编辑职位并完成配置后再提交。";
+  if (error?.code === "offer_approver_ineligible") return "当前职位的默认 Offer 审批人已停用或无审批权限，请先编辑职位并重新选择。";
   if (error?.code === "invalid_offer_state") return "Offer 状态已变化，请刷新后重试。";
   if (error?.code === "OFFER_SPECIAL_REASON_REQUIRED") return "特殊 Offer 必须填写说明。";
   if (error?.code === "OFFER_PROXY_START_DATE_REQUIRED") return "登记接受时必须填写预计入职日期。";
@@ -145,6 +148,11 @@ function draftPayload(draft) {
   };
 }
 
+export function hasOfferDraftChanges(offer, draft) {
+  if (!offer) return true;
+  return JSON.stringify(draftPayload(draft)) !== JSON.stringify(draftPayload(offerDraft(offer)));
+}
+
 function OfferHistory({ history }) {
   if (!history) return null;
   return <section className="offer-history" aria-labelledby="offer-history-title">
@@ -163,6 +171,88 @@ function OfferHistory({ history }) {
       {history.responses.map((response, index) => <OfferResponseRecord key={response.id || `${response.source}-${response.respondedAt || index}`} response={response} />)}
     </div>}
   </section>;
+}
+
+function OfferApproverDialog({ offer, controller, onClose, onConfigured, onOfferChanged }) {
+  const [state, setState] = useState({ status: "loading", options: [], selectedId: "", jobVersion: null, error: "" });
+  const dialogRef = useRef(null);
+  const titleRef = useRef(null);
+
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => titleRef.current?.focus());
+    controller.listApproverOptions(offer.id).then(({ options, jobVersion }) => {
+      if (!active) return;
+      setState({ status: "ready", options, selectedId: options[0]?.id || "", jobVersion, error: options.length ? "" : "当前没有可用的 Offer 审批人，请先在组织成员中启用招聘管理员或用人经理。" });
+    }).catch(() => {
+      if (active) setState({ status: "error", options: [], selectedId: "", jobVersion: null, error: "审批人列表加载失败，请重试。" });
+    });
+    return () => { active = false; };
+  }, [controller, offer.id]);
+
+  useEffect(() => {
+    function handleKeydown(event) {
+      if (event.key === "Escape" && state.status !== "saving") { onClose(); return; }
+      if (event.key !== "Tab") return;
+      const focusable = [...(dialogRef.current?.querySelectorAll('button:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === titleRef.current)) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+    document.addEventListener("keydown", handleKeydown);
+    return () => document.removeEventListener("keydown", handleKeydown);
+  }, [onClose, state.status]);
+
+  async function save() {
+    if (!state.selectedId || state.status === "saving") return;
+    setState((current) => ({ ...current, status: "saving", error: "" }));
+    try {
+      await controller.setDefaultApprover(offer, state.selectedId, state.jobVersion);
+      await onConfigured();
+    } catch (error) {
+      if (error?.code === "resource_version_conflict" && error.latestOffer) {
+        onOfferChanged(error.latestOffer);
+        return;
+      }
+      if (error?.code === "job_version_conflict") {
+        try {
+          const { options, jobVersion } = await controller.listApproverOptions(offer.id);
+          setState((current) => ({
+            ...current,
+            status: "ready",
+            options,
+            selectedId: options.some((item) => item.id === current.selectedId) ? current.selectedId : options[0]?.id || "",
+            jobVersion,
+            error: "职位配置已被其他成员更新，请核对审批人后再次保存。",
+          }));
+        } catch {
+          setState((current) => ({ ...current, status: "error", error: "职位配置已更新，但审批人列表刷新失败。请取消后重试。" }));
+        }
+        return;
+      }
+      setState((current) => ({
+        ...current,
+        status: "ready",
+        error: error?.code === "offer_approver_ineligible"
+          ? "该成员已停用或不具备 Offer 审批权限，请选择其他成员。"
+          : offerErrorMessage(error, "保存默认审批人"),
+      }));
+    }
+  }
+
+  return <div className="offer-proxy-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && state.status !== "saving") onClose(); }}>
+    <section ref={dialogRef} className="offer-proxy-dialog offer-approver-dialog" role="dialog" aria-modal="true" aria-labelledby="offer-approver-title" aria-describedby="offer-approver-description">
+      <header><div><h2 id="offer-approver-title" ref={titleRef} tabIndex="-1"><UserCheck size={20} />设置默认审批人</h2><p id="offer-approver-description">该职位尚未配置有效的 Offer 审批人。保存后会自动继续本次提交。</p></div><button type="button" aria-label="关闭审批人设置" disabled={state.status === "saving"} onClick={onClose}>×</button></header>
+      <div className="offer-proxy-body">
+        <div className="offer-approver-context"><ShieldCheck size={19} /><span><strong>职位默认配置</strong><small>后续该职位的普通 Offer 将优先提交给此人审批。</small></span></div>
+        {state.status === "loading" ? <div className="offer-approver-loading" role="status"><LoaderCircle className="spin" size={18} />正在加载可选审批人</div> : <label>默认 Offer 审批人<select aria-label="默认 Offer 审批人" value={state.selectedId} disabled={state.status === "saving" || !state.options.length} onChange={(event) => setState((current) => ({ ...current, selectedId: event.target.value, error: "" }))}><option value="">请选择审批人</option>{state.options.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><small>仅显示已启用的招聘管理员和用人经理。</small></label>}
+        {state.error && <div className="offer-error" role="alert"><AlertTriangle size={17} />{state.error}</div>}
+        <footer><button className="button secondary" type="button" disabled={state.status === "saving"} onClick={onClose}>取消</button><button className="button primary" type="button" disabled={state.status !== "ready" || !state.selectedId} onClick={() => void save()}>{state.status === "saving" ? "保存并提交中…" : "保存并继续提交"}</button></footer>
+      </div>
+    </section>
+  </div>;
 }
 
 function ProxyResponseDialog({ offer, controller, onClose, onResolved, onNotify }) {
@@ -256,9 +346,16 @@ function OfferDraftForm({ offer, templates, applicationId, controller, role, onS
   const [draft, setDraft] = useState(() => offerDraft(offer));
   const [status, setStatus] = useState("idle");
   const [error, setError] = useState("");
+  const [latestConflictOffer, setLatestConflictOffer] = useState(null);
+  const [approverSetupOffer, setApproverSetupOffer] = useState(null);
   const errorRef = useRef(null);
+  const submitButtonRef = useRef(null);
 
-  useEffect(() => setDraft(offerDraft(offer)), [offer?.id, offer?.version]);
+  useEffect(() => {
+    setDraft(offerDraft(offer));
+    setLatestConflictOffer(null);
+    setError("");
+  }, [offer?.id, offer?.version]);
   useEffect(() => { if (error) errorRef.current?.focus(); }, [error]);
 
   function change(field, value) {
@@ -273,9 +370,13 @@ function OfferDraftForm({ offer, templates, applicationId, controller, role, onS
     return "";
   }
 
-  async function save() {
+  async function save({ submitAfter = false } = {}) {
     const validation = validate();
     if (validation) { setError(validation); return null; }
+    if (offer && !hasOfferDraftChanges(offer, draft)) {
+      if (!submitAfter) onNotify("当前 Offer 内容没有修改");
+      return offer;
+    }
     setStatus("saving"); setError("");
     try {
       const payload = draftPayload(draft);
@@ -286,21 +387,49 @@ function OfferDraftForm({ offer, templates, applicationId, controller, role, onS
       onNotify(offer ? "已创建新的 Offer 版本" : "Offer 草稿已创建");
       return saved;
     } catch (requestError) {
+      const latest = requestError?.latestOffer;
+      if (requestError?.code === "resource_version_conflict" && latest) {
+        if (!["draft", "changes_requested"].includes(latest.status)) {
+          onSaved(latest);
+          onNotify("Offer 状态已更新，已加载最新审批进度");
+          return null;
+        }
+        setLatestConflictOffer(latest);
+      }
       setError(offerErrorMessage(requestError, "保存"));
       return null;
     } finally { setStatus("idle"); }
   }
 
-  async function submit() {
-    const saved = await save();
-    if (!saved) return;
+  async function submitSavedOffer(saved, { allowApproverSetup = true } = {}) {
     setStatus("submitting"); setError("");
     try {
       const submitted = await controller.submitApproval(saved);
       onSaved(submitted);
       onNotify("Offer 已提交审批；审批通过后仍需 HR 明确发送");
-    } catch (requestError) { setError(offerErrorMessage(requestError, "提交审批")); }
+    } catch (requestError) {
+      const latest = requestError?.latestOffer;
+      if (requestError?.code === "resource_version_conflict" && latest && !["draft", "changes_requested"].includes(latest.status)) {
+        onSaved(latest);
+        onNotify("Offer 状态已更新，已加载最新审批进度");
+      } else if (allowApproverSetup && ["offer_approver_required", "offer_approver_ineligible"].includes(requestError?.code)) {
+        setApproverSetupOffer(saved);
+      } else {
+        setError(offerErrorMessage(requestError, "提交审批"));
+      }
+    }
     finally { setStatus("idle"); }
+  }
+
+  async function submit() {
+    const saved = await save({ submitAfter: true });
+    if (!saved) return;
+    await submitSavedOffer(saved);
+  }
+
+  function closeApproverSetup() {
+    setApproverSetupOffer(null);
+    queueMicrotask(() => submitButtonRef.current?.focus());
   }
 
   const busy = status !== "idle";
@@ -316,8 +445,9 @@ function OfferDraftForm({ offer, templates, applicationId, controller, role, onS
     </div>
     <div className="offer-special-row"><span><ShieldCheck size={18} /><span><strong>特殊 Offer</strong><small>开启后会在岗位默认审批人之后追加组织固定审批链。</small></span></span><label className="compact-switch"><input aria-label="特殊 Offer" type="checkbox" disabled={busy} checked={draft.isSpecial} onChange={(event) => change("isSpecial", event.target.checked)} /><span aria-hidden="true" /></label></div>
     {draft.isSpecial && <label className="offer-special-reason">特殊 Offer 说明<span className="required-label">必填</span><textarea aria-label="特殊 Offer 说明" required rows="3" disabled={busy} value={draft.specialReason} onChange={(event) => change("specialReason", event.target.value)} placeholder="说明为何需要追加特殊审批" /></label>}
-    {error && <div ref={errorRef} tabIndex="-1" className="offer-error" role="alert"><AlertTriangle size={17} />{error}{error.includes("刷新") && offer && <button type="button" onClick={() => onSaved(null)}>刷新最新版本</button>}</div>}
-    <footer><span>{offer ? `保存会创建不可覆盖的新版本；当前主记录版本 ${offer.version}` : "创建后可预览并提交审批。"}</span><div><button className="button secondary" type="submit" disabled={busy}>{status === "saving" ? "保存中…" : offer ? "保存新版本" : "创建草稿"}</button>{canSubmit && <button className="button primary" type="button" disabled={busy} onClick={() => void submit()}>{status === "submitting" ? "提交中…" : "保存并提交审批"}</button>}</div></footer>
+    {error && <div ref={errorRef} tabIndex="-1" className="offer-error" role="alert"><AlertTriangle size={17} />{error}{error.includes("刷新") && offer && <button type="button" onClick={() => { setError(""); latestConflictOffer ? onSaved(latestConflictOffer) : onSaved(null); }}>刷新最新版本</button>}</div>}
+    <footer><span>{offer ? `保存会创建不可覆盖的新版本；当前主记录版本 ${offer.version}` : "创建后可预览并提交审批。"}</span><div><button className="button secondary" type="submit" disabled={busy}>{status === "saving" ? "保存中…" : offer ? "保存新版本" : "创建草稿"}</button>{canSubmit && <button ref={submitButtonRef} className="button primary" type="button" disabled={busy} onClick={() => void submit()}>{status === "submitting" ? "提交中…" : "保存并提交审批"}</button>}</div></footer>
+    {approverSetupOffer && <OfferApproverDialog offer={approverSetupOffer} controller={controller} onClose={closeApproverSetup} onOfferChanged={(latest) => { setApproverSetupOffer(null); onSaved(latest); onNotify("Offer 状态已更新，已加载最新进度"); }} onConfigured={async () => { const pending = approverSetupOffer; setApproverSetupOffer(null); onNotify("默认 Offer 审批人已保存"); await submitSavedOffer(pending, { allowApproverSetup: false }); }} />}
   </form>;
 }
 

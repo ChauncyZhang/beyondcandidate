@@ -133,6 +133,8 @@ test("draft updates explain immutable version behavior and conflicts preserve in
   assert.match(source, /保存会创建不可覆盖的新版本/);
   assert.match(source, /当前填写内容已保留，请刷新最新版本后核对/);
   assert.match(source, /controller\.updateDraft\(offer, payload\)/);
+  assert.match(source, /offer_approver_required/);
+  assert.match(source, /尚未配置默认 Offer 审批人/);
 });
 
 test("job form round-trips optional Offer defaults without blocking job save", () => {

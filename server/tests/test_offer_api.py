@@ -241,6 +241,107 @@ def test_offer_lifecycle_is_idempotent_versioned_and_sends_html_without_pdf(tmp_
         assert response.headers["Cache-Control"] == "no-store"
 
 
+def test_offer_submission_reports_missing_job_approver_as_an_actionable_error(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_offer_application(app)
+    with app.state.identity_store.sync_session() as db:
+        application = db.get(Application, UUID(seed["application_id"]))
+        db.get(Job, application.job_id).offer_approver_id = None
+        db.commit()
+
+    payload = {
+        "application_id": seed["application_id"],
+        "candidate_response_deadline": "2099-08-20T00:00:00Z",
+        "content": {"title": "正式录用通知", "body": "欢迎加入团队", "compensation": "100000"},
+    }
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/offers",
+            json=payload,
+            headers={**login(client, seed["admin"]), "Idempotency-Key": "missing-approver-create"},
+        )
+        submitted = client.post(
+            f"/api/v1/offers/{created.json()['data']['id']}/approvals",
+            headers={**login(client, seed["admin"]), "Idempotency-Key": "missing-approver-submit", "If-Match": '"1"'},
+        )
+
+    assert submitted.status_code == 409
+    assert submitted.json()["code"] == "offer_approver_required"
+
+
+def test_offer_owner_can_configure_default_approver_inline_and_resume_submission(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_offer_application(app)
+    with app.state.identity_store.sync_session() as db:
+        application = db.get(Application, UUID(seed["application_id"]))
+        job = db.get(Job, application.job_id)
+        job.offer_approver_id = None
+        original_job_version = job.version
+        approver_id = db.scalar(select(User.id).where(User.email == seed["approver"]))
+        db.commit()
+
+    payload = {
+        "application_id": seed["application_id"],
+        "candidate_response_deadline": "2099-08-20T00:00:00Z",
+        "content": {"title": "正式录用通知", "body": "欢迎加入团队", "compensation": "100000"},
+    }
+    with TestClient(app) as client:
+        admin = login(client, seed["admin"])
+        created = client.post("/api/v1/offers", json=payload, headers={**admin, "Idempotency-Key": "inline-create"})
+        offer_id = created.json()["data"]["id"]
+        options = client.get(f"/api/v1/offers/{offer_id}/approver-options", headers=admin)
+        job_version = options.json()["meta"]["job_version"]
+        denied = client.put(
+            f"/api/v1/offers/{offer_id}/default-approver",
+            json={"approver_id": str(approver_id), "offer_version": 1},
+            headers={**login(client, seed["viewer"]), "If-Match": f'"{job_version}"', "Idempotency-Key": "inline-denied"},
+        )
+        admin = login(client, seed["admin"])
+        invalid = client.put(
+            f"/api/v1/offers/{offer_id}/default-approver",
+            json={"approver_id": str(UUID(int=999)), "offer_version": 1},
+            headers={**admin, "If-Match": f'"{job_version}"', "Idempotency-Key": "inline-invalid"},
+        )
+        configured = client.put(
+            f"/api/v1/offers/{offer_id}/default-approver",
+            json={"approver_id": str(approver_id), "offer_version": 1},
+            headers={**admin, "If-Match": f'"{job_version}"', "Idempotency-Key": "inline-configure"},
+        )
+        replay = client.put(
+            f"/api/v1/offers/{offer_id}/default-approver",
+            json={"approver_id": str(approver_id), "offer_version": 1},
+            headers={**admin, "If-Match": f'"{job_version}"', "Idempotency-Key": "inline-configure"},
+        )
+        stale_job_write = client.put(
+            f"/api/v1/offers/{offer_id}/default-approver",
+            json={"approver_id": created.json()["data"]["job_id"], "offer_version": 1},
+            headers={**admin, "If-Match": f'"{job_version}"', "Idempotency-Key": "inline-stale-job"},
+        )
+        submitted = client.post(
+            f"/api/v1/offers/{offer_id}/approvals",
+            headers={**admin, "If-Match": '"1"', "Idempotency-Key": "inline-submit"},
+        )
+
+    assert options.status_code == 200
+    option_ids = {item["id"] for item in options.json()["data"]}
+    assert option_ids >= {str(approver_id)}
+    with app.state.identity_store.sync_session() as db:
+        viewer_id = db.scalar(select(User.id).where(User.email == seed["viewer"]))
+    assert str(viewer_id) not in option_ids
+    assert denied.status_code == 404
+    assert invalid.status_code == 409 and invalid.json()["code"] == "offer_approver_ineligible"
+    assert configured.status_code == replay.status_code == 200
+    assert configured.json()["data"]["approver_id"] == str(approver_id)
+    assert configured.headers["ETag"] == f'"{job_version + 1}"'
+    assert stale_job_write.status_code == 409 and stale_job_write.json()["code"] == "job_version_conflict"
+    assert submitted.status_code == 200 and submitted.json()["data"]["status"] == "pending_approval"
+    with app.state.identity_store.sync_session() as db:
+        application = db.get(Application, UUID(seed["application_id"]))
+        job = db.get(Job, application.job_id)
+        assert job.offer_approver_id == approver_id
+        assert job.version == original_job_version + 1
+
+
 def test_offer_template_and_ordered_special_approver_settings_are_tenant_admin_only(tmp_path) -> None:
     """Removing tenant-admin checks, ETags, or eligible-user validation breaks settings management."""
     app = make_app(tmp_path)
