@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ApiError } from "./apiClient.js";
-import offerController, { createOfferController, createProxyResponsePayload, filterEligibleSpecialApprovers } from "./offerController.js";
+import offerController, { createOfferController, createOnboardingDataPayload, createProxyResponsePayload, filterEligibleSpecialApprovers, normalizeOnboarding } from "./offerController.js";
 
 const APPLICATION_ID = "11111111-1111-4111-8111-111111111111";
 const OFFER_ID = "22222222-2222-4222-8222-222222222222";
@@ -55,11 +55,81 @@ test("exports the stable Offer controller interface and singleton", () => {
   for (const name of [
     "getApplicationOffer", "listOffers", "getOffer", "createOffer", "updateDraft", "submitApproval", "approve",
     "requestChanges", "send", "withdraw", "listHistory", "listPendingApprovals", "listTemplates", "createTemplate",
-    "updateTemplate", "getSpecialApprovers", "updateSpecialApprovers", "proxyResponse",
+    "updateTemplate", "getSpecialApprovers", "updateSpecialApprovers", "proxyResponse", "getOnboarding",
+    "updateOnboarding", "submitOnboarding",
   ]) {
     assert.equal(typeof offerController[name], "function", name);
   }
   assert.equal(typeof createOfferController, "function");
+});
+
+test("Offer projection normalizes snake and camel onboarding fields without exposing full contact values", async () => {
+  const { client } = queuedClient([{ data: apiOffer({
+    status: "accepted",
+    onboarding: {
+      id: "99999999-9999-4999-8999-999999999999",
+      status: "ready",
+      version: 2,
+      expected_start_date: "2026-09-15",
+      job_title: "平台工程师",
+      department_name: "研发部",
+      masked_phone: "138****1234",
+      masked_email: "l***@example.com",
+      complete: true,
+      can_submit: false,
+      allowed_actions: { update: true },
+      safe_error_code: "",
+      instance_code: "",
+    },
+  }) }]);
+
+  const offer = await createOfferController({ client }).getOffer(OFFER_ID);
+  assert.deepEqual(offer.onboarding, {
+    id: "99999999-9999-4999-8999-999999999999",
+    status: "ready",
+    version: 2,
+    expectedStartDate: "2026-09-15",
+    jobTitle: "平台工程师",
+    departmentName: "研发部",
+    maskedPhone: "138****1234",
+    maskedEmail: "l***@example.com",
+    complete: true,
+    canSubmit: false,
+    canUpdate: true,
+    safeErrorCode: "",
+    instanceCode: "",
+  });
+  assert.equal(normalizeOnboarding({ canSubmit: true, expectedStartDate: "2026-09-16" }).canSubmit, true);
+});
+
+test("onboarding read, partial update, and idempotent submission use the frozen contracts", async () => {
+  const ONBOARDING_ID = "99999999-9999-4999-8999-999999999999";
+  const base = { id: ONBOARDING_ID, status: "ready", version: 4, complete: false, can_submit: false };
+  const { client, calls } = queuedClient([
+    { data: base },
+    { data: { ...base, version: 5, complete: true, can_submit: true, masked_phone: "138****1234" } },
+    { data: { ...base, version: 6, complete: true, can_submit: false, status: "submitting" } },
+  ]);
+  const controller = createOfferController({ client, idempotencyKey: () => "onboarding-submit-key" });
+
+  const record = await controller.getOnboarding(APPLICATION_ID);
+  const updated = await controller.updateOnboarding(record, { phone: " 13800121234 ", expectedStartDate: "2026-09-15" });
+  const submitted = await controller.submitOnboarding(updated);
+
+  assert.equal(updated.maskedPhone, "138****1234");
+  assert.equal(submitted.status, "submitting");
+  assert.deepEqual(calls, [
+    { path: `/api/v1/applications/${APPLICATION_ID}/onboarding`, options: {} },
+    { path: `/api/v1/onboardings/${ONBOARDING_ID}`, options: { method: "PUT", body: { onboarding_data: { phone: "13800121234" }, expected_start_date: "2026-09-15" }, ifMatch: '"4"' } },
+    { path: `/api/v1/onboardings/${ONBOARDING_ID}/submissions`, options: { method: "POST", ifMatch: '"5"', idempotencyKey: "onboarding-submit-key" } },
+  ]);
+});
+
+test("onboarding update omits blank and masked values and requires an actual change", () => {
+  assert.deepEqual(createOnboardingDataPayload({ email: " candidate@example.com ", homeAddress: " 深圳 " }), {
+    onboarding_data: { email: "candidate@example.com", home_address: "深圳" },
+  });
+  assert.throws(() => createOnboardingDataPayload({ phone: "", email: "" }), { code: "ONBOARDING_DATA_REQUIRED" });
 });
 
 test("application lookup uses the exact query contract and returns newest Offer or null", async () => {

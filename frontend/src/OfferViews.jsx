@@ -3,14 +3,17 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  Building2,
   CheckCircle2,
   ChevronRight,
+  ClipboardCheck,
   Clock3,
   FileCheck2,
   FileText,
   History,
   LoaderCircle,
   Plus,
+  Pencil,
   RefreshCw,
   Send,
   ShieldCheck,
@@ -474,9 +477,156 @@ function ApprovalDecision({ offer, approvalId, controller, onSaved, onNotify }) 
   return <section className="offer-decision" aria-labelledby="offer-decision-title"><h4 id="offer-decision-title">审批决策</h4><label>修改原因（要求修改时必填）<textarea rows="3" disabled={Boolean(busy)} value={reason} onChange={(event) => { setReason(event.target.value); setError(""); }} /></label>{error && <p className="offer-error" role="alert"><AlertTriangle size={16} />{error}</p>}<div><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => void decide("rejected")}><Undo2 size={16} />{busy === "rejected" ? "提交中…" : "要求修改"}</button><button className="button primary" type="button" disabled={Boolean(busy)} onClick={() => void decide("approved")}><CheckCircle2 size={16} />{busy === "approved" ? "提交中…" : "批准 Offer"}</button></div></section>;
 }
 
+const ONBOARDING_STATUS_LABELS = Object.freeze({
+  ready: "待办理",
+  submitting: "正在创建飞书审批",
+  submitted: "已提交飞书审批",
+  failed: "提交失败",
+});
+
+const ONBOARDING_ERROR_MESSAGES = Object.freeze({
+  feishu_onboarding_disabled: "飞书入职审批尚未启用，请管理员先完成配置。",
+  feishu_onboarding_config_invalid: "飞书入职审批模板未通过校验，请管理员检查配置。",
+  feishu_onboarding_initiator_unbound: "当前 HR 尚未绑定飞书账号，请先在个人设置中完成绑定。",
+  feishu_department_unmapped: "该职位所属部门尚未映射到飞书部门，请管理员补充映射。",
+  feishu_approval_control_unsupported: "当前飞书审批模板包含暂不支持的控件，请管理员更换控件后重新校验。",
+  feishu_approval_option_metadata_missing: "飞书审批模板的性别选项无法读取，请管理员检查模板配置。",
+  feishu_approval_option_invalid: "飞书审批模板的性别选项配置不一致，请管理员重新校验。",
+  feishu_approval_option_duplicate: "飞书审批模板的性别选项存在重复映射，请管理员重新配置。",
+  feishu_approval_permission_denied: "飞书应用缺少审批权限，请管理员补充权限并发布应用。",
+  feishu_approval_definition_invalid: "飞书审批模板字段与系统配置不一致，请管理员重新校验。",
+  feishu_approval_reconciliation_required: "飞书可能已创建审批，但系统未取得结果，请管理员核对后处理。",
+});
+
+function onboardingErrorMessage(code, fallback = "入职办理暂时未完成，请稍后重试。") {
+  return ONBOARDING_ERROR_MESSAGES[code] || fallback;
+}
+
+function OnboardingEditorDialog({ onboarding, controller, onClose, onSaved }) {
+  const [values, setValues] = useState({ name: "", gender: "", phone: "", email: "", homeAddress: "", expectedStartDate: onboarding.expectedStartDate || "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const titleRef = useRef(null);
+  const dialogRef = useRef(null);
+
+  useEffect(() => {
+    titleRef.current?.focus();
+    function handleKeydown(event) {
+      if (event.key === "Escape" && !busy) { onClose(); return; }
+      if (event.key !== "Tab") return;
+      const focusable = [...(dialogRef.current?.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+    document.addEventListener("keydown", handleKeydown);
+    return () => document.removeEventListener("keydown", handleKeydown);
+  }, [busy, onClose]);
+
+  function change(field, value) {
+    setValues((current) => ({ ...current, [field]: value }));
+    setError("");
+  }
+
+  async function save(event) {
+    event.preventDefault();
+    if (busy) return;
+    const changed = Object.entries(values).some(([key, value]) => key === "expectedStartDate" ? value !== onboarding.expectedStartDate : value.trim());
+    if (!changed) { setError("请至少补充或修改一项资料。"); return; }
+    setBusy(true); setError("");
+    try {
+      const saved = await controller.updateOnboarding(onboarding, values);
+      onSaved(saved);
+      onClose();
+    } catch (requestError) {
+      setError(requestError?.code === "resource_version_conflict"
+        ? "入职资料已被其他成员更新，请关闭窗口并刷新后重试。"
+        : onboardingErrorMessage(requestError?.code, "入职资料保存失败，当前输入已保留，请稍后重试。"));
+    } finally { setBusy(false); }
+  }
+
+  return <div className="offer-proxy-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+    <section ref={dialogRef} className="offer-proxy-dialog onboarding-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="onboarding-editor-title">
+      <header><div><h2 id="onboarding-editor-title" ref={titleRef} tabIndex="-1">补充入职资料</h2><p>只填写需要补充或更正的项目；已保存的联系方式仅显示掩码，不会在页面回显明文。</p></div><button type="button" aria-label="关闭入职资料" disabled={busy} onClick={onClose}>×</button></header>
+      <form className="offer-proxy-body onboarding-editor-form" onSubmit={save}>
+        <div className="onboarding-existing-contact"><span>已保存手机：<strong>{onboarding.maskedPhone || "未提供"}</strong></span><span>已保存邮箱：<strong>{onboarding.maskedEmail || "未提供"}</strong></span></div>
+        <div className="onboarding-form-grid">
+          <label>姓名<input autoComplete="name" disabled={busy} value={values.name} onChange={(event) => change("name", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>
+          <label>性别<select disabled={busy} value={values.gender} onChange={(event) => change("gender", event.target.value)}><option value="">保持现有信息</option><option value="male">男</option><option value="female">女</option><option value="other">其他</option></select></label>
+          <label>手机号<input autoComplete="tel" disabled={busy} value={values.phone} onChange={(event) => change("phone", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>
+          <label>邮箱<input type="email" autoComplete="email" disabled={busy} value={values.email} onChange={(event) => change("email", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>
+          <label className="onboarding-full-field">家庭住址<input autoComplete="street-address" disabled={busy} value={values.homeAddress} onChange={(event) => change("homeAddress", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>
+          <label className="onboarding-full-field">预计到岗日期<input type="date" disabled={busy} value={values.expectedStartDate} onChange={(event) => change("expectedStartDate", event.target.value)} /></label>
+        </div>
+        {error && <div className="offer-error" role="alert"><AlertTriangle size={17} />{error}</div>}
+        <footer><button className="button secondary" type="button" disabled={busy} onClick={onClose}>取消</button><button className="button primary" type="submit" disabled={busy}>{busy ? "保存中…" : "保存入职资料"}</button></footer>
+      </form>
+    </section>
+  </div>;
+}
+
+function OnboardingSection({ onboarding, loadingError, controller, onChanged, onNotify }) {
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const editButtonRef = useRef(null);
+
+  if (!onboarding) return <section className="onboarding-panel is-missing" aria-labelledby="onboarding-title">
+    <header><div className="onboarding-panel-icon"><ClipboardCheck size={20} /></div><div><h4 id="onboarding-title">入职办理</h4><p>Offer 已接受，但尚未生成可办理的入职记录。</p></div></header>
+    <div className="onboarding-message" role={loadingError ? "alert" : "status"}><AlertTriangle size={17} /><span>{loadingError || "请刷新页面；如仍未生成，请联系系统管理员检查历史 Offer 数据。"}</span></div>
+  </section>;
+
+  const submitted = onboarding.status === "submitted";
+  const submitting = onboarding.status === "submitting";
+  const failed = onboarding.status === "failed";
+  const canStart = onboarding.complete && onboarding.canSubmit && !submitted && !submitting;
+  const statusText = ONBOARDING_STATUS_LABELS[onboarding.status] || "待准备";
+  const blocker = !onboarding.complete
+    ? "入职资料尚未完整，请先补充后再办理。"
+    : !onboarding.canSubmit && !submitted && !submitting
+      ? `预计到岗日 ${displayDate(onboarding.expectedStartDate, true)} 到达后可办理入职。`
+      : failed
+        ? onboardingErrorMessage(onboarding.safeErrorCode)
+        : "系统会以当前资料创建飞书入职申请，提交后不可重复办理。";
+
+  async function submit() {
+    if (!canStart || busy) return;
+    setBusy(true); setError("");
+    try {
+      const saved = await controller.submitOnboarding(onboarding);
+      onChanged(saved);
+      onNotify(saved?.status === "submitted" ? "飞书入职审批已创建" : "入职申请已提交，正在创建飞书审批");
+    } catch (requestError) {
+      setError(onboardingErrorMessage(requestError?.code));
+    } finally { setBusy(false); }
+  }
+
+  return <section className={`onboarding-panel status-${onboarding.status || "unknown"}`} aria-labelledby="onboarding-title">
+    <header><div className="onboarding-panel-icon"><Building2 size={20} /></div><div><h4 id="onboarding-title">入职办理</h4><p>候选人到岗时，从这里一键创建飞书“入职申请”。</p></div><span className="onboarding-status">{statusText}</span></header>
+    <dl className="onboarding-summary">
+      <div><dt>预计到岗日</dt><dd>{displayDate(onboarding.expectedStartDate, true)}</dd></div>
+      <div><dt>职位 / 部门</dt><dd>{[onboarding.jobTitle, onboarding.departmentName].filter(Boolean).join(" · ") || "未完整配置"}</dd></div>
+      <div><dt>资料完整度</dt><dd className={onboarding.complete ? "is-complete" : "is-incomplete"}>{onboarding.complete ? "已完整" : "待补充"}</dd></div>
+      <div><dt>联系方式</dt><dd>{[onboarding.maskedPhone, onboarding.maskedEmail].filter(Boolean).join(" · ") || "未提供"}</dd></div>
+    </dl>
+    <div className={`onboarding-message${failed ? " is-error" : submitted ? " is-success" : ""}`} role={failed ? "alert" : "status"}>
+      {failed ? <AlertTriangle size={17} /> : submitted ? <CheckCircle2 size={17} /> : <Clock3 size={17} />}
+      <span>{submitted ? `飞书审批已创建${onboarding.instanceCode ? `，实例编号：${onboarding.instanceCode}` : ""}。` : blocker}</span>
+    </div>
+    {error && <div className="offer-error" role="alert"><AlertTriangle size={17} />{error}</div>}
+    <footer>
+      {!submitted && !submitting && onboarding.canUpdate && <button ref={editButtonRef} className="button secondary" type="button" disabled={busy} onClick={() => setEditorOpen(true)}><Pencil size={16} />{onboarding.complete ? "修改资料" : "补充资料"}</button>}
+      {!submitted && <button className="button primary" type="button" disabled={!canStart || busy} title={!canStart ? blocker : undefined} onClick={() => void submit()}><UserCheck size={16} />{busy || submitting ? "办理中…" : failed ? "重试办理入职" : "办理入职"}</button>}
+    </footer>
+    {editorOpen && <OnboardingEditorDialog onboarding={onboarding} controller={controller} onClose={() => { setEditorOpen(false); queueMicrotask(() => editButtonRef.current?.focus()); }} onSaved={(saved) => { onChanged(saved); onNotify("入职资料已保存"); }} />}
+  </section>;
+}
+
 export function CandidateOfferView({ candidate, offerId, role, controller, approvalId, onNotify = () => {} }) {
   const applicationId = candidate?.application?.id || candidate?.applicationId;
-  const [state, setState] = useState({ status: "loading", offer: null, templates: [], history: null, error: "" });
+  const [state, setState] = useState({ status: "loading", offer: null, templates: [], history: null, onboarding: null, onboardingError: "", error: "" });
   const [action, setAction] = useState("");
   const [proxyOpen, setProxyOpen] = useState(false);
   const proxyButtonRef = useRef(null);
@@ -489,7 +639,7 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
   }
 
   async function load() {
-    if (!offerId && !applicationId) { setState({ status: "error", offer: null, templates: [], history: null, error: "当前页面没有可用 Offer 或申请标识。" }); return; }
+    if (!offerId && !applicationId) { setState({ status: "error", offer: null, templates: [], history: null, onboarding: null, onboardingError: "", error: "当前页面没有可用 Offer 或申请标识。" }); return; }
     setState((current) => ({ ...current, status: "loading", error: "" }));
     try {
       const offer = offerId ? await controller.getOffer(offerId) : await controller.getApplicationOffer(applicationId);
@@ -497,7 +647,16 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
         canPerformAction(role, "管理 Offer") ? controller.listTemplates().catch(() => []) : Promise.resolve([]),
         offer ? controller.listHistory(offer.id).catch(() => null) : Promise.resolve(null),
       ]);
-      setState({ status: "ready", offer, templates, history, error: "" });
+      let onboarding = offer?.onboarding || null;
+      let onboardingError = "";
+      const selectedApplicationId = offer?.applicationId || applicationId;
+      if (offer?.status === "accepted" && selectedApplicationId) {
+        try { onboarding = await controller.getOnboarding(selectedApplicationId); }
+        catch (requestError) {
+          if (requestError?.status !== 404) onboardingError = "入职资料暂时无法读取，请稍后刷新。";
+        }
+      }
+      setState({ status: "ready", offer, templates, history, onboarding, onboardingError, error: "" });
     } catch { setState((current) => ({ ...current, status: "error", error: "Offer 加载失败，请重试。" })); }
   }
 
@@ -524,6 +683,24 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
     const timer = setInterval(poll, 2_000);
     return () => { active = false; clearInterval(timer); };
   }, [controller, deliveryPending, onNotify, trackedOfferId]);
+
+  useEffect(() => {
+    if (state.onboarding?.status !== "submitting") return undefined;
+    const selectedApplicationId = state.offer?.applicationId || applicationId;
+    if (!selectedApplicationId) return undefined;
+    let active = true;
+    const timer = setInterval(async () => {
+      try {
+        const refreshed = await controller.getOnboarding(selectedApplicationId);
+        if (!active || !refreshed) return;
+        setState((current) => ({ ...current, onboarding: refreshed, onboardingError: "" }));
+        if (refreshed.status === "submitted") onNotify("飞书入职审批已创建");
+      } catch {
+        // Keep the last server state visible and retry without duplicating submission.
+      }
+    }, 2_000);
+    return () => { active = false; clearInterval(timer); };
+  }, [applicationId, controller, onNotify, state.offer?.applicationId, state.onboarding?.status]);
 
   async function run(name, command, message) {
     setAction(name);
@@ -554,6 +731,7 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
     {offer.status === "sent" && <div className="offer-sent-notice" role="status"><CheckCircle2 size={20} /><div className="offer-notice-content"><strong>Offer 已发送</strong><small>邮件已投递，正在等待候选人确认；候选人需在 {deadline} 前回复。</small></div></div>}
     {offer.status === "changes_requested" && <div className="offer-changes-notice" role="alert"><Undo2 size={20} /><div className="offer-notice-content"><strong>审批未通过，需要修改 Offer</strong><p><b>退回原因：</b>{latestRejectionReason || "审批人未填写具体原因，请联系审批人确认。"}</p><small>请在下方修改内容，保存后重新提交审批。</small></div></div>}
     {["accepted", "declined"].includes(offer.status) && <section className="offer-result" aria-labelledby="offer-result-title"><h4 id="offer-result-title">最终确认结果</h4><OfferResponseRecord response={offer.response || state.history?.responses?.at(-1)} current /></section>}
+    {offer.status === "accepted" && <OnboardingSection onboarding={state.onboarding || offer.onboarding} loadingError={state.onboardingError} controller={controller} onChanged={(onboarding) => setState((current) => ({ ...current, onboarding, onboardingError: "" }))} onNotify={onNotify} />}
     {!sensitive ? <div className="offer-redacted" role="status"><ShieldCheck size={22} /><strong>敏感内容已由服务端隐藏</strong><span>当前账号只能查看 Offer 状态，薪酬和正文不会在浏览器中展示。</span></div> : <>
       {["draft", "changes_requested"].includes(offer.status) && canRenderOfferAction(role, offer, "update") && <OfferDraftForm offer={offer} templates={state.templates} applicationId={applicationId} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} />}
       {!(["draft", "changes_requested"].includes(offer.status) && canRenderOfferAction(role, offer, "update")) && <section className="offer-preview" aria-labelledby="offer-preview-title"><header><h4 id="offer-preview-title">Offer 预览</h4>{offer.isSpecial ?? offer.is_special ? <span>特殊 Offer</span> : null}</header><h5>{offer.content?.title || "正式录用通知"}</h5><p className="offer-body-copy">{offer.content?.body || "正文未填写"}</p><dl><div><dt>薪酬方案</dt><dd>{offer.content?.compensation || "未填写"}</dd></div><div><dt>福利与补充说明</dt><dd>{offer.content?.benefits || "未填写"}</dd></div>{(offer.specialReason || offer.special_reason) && <div><dt>特殊说明</dt><dd>{offer.specialReason || offer.special_reason}</dd></div>}</dl></section>}

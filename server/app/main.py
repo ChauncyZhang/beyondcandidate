@@ -23,6 +23,7 @@ from server.app.observability.http_metrics import (
     route_template,
 )
 from server.app.offers import models as offer_models  # noqa: F401 - registers identity FKs
+from server.app.onboarding import models as onboarding_models  # noqa: F401 - registers onboarding FKs
 from server.app.identity.api import allowed_origin, problem, router as identity_router, session_token
 from server.app.identity.admin_api import router as identity_admin_router
 from server.app.identity.service import Clock, IdentityService, TokenSource
@@ -48,7 +49,7 @@ def _is_governance_path(path: str) -> bool:
 
 
 def _requires_no_store(path: str) -> bool:
-    return path.startswith("/api/public/v1/offers/") or _is_governance_path(path) or path.startswith("/api/v1/offers") or path.startswith("/api/v1/offer-approvals") or path.startswith("/api/v1/offer-templates") or path.startswith("/api/v1/email-deliveries") or path.startswith("/api/v1/email-templates") or path.startswith("/api/v1/notifications/") or path.startswith("/api/v1/auth/feishu") or path == "/api/v1/settings" or path.startswith(
+    return path.startswith("/api/public/v1/offers/") or path.startswith("/api/v1/onboardings") or path.endswith("/onboarding") or _is_governance_path(path) or path.startswith("/api/v1/offers") or path.startswith("/api/v1/offer-approvals") or path.startswith("/api/v1/offer-templates") or path.startswith("/api/v1/email-deliveries") or path.startswith("/api/v1/email-templates") or path.startswith("/api/v1/notifications/") or path.startswith("/api/v1/auth/feishu") or path == "/api/v1/settings" or path.startswith(
         "/api/v1/settings/"
     )
 
@@ -142,6 +143,11 @@ def create_app(
     ) if settings.contact_encryption_key.get_secret_value() != "change-me" else ContactCipher(
         b"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", b"fedcba9876543210fedcba9876543210"
     )
+    from server.app.onboarding.security import OnboardingPiiCipher
+    onboarding_key = settings.contact_encryption_key.get_secret_value()
+    if onboarding_key == "change-me":
+        onboarding_key = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    app.state.onboarding_pii_cipher = OnboardingPiiCipher(onboarding_key.encode())
     app.state.resume_storage = resume_storage
     from server.app.offers.pdf import MinioOfferPdfStorage
     app.state.offer_pdf_storage = MinioOfferPdfStorage(storage_client, settings.object_storage_bucket) if 'storage_client' in locals() else None
@@ -203,6 +209,8 @@ def create_app(
     app.include_router(communications_router)
     from server.app.offers.api import router as offers_router
     app.include_router(offers_router)
+    from server.app.onboarding.api import router as onboarding_router
+    app.include_router(onboarding_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_problem(request: Request, _: RequestValidationError):

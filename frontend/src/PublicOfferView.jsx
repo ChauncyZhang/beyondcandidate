@@ -5,7 +5,7 @@ import { publicOfferLoadState, publicOfferState, responseBody } from "./publicOf
 import "./product-theme-public-offer.css";
 
 const terminal = {
-  accepted: ["Offer 已接受", "您的接受结果和预计到岗日期已记录，招聘负责人将与您联系后续安排。"],
+  accepted: ["Offer 已接受", "您的接受结果、预计到岗日期和入职资料已登记，招聘负责人将与您联系后续安排。"],
   declined: ["回复已提交", "感谢您参与本次招聘流程，招聘负责人已收到您的回复。"],
   expired: ["Offer 已过期", "该 Offer 已超过回复期限，请联系招聘团队。"],
   withdrawn: ["Offer 已撤回", "该 Offer 已不再有效，请联系招聘团队。"],
@@ -41,6 +41,7 @@ function TerminalView({ offer, title, copy, onRetry }) {
 export function PublicOfferView({ token, controller = publicOfferController }) {
   const [state, setState] = useState({ loading: true, offer: null, error: "" });
   const [startDate, setStartDate] = useState("");
+  const [onboardingData, setOnboardingData] = useState({ gender: "", phone: "", email: "", home_address: "" });
   const [reason, setReason] = useState("");
   const [confirm, setConfirm] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -53,6 +54,11 @@ export function PublicOfferView({ token, controller = publicOfferController }) {
     try {
       const offer = await controller.load(token);
       setState({ loading: false, offer, error: "" });
+      setOnboardingData((current) => ({
+        ...current,
+        phone: current.phone || offer.onboardingPrefill?.phone || "",
+        email: current.email || offer.onboardingPrefill?.email || "",
+      }));
     } catch (error) {
       const kind = publicOfferLoadState(error);
       setState({ loading: false, offer: kind === "invalid" ? { status: "invalid" } : null, error: kind === "invalid" ? "" : "暂时无法加载 Offer，请稍后重试。" });
@@ -78,13 +84,13 @@ export function PublicOfferView({ token, controller = publicOfferController }) {
   }
 
   async function submit(decision) {
-    const body = responseBody(decision, startDate, reason);
+    const body = responseBody(decision, startDate, reason, onboardingData);
     if (submitting || body === null) return;
     setSubmitting(true);
     try {
       const next = await controller.respond(token, body);
       setState({ loading: false, offer: { ...offer, ...next, status: decision }, error: "" });
-      setStartDate(""); setReason(""); setConfirm("");
+      setStartDate(""); setReason(""); setOnboardingData({ gender: "", phone: "", email: "", home_address: "" }); setConfirm("");
     } catch {
       setState((current) => ({ ...current, error: "提交未完成，请稍后重试。" }));
       setSubmitting(false);
@@ -110,6 +116,12 @@ export function PublicOfferView({ token, controller = publicOfferController }) {
     setConfirm("");
     openerRef.current?.focus();
   }
+
+  function updateOnboardingField(field, value) {
+    setOnboardingData((current) => ({ ...current, [field]: value }));
+  }
+
+  const acceptanceReady = responseBody("accepted", startDate, "", onboardingData) !== null;
 
   return <main className="public-offer-page">
     <div className="public-offer-shell">
@@ -146,13 +158,30 @@ export function PublicOfferView({ token, controller = publicOfferController }) {
     </div>
 
     {confirm && <div className="public-offer-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) closeDialog(); }} onKeyDown={(event) => { if (event.key === "Escape" && !submitting) closeDialog(); }}>
-      <section className="public-offer-dialog" role="dialog" aria-modal="true" aria-labelledby="offer-confirm-title" tabIndex="-1" ref={dialogRef}>
+      <section className={`public-offer-dialog${confirm === "accepted" ? " public-offer-dialog-onboarding" : ""}`} role="dialog" aria-modal="true" aria-labelledby="offer-confirm-title" tabIndex="-1" ref={dialogRef}>
         <h2 id="offer-confirm-title">{confirm === "accepted" ? "确认接受 Offer" : "确认婉拒 Offer"}</h2>
-        <p>{confirm === "accepted" ? "请填写您预计可以到岗的日期。" : "提交后招聘负责人将收到您的回复。"}</p>
+        <p>{confirm === "accepted" ? "请确认入职资料。提交后招聘团队将据此为您办理后续入职手续。" : "提交后招聘负责人将收到您的回复。"}</p>
         {confirm === "accepted"
-          ? <label>预计到岗日期<input name="expected_start_date" type="date" min={todayInputValue()} required value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label>
+          ? <form className="public-offer-onboarding-form" onSubmit={(event) => { event.preventDefault(); void submit("accepted"); }}>
+            <div className="public-offer-onboarding-scroll">
+              <div className="public-offer-readonly-grid" aria-label="录用信息">
+                <div><span>姓名</span><strong>{offer.onboardingPrefill?.candidateName || offer.candidateName || "以 Offer 信息为准"}</strong></div>
+                <div><span>部门</span><strong>{offer.onboardingPrefill?.departmentName || "由招聘团队确认"}</strong></div>
+                <div><span>职位</span><strong>{offer.onboardingPrefill?.jobTitle || offer.jobTitle || "由招聘团队确认"}</strong></div>
+              </div>
+              <div className="public-offer-form-grid">
+                <label>性别<select name="gender" required value={onboardingData.gender} onChange={(event) => updateOnboardingField("gender", event.target.value)}><option value="">请选择</option><option value="male">男</option><option value="female">女</option><option value="other">其他</option></select></label>
+                <label>手机号<input name="phone" type="tel" autoComplete="tel" required value={onboardingData.phone} onChange={(event) => updateOnboardingField("phone", event.target.value)} /></label>
+                <label className="public-offer-form-wide">邮箱<input name="email" type="email" autoComplete="email" required value={onboardingData.email} onChange={(event) => updateOnboardingField("email", event.target.value)} /></label>
+                <label className="public-offer-form-wide">家庭住址<textarea name="home_address" autoComplete="street-address" required value={onboardingData.home_address} placeholder="请填写当前家庭住址" onChange={(event) => updateOnboardingField("home_address", event.target.value)} /></label>
+                <label className="public-offer-form-wide">预计到岗日期<input name="expected_start_date" type="date" min={todayInputValue()} required value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label>
+              </div>
+            </div>
+            {state.error && <p className="public-offer-error" role="alert">{state.error}</p>}
+            <div className="public-offer-dialog-actions"><button className="public-offer-button secondary" type="button" disabled={submitting} onClick={closeDialog}>返回</button><button className="public-offer-button primary" type="submit" disabled={submitting || !acceptanceReady}>{submitting ? "正在提交…" : "确认接受并提交"}</button></div>
+          </form>
           : <label>婉拒原因（选填）<textarea value={reason} placeholder="感谢您的时间，也欢迎留下原因" onChange={(event) => setReason(event.target.value)} /></label>}
-        <div><button className="public-offer-button secondary" type="button" disabled={submitting} onClick={closeDialog}>返回</button><button className="public-offer-button primary" type="button" disabled={submitting || (confirm === "accepted" && !startDate)} onClick={() => { void submit(confirm); }}>{submitting ? "正在提交…" : "确认提交"}</button></div>
+        {confirm === "declined" && <div className="public-offer-dialog-actions"><button className="public-offer-button secondary" type="button" disabled={submitting} onClick={closeDialog}>返回</button><button className="public-offer-button primary" type="button" disabled={submitting} onClick={() => { void submit(confirm); }}>{submitting ? "正在提交…" : "确认提交"}</button></div>}
       </section>
     </div>}
   </main>;

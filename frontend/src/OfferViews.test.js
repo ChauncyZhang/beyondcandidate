@@ -108,6 +108,24 @@ test("accepted and declined results show immutable source and audit details", ()
   assert.match(source, /responses\.map/);
 });
 
+test("accepted Offer exposes one guarded onboarding workspace without rendering full PII", () => {
+  assert.match(source, /offer\.status === "accepted" && <OnboardingSection/);
+  assert.match(source, /入职办理/);
+  assert.match(source, /预计到岗日/);
+  assert.match(source, /资料完整度/);
+  assert.match(source, /maskedPhone/);
+  assert.match(source, /maskedEmail/);
+  assert.match(source, /onboarding\.complete && onboarding\.canSubmit/);
+  assert.match(source, /预计到岗日 .* 到达后可办理入职/);
+  assert.match(source, /实例编号/);
+  assert.match(source, /重试办理入职/);
+  assert.match(source, /controller\.updateOnboarding/);
+  assert.match(source, /controller\.submitOnboarding/);
+  assert.match(source, /setInterval\(async \(\) =>/);
+  assert.match(source, /不会在页面回显明文/);
+  assert.doesNotMatch(source, /onboarding\.phone|onboarding\.email(?!Error)/);
+});
+
 test("approval workbench loads independently and navigates to candidate Offer", () => {
   assert.match(source, /controller\.listPendingApprovals\(\)/);
   assert.match(source, /onOpenOffer\(task\)/);

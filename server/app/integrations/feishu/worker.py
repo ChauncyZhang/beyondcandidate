@@ -11,14 +11,18 @@ from server.app.communications.interview_messages import AUTO_USABLE_CANDIDATE_E
 from server.app.communications.models import EmailDelivery
 from server.app.identity.models import Job, User, UserStatus
 from server.app.integrations.feishu.models import (
+    FeishuDepartmentMapping,
     FeishuIdentityBinding,
     FeishuInterviewSync,
+    FeishuOnboardingConfig,
     FeishuOrganizationConfig,
 )
 from server.app.integrations.feishu.notifications import FEISHU_NOTIFICATION_EVENTS
-from server.app.integrations.feishu.provider import CalendarEventRequest, FeishuCredentials, FeishuProviderError
+from server.app.integrations.feishu.provider import ApprovalInstanceRequest, CalendarEventRequest, FeishuCredentials, FeishuProviderError
 from server.app.interviews.models import Interview, InterviewParticipant
 from server.app.notifications.models import UserNotification
+from server.app.onboarding.models import OnboardingRecord
+from server.app.onboarding.service import validate_definition
 from server.app.queue.service import PermanentJobError, RetryableJobError
 from server.app.recruiting.models import Application, ApplicationReviewTask, Candidate, CandidateContact
 from server.app.recruiting.review_assignments import review_notification_user_ids
@@ -634,6 +638,200 @@ class FeishuNotificationOutboxHandler:
             raise exception(error.safe_code) from None
 
 
+def _approval_form_value(semantic: str, mapping: dict, value, *, feishu_department_id: str):
+    control_type = mapping["control_type"]
+    if semantic == "department":
+        return [{"open_id": feishu_department_id}]
+    if semantic == "gender":
+        return (mapping.get("options") or {}).get(value, value)
+    if semantic == "phone" and control_type == "telephone":
+        digits = str(value).lstrip("+")
+        if digits.startswith("86") and len(digits) > 11:
+            return {"countryCode": "+86", "nationalNumber": digits[2:]}
+        return {"countryCode": "+86", "nationalNumber": digits}
+    if semantic == "expected_start_date" and control_type == "date":
+        return f"{value}T00:00:00+08:00"
+    return value
+
+
+class FeishuOnboardingOutboxHandler:
+    def __init__(self, sessions, provider, feishu_cipher, onboarding_cipher) -> None:
+        self._sessions = sessions
+        self._provider = provider
+        self._feishu_cipher = feishu_cipher
+        self._onboarding_cipher = onboarding_cipher
+
+    def _fail(self, organization_id: UUID, onboarding_id: UUID, generation: UUID, safe_code: str) -> None:
+        with self._sessions.begin() as db:
+            record = db.scalar(select(OnboardingRecord).where(
+                OnboardingRecord.organization_id == organization_id,
+                OnboardingRecord.id == onboarding_id,
+                OnboardingRecord.generation == generation,
+            ).with_for_update())
+            if record is None or record.status == "submitted":
+                return
+            record.status = "failed"
+            record.failed_at = datetime.now(timezone.utc)
+            record.safe_error_code = safe_code
+            record.version += 1
+
+    async def __call__(self, event, idempotency_key) -> None:
+        try:
+            organization_id = UUID(event.payload["organization_id"])
+            onboarding_id = UUID(event.payload["onboarding_id"])
+            generation = UUID(event.payload["generation"])
+        except (KeyError, TypeError, ValueError):
+            raise PermanentJobError("feishu_payload_invalid") from None
+
+        with self._sessions.begin() as db:
+            record = db.scalar(select(OnboardingRecord).where(
+                OnboardingRecord.organization_id == organization_id,
+                OnboardingRecord.id == onboarding_id,
+            ).with_for_update())
+            if record is None:
+                raise PermanentJobError("feishu_onboarding_missing")
+            if record.generation != generation or record.status == "submitted":
+                return
+            if record.status not in {"submitting", "failed"}:
+                raise PermanentJobError("feishu_onboarding_state_invalid")
+            config = db.scalar(select(FeishuOnboardingConfig).where(
+                FeishuOnboardingConfig.organization_id == organization_id,
+                FeishuOnboardingConfig.enabled.is_(True),
+                FeishuOnboardingConfig.validation_status == "valid",
+            ))
+            base = db.scalar(select(FeishuOrganizationConfig).where(
+                FeishuOrganizationConfig.organization_id == organization_id,
+                FeishuOrganizationConfig.enabled.is_(True),
+            ))
+            binding = db.scalar(select(FeishuIdentityBinding).where(
+                FeishuIdentityBinding.organization_id == organization_id,
+                FeishuIdentityBinding.user_id == record.started_by,
+            ))
+            department = db.scalar(select(FeishuDepartmentMapping).where(
+                FeishuDepartmentMapping.organization_id == organization_id,
+                FeishuDepartmentMapping.department_id == record.department_id,
+            ))
+            if config is None or base is None or base.encrypted_app_secret is None:
+                safe_code = "feishu_onboarding_not_configured"
+            elif binding is None or not binding.open_id:
+                safe_code = "feishu_onboarding_initiator_unbound"
+            elif department is None:
+                safe_code = "feishu_department_unmapped"
+            else:
+                safe_code = None
+            preflight_error = safe_code
+            if preflight_error:
+                record.status = "failed"
+                record.failed_at = datetime.now(timezone.utc)
+                record.safe_error_code = preflight_error
+                record.version += 1
+            elif record.status == "failed":
+                record.status = "submitting"
+                record.failed_at = None
+                record.safe_error_code = None
+                record.version += 1
+            if not preflight_error:
+                credentials = FeishuCredentials(
+                    base.app_id,
+                    self._feishu_cipher.decrypt(base.encrypted_app_secret),
+                    base.redirect_uri,
+                    base.calendar_id,
+                )
+                pii = self._onboarding_cipher.decrypt(record.pii_ciphertext)
+                field_mapping = dict(config.field_mapping)
+                expected_fingerprint = config.definition_fingerprint
+                approval_code = config.approval_code
+                initiator_open_id = binding.open_id
+                feishu_department_id = department.feishu_department_id
+                source = {
+                    "candidate_name": pii["name"],
+                    "gender": pii["gender"],
+                    "department": record.department_name,
+                    "job_title": record.job_title,
+                    "phone": pii["phone"],
+                    "email": pii["email"],
+                    "home_address": pii["home_address"],
+                    "expected_start_date": record.expected_start_date.isoformat(),
+                }
+
+        if preflight_error:
+            raise PermanentJobError(preflight_error)
+
+        try:
+            definition = self._provider.get_approval_definition(credentials, approval_code)
+            validation_error = validate_definition(field_mapping, definition)
+            if validation_error or definition.fingerprint != expected_fingerprint:
+                raise FeishuProviderError(
+                    validation_error or "feishu_approval_definition_changed",
+                    retryable=False,
+                )
+            form = tuple(
+                {
+                    "id": mapping["control_id"],
+                    "type": mapping["control_type"],
+                    "value": _approval_form_value(
+                        semantic,
+                        mapping,
+                        source[semantic],
+                        feishu_department_id=feishu_department_id,
+                    ),
+                }
+                for semantic, mapping in field_mapping.items()
+            )
+            result = self._provider.create_approval_instance(
+                credentials,
+                ApprovalInstanceRequest(
+                    approval_code=approval_code,
+                    initiator_open_id=initiator_open_id,
+                    department_id=None,
+                    form=form,
+                ),
+                idempotency_key=str(generation),
+            )
+        except FeishuProviderError as error:
+            if error.provider_code == 60012:
+                try:
+                    result = self._provider.find_approval_instance_by_uuid(
+                        credentials,
+                        approval_code,
+                        str(generation),
+                        started_at=record.started_at,
+                    )
+                except FeishuProviderError:
+                    if event.attempts >= event.max_attempts:
+                        self._fail(organization_id, onboarding_id, generation, "feishu_approval_reconciliation_required")
+                        raise PermanentJobError("feishu_approval_reconciliation_required") from None
+                    raise RetryableJobError("feishu_approval_reconciliation_pending") from None
+                if result is None:
+                    if event.attempts >= event.max_attempts:
+                        self._fail(organization_id, onboarding_id, generation, "feishu_approval_reconciliation_required")
+                        raise PermanentJobError("feishu_approval_reconciliation_required") from None
+                    raise RetryableJobError("feishu_approval_reconciliation_pending") from None
+            else:
+                safe_code = error.safe_code
+                if error.retryable and event.attempts < event.max_attempts:
+                    raise RetryableJobError(safe_code) from None
+                if error.retryable:
+                    safe_code = "feishu_approval_reconciliation_required"
+                self._fail(organization_id, onboarding_id, generation, safe_code)
+                raise PermanentJobError(safe_code) from None
+
+        with self._sessions.begin() as db:
+            record = db.scalar(select(OnboardingRecord).where(
+                OnboardingRecord.organization_id == organization_id,
+                OnboardingRecord.id == onboarding_id,
+                OnboardingRecord.generation == generation,
+            ).with_for_update())
+            if record is None or record.status == "submitted":
+                return
+            record.status = "submitted"
+            record.feishu_instance_code = result.instance_code
+            record.submitted_at = datetime.now(timezone.utc)
+            record.failed_at = None
+            record.safe_error_code = None
+            record.version += 1
+
+
 def build_feishu_outbox_handlers(settings):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
@@ -641,6 +839,7 @@ def build_feishu_outbox_handlers(settings):
     from server.app.integrations.feishu.provider import HttpFeishuProvider
     from server.app.integrations.feishu.service import FeishuSecretCipher
     from server.app.communications.extraction import contact_cipher_from_settings
+    from server.app.onboarding.security import OnboardingPiiCipher
 
     key = settings.feishu_config_encryption_key.get_secret_value()
     if key == "change-me":
@@ -658,9 +857,19 @@ def build_feishu_outbox_handlers(settings):
         contact_cipher_from_settings(settings),
     )
     notification_handler = FeishuNotificationOutboxHandler(sessions, provider, cipher)
+    contact_key = settings.contact_encryption_key.get_secret_value()
+    if contact_key == "change-me":
+        contact_key = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    onboarding_handler = FeishuOnboardingOutboxHandler(
+        sessions,
+        provider,
+        cipher,
+        OnboardingPiiCipher(contact_key.encode()),
+    )
     return {
         "feishu.calendar.create": handler,
         "feishu.calendar.update": handler,
         "feishu.calendar.cancel": handler,
         "feishu.notification.send": notification_handler,
+        "feishu.approval.onboarding.create": onboarding_handler,
     }

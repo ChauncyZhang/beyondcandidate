@@ -2,6 +2,30 @@ function safeString(value) {
   return typeof value === "string" ? value : "";
 }
 
+function safeObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+export const FEISHU_ONBOARDING_FIELDS = Object.freeze([
+  { key: "candidate_name", label: "姓名", defaultType: "input" },
+  { key: "gender", label: "性别", defaultType: "radio" },
+  { key: "department", label: "部门", defaultType: "department" },
+  { key: "job_title", label: "职位", defaultType: "input" },
+  { key: "phone", label: "手机号", defaultType: "telephone" },
+  { key: "email", label: "邮箱", defaultType: "input" },
+  { key: "home_address", label: "家庭住址", defaultType: "textarea" },
+  { key: "expected_start_date", label: "预计到岗日期", defaultType: "date" },
+]);
+
+export const FEISHU_APPROVAL_CONTROL_TYPES = Object.freeze([
+  { value: "input", label: "单行文本" },
+  { value: "textarea", label: "多行文本" },
+  { value: "radio", label: "单选" },
+  { value: "department", label: "部门" },
+  { value: "telephone", label: "电话" },
+  { value: "date", label: "日期" },
+]);
+
 export function buildFeishuConfigPayload(draft) {
   const payload = {
     app_id: safeString(draft?.app_id).trim(),
@@ -31,6 +55,102 @@ export function normalizeFeishuConfig(value = {}) {
     lastTestedAt: safeString(value.last_tested_at),
     lastTestErrorCode: safeString(value.last_test_error_code),
   };
+}
+
+function normalizeFieldMapping(value) {
+  const source = safeObject(value);
+  return Object.fromEntries(FEISHU_ONBOARDING_FIELDS.map((field) => {
+    const mapping = safeObject(source[field.key]);
+    return [field.key, {
+      controlId: safeString(mapping.control_id ?? mapping.controlId),
+      type: safeString(mapping.type) || field.defaultType,
+      ...(field.key === "gender" ? {
+        options: {
+          male: safeString(mapping.options?.male) || "男",
+          female: safeString(mapping.options?.female) || "女",
+          other: safeString(mapping.options?.other) || "其他",
+        },
+      } : {}),
+    }];
+  }));
+}
+
+function normalizeDepartmentMappings(value) {
+  if (Array.isArray(value)) return value.map((item) => ({
+    departmentId: safeString(item?.department_id ?? item?.departmentId),
+    departmentName: safeString(item?.department_name ?? item?.departmentName),
+    feishuDepartmentId: safeString(item?.feishu_department_id ?? item?.feishuDepartmentId),
+  })).filter((item) => item.departmentId);
+  return Object.entries(safeObject(value)).map(([departmentId, feishuDepartmentId]) => ({
+    departmentId: safeString(departmentId),
+    departmentName: "",
+    feishuDepartmentId: safeString(feishuDepartmentId),
+  })).filter((item) => item.departmentId);
+}
+
+export function normalizeFeishuOnboardingApprovalConfig(value = {}) {
+  return {
+    enabled: value.enabled === true,
+    approvalCode: safeString(value.approval_code ?? value.approvalCode),
+    fieldMapping: normalizeFieldMapping(value.field_mapping ?? value.fieldMapping),
+    departmentMappings: normalizeDepartmentMappings(value.department_mappings ?? value.departmentMappings),
+    validationStatus: safeString(value.validation_status ?? value.validationStatus) || "unvalidated",
+    validatedAt: safeString(value.validated_at ?? value.validatedAt),
+    validationSafeErrorCode: safeString(value.validation_safe_error_code ?? value.validationSafeErrorCode),
+    version: Number.isInteger(value.version) ? value.version : 0,
+  };
+}
+
+export function buildFeishuOnboardingApprovalPayload(draft) {
+  const fieldMapping = safeObject(draft?.fieldMapping ?? draft?.field_mapping);
+  const departmentMappings = Array.isArray(draft?.departmentMappings ?? draft?.department_mappings)
+    ? (draft.departmentMappings ?? draft.department_mappings)
+    : [];
+  return {
+    enabled: draft?.enabled === true,
+    approval_code: safeString(draft?.approvalCode ?? draft?.approval_code).trim(),
+    field_mapping: Object.fromEntries(FEISHU_ONBOARDING_FIELDS.map((field) => {
+      const mapping = safeObject(fieldMapping[field.key]);
+      return [field.key, {
+        control_id: safeString(mapping.controlId ?? mapping.control_id).trim(),
+        type: safeString(mapping.type).trim() || field.defaultType,
+        ...(field.key === "gender" ? {
+          options: {
+            male: safeString(mapping.options?.male).trim(),
+            female: safeString(mapping.options?.female).trim(),
+            other: safeString(mapping.options?.other).trim(),
+          },
+        } : {}),
+      }];
+    })),
+    department_mappings: departmentMappings.map((item) => ({
+      department_id: safeString(item?.departmentId ?? item?.department_id).trim(),
+      feishu_department_id: safeString(item?.feishuDepartmentId ?? item?.feishu_department_id).trim(),
+    })).filter((item) => item.department_id),
+  };
+}
+
+export function getFeishuOnboardingApprovalErrorMessage(errorOrCode) {
+  const code = typeof errorOrCode === "string" ? errorOrCode : errorOrCode?.code;
+  const messages = {
+    feishu_approval_control_unsupported: "审批模板包含不支持的入职专用控件，请改用普通文本、单选、部门、电话和日期控件。",
+    feishu_approval_option_metadata_missing: "无法读取性别控件的选项，请确认使用普通单选控件后重新校验。",
+    feishu_approval_option_invalid: "性别选项 ID 与飞书模板不一致，请重新填写男、女、其他对应的选项 ID。",
+    feishu_approval_option_duplicate: "男、女、其他必须分别映射到三个不同的飞书选项 ID。",
+    feishu_approval_permission_denied: "飞书应用缺少审批定义读取或审批实例创建权限，请补充权限并发布最新版本。",
+    feishu_onboarding_initiator_unbound: "办理入职的 HR 必须先在个人设置中绑定飞书账号。",
+    feishu_department_unmapped: "仍有本地部门未填写飞书部门 ID，请补充后再校验。",
+    feishu_approval_definition_invalid: "Approval Code 或控件映射与飞书审批模板不一致，请核对后重试。",
+    feishu_onboarding_config_invalid: "入职审批配置未通过校验，请核对模板和部门映射。",
+    feishu_onboarding_validation_required: "请先保存配置并校验审批模板，再启用入职审批。",
+    feishu_config_changed: "配置已被其他管理员更新，请刷新后重新修改。",
+    precondition_required: "当前配置版本已失效，请刷新后重新修改。",
+    resource_version_conflict: "配置已被其他管理员更新，请刷新后重新修改。",
+  };
+  if (messages[code]) return messages[code];
+  if (errorOrCode?.status === 403) return "当前账号没有管理飞书入职审批的权限。";
+  if (errorOrCode?.status === 422) return "配置内容不完整或格式错误，请检查后重试。";
+  return "飞书入职审批配置暂时无法处理，请稍后重试。";
 }
 
 export function normalizeFeishuBinding(value = {}) {

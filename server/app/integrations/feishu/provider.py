@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Protocol
 from urllib.parse import urlencode, urlsplit
 from uuid import UUID, uuid4
@@ -100,6 +100,36 @@ class CalendarEvent:
     calendar_id: str | None = None
 
 
+@dataclass(frozen=True)
+class ApprovalControl:
+    control_id: str
+    custom_id: str | None
+    control_type: str
+    option_values: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ApprovalDefinition:
+    approval_code: str
+    name: str | None
+    status: str | None
+    controls: tuple[ApprovalControl, ...]
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class ApprovalInstanceRequest:
+    approval_code: str
+    initiator_open_id: str
+    department_id: str | None
+    form: tuple[dict, ...]
+
+
+@dataclass(frozen=True)
+class ApprovalInstance:
+    instance_code: str
+
+
 def chunk_freebusy_requests(
     user_ids: list[str] | tuple[str, ...], time_min: datetime, time_max: datetime
 ) -> list[FreeBusyRequest]:
@@ -127,6 +157,9 @@ class FeishuProvider(Protocol):
     def cancel_event(self, credentials: FeishuCredentials, event_id: str, *, idempotency_key: str) -> None: ...
     def send_message(self, credentials: FeishuCredentials, open_id: str, text: str, *, idempotency_key: str) -> None: ...
     def send_card(self, credentials: FeishuCredentials, open_id: str, card: dict, *, idempotency_key: str) -> None: ...
+    def get_approval_definition(self, credentials: FeishuCredentials, approval_code: str) -> ApprovalDefinition: ...
+    def create_approval_instance(self, credentials: FeishuCredentials, request: ApprovalInstanceRequest, *, idempotency_key: str) -> ApprovalInstance: ...
+    def find_approval_instance_by_uuid(self, credentials: FeishuCredentials, approval_code: str, idempotency_key: str, *, started_at: datetime) -> ApprovalInstance | None: ...
 
 
 class FakeFeishuProvider:
@@ -140,6 +173,14 @@ class FakeFeishuProvider:
         self.messages: list[tuple[str, str, str]] = []
         self.cards: list[tuple[str, dict, str]] = []
         self.failure: FeishuProviderError | None = None
+        self.approval_definition = ApprovalDefinition(
+            "approval_fake",
+            "Onboarding",
+            "ACTIVE",
+            (),
+            hashlib.sha256(b"approval_fake").hexdigest(),
+        )
+        self.approval_instances: list[tuple[ApprovalInstanceRequest, str, ApprovalInstance]] = []
 
     def _check(self) -> None:
         if self.failure:
@@ -223,6 +264,25 @@ class FakeFeishuProvider:
         self.cards.append((open_id, card, idempotency_key))
         self._idempotency[idempotency_key] = True
 
+    def get_approval_definition(self, credentials: FeishuCredentials, approval_code: str) -> ApprovalDefinition:
+        self._check()
+        if approval_code != self.approval_definition.approval_code:
+            raise FeishuProviderError("feishu_approval_definition_not_found", retryable=False)
+        return self.approval_definition
+
+    def create_approval_instance(self, credentials: FeishuCredentials, request: ApprovalInstanceRequest, *, idempotency_key: str) -> ApprovalInstance:
+        self._check()
+        if idempotency_key in self._idempotency:
+            return self._idempotency[idempotency_key]  # type: ignore[return-value]
+        instance = ApprovalInstance(f"approval_{uuid4().hex}")
+        self.approval_instances.append((request, idempotency_key, instance))
+        self._idempotency[idempotency_key] = instance
+        return instance
+
+    def find_approval_instance_by_uuid(self, credentials: FeishuCredentials, approval_code: str, idempotency_key: str, *, started_at: datetime) -> ApprovalInstance | None:
+        value = self._idempotency.get(idempotency_key)
+        return value if isinstance(value, ApprovalInstance) else None
+
 
 class HttpFeishuProvider:
     """Small synchronous adapter; callers run it outside database transactions."""
@@ -262,6 +322,10 @@ class HttpFeishuProvider:
             return "calendar"
         if "/im/v1/messages" in path:
             return "message"
+        if "/approval/v4/approvals/" in path:
+            return "approval_definition"
+        if path.endswith("/approval/v4/instances"):
+            return "approval_instance"
         return "other"
 
     def authorization_url(self, credentials: FeishuCredentials, state: str) -> str:
@@ -329,7 +393,12 @@ class HttpFeishuProvider:
                     "provider_code": code if isinstance(code, int) else None,
                 }},
             )
-            raise FeishuProviderError("feishu_request_failed", retryable=retryable)
+            raise FeishuProviderError(
+                "feishu_request_failed",
+                retryable=retryable,
+                status_code=response.status_code,
+                provider_code=code if isinstance(code, int) else None,
+            )
         if operation in {"tenant_token", "freebusy"}:
             logger.info(
                 "feishu_http_request_complete",
@@ -756,3 +825,139 @@ class HttpFeishuProvider:
                 "uuid": idempotency_key,
             },
         )
+
+    @staticmethod
+    def _approval_controls(value: object) -> tuple[ApprovalControl, ...]:
+        controls: list[ApprovalControl] = []
+
+        def visit(item: object) -> None:
+            if isinstance(item, list):
+                for child in item:
+                    visit(child)
+                return
+            if not isinstance(item, dict):
+                return
+            control_type = item.get("type")
+            control_id = item.get("id") or item.get("control_id")
+            custom_id = item.get("custom_id")
+            if isinstance(control_type, str) and isinstance(control_id, str):
+                option_values: list[str] = []
+                for option_key in ("option", "options", "value"):
+                    options = item.get(option_key)
+                    if not isinstance(options, list):
+                        continue
+                    for option in options:
+                        if not isinstance(option, dict):
+                            continue
+                        option_value = option.get("value") or option.get("key") or option.get("id")
+                        if isinstance(option_value, str) and option_value:
+                            option_values.append(option_value)
+                controls.append(
+                    ApprovalControl(
+                        control_id=control_id,
+                        custom_id=custom_id if isinstance(custom_id, str) and custom_id else None,
+                        control_type=control_type,
+                        option_values=tuple(dict.fromkeys(option_values)),
+                    )
+                )
+            for child in item.values():
+                if isinstance(child, (dict, list)):
+                    visit(child)
+
+        visit(value)
+        deduplicated = {
+            (control.control_id, control.custom_id, control.control_type): control
+            for control in controls
+        }
+        return tuple(deduplicated.values())
+
+    def get_approval_definition(self, credentials: FeishuCredentials, approval_code: str) -> ApprovalDefinition:
+        payload = self._json(
+            "GET",
+            f"{OPEN_API_BASE}/approval/v4/approvals/{approval_code}",
+            params={"locale": "zh-CN", "with_admin_id": "false", "user_id_type": "open_id"},
+            headers=self._headers(credentials),
+        )
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise FeishuProviderError("feishu_response_invalid", retryable=False)
+        form = data.get("form", data)
+        if isinstance(form, str):
+            try:
+                form = json.loads(form)
+            except (TypeError, ValueError):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False) from None
+        controls = self._approval_controls(form)
+        canonical = json.dumps(form, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return ApprovalDefinition(
+            approval_code=approval_code,
+            name=data.get("approval_name") if isinstance(data.get("approval_name"), str) else None,
+            status=data.get("status") if isinstance(data.get("status"), str) else None,
+            controls=controls,
+            fingerprint=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        )
+
+    def create_approval_instance(self, credentials: FeishuCredentials, request: ApprovalInstanceRequest, *, idempotency_key: str) -> ApprovalInstance:
+        body = {
+            "approval_code": request.approval_code,
+            "open_id": request.initiator_open_id,
+            "form": json.dumps(request.form, ensure_ascii=False, separators=(",", ":")),
+            "uuid": idempotency_key[:64],
+        }
+        if request.department_id:
+            body["department_id"] = request.department_id
+        payload = self._json(
+            "POST",
+            f"{OPEN_API_BASE}/approval/v4/instances",
+            params={"user_id_type": "open_id"},
+            headers=self._headers(credentials),
+            json=body,
+        )
+        data = payload.get("data")
+        instance_code = data.get("instance_code") if isinstance(data, dict) else None
+        if not isinstance(instance_code, str) or not instance_code:
+            raise FeishuProviderError("feishu_response_invalid", retryable=False)
+        return ApprovalInstance(instance_code)
+
+    def find_approval_instance_by_uuid(self, credentials: FeishuCredentials, approval_code: str, idempotency_key: str, *, started_at: datetime) -> ApprovalInstance | None:
+        window_start = started_at - timedelta(minutes=10)
+        window_end = started_at + timedelta(minutes=10)
+        page_token = None
+        while True:
+            params = {
+                "approval_code": approval_code,
+                "start_time": str(int(window_start.timestamp() * 1000)),
+                "end_time": str(int(window_end.timestamp() * 1000)),
+                "page_size": 100,
+            }
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._json(
+                "GET",
+                f"{OPEN_API_BASE}/approval/v4/instances",
+                params=params,
+                headers=self._headers(credentials),
+            )
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            codes = data.get("instance_code_list", [])
+            if not isinstance(codes, list):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            for code in codes:
+                if not isinstance(code, str) or not code:
+                    continue
+                detail = self._json(
+                    "GET",
+                    f"{OPEN_API_BASE}/approval/v4/instances/{code}",
+                    params={"user_id_type": "open_id"},
+                    headers=self._headers(credentials),
+                )
+                instance = detail.get("data")
+                if isinstance(instance, dict) and str(instance.get("uuid", "")).lower() == idempotency_key.lower():
+                    return ApprovalInstance(code)
+            if not data.get("has_more"):
+                return None
+            page_token = data.get("page_token")
+            if not isinstance(page_token, str) or not page_token:
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)

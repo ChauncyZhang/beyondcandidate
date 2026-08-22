@@ -47,6 +47,25 @@ function normalizeAllowedActions(value) {
   return Object.fromEntries(["update", "submit", "withdraw", "send", "decide", "proxy_response"].map((action) => [action, source[action] === true]));
 }
 
+export function normalizeOnboarding(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    id: safeString(value.id),
+    status: safeString(value.status),
+    version: safeVersion(value.version),
+    expectedStartDate: safeString(value.expected_start_date ?? value.expectedStartDate),
+    jobTitle: safeString(value.job_title ?? value.jobTitle),
+    departmentName: safeString(value.department_name ?? value.departmentName),
+    maskedPhone: safeString(value.masked_phone ?? value.maskedPhone),
+    maskedEmail: safeString(value.masked_email ?? value.maskedEmail),
+    complete: value.complete === true,
+    canSubmit: value.can_submit === true || value.canSubmit === true,
+    canUpdate: value?.allowed_actions?.update === true || value?.allowedActions?.update === true,
+    safeErrorCode: safeString(value.safe_error_code ?? value.safeErrorCode),
+    instanceCode: safeString(value.instance_code ?? value.instanceCode),
+  };
+}
+
 function normalizeResponse(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return {
@@ -88,6 +107,7 @@ function normalizeOffer(value) {
     pendingApprovalId: safeString(value?.pending_approval_id),
     allowedActions: normalizeAllowedActions(value?.allowed_actions),
     response: normalizeResponse(value?.response),
+    onboarding: normalizeOnboarding(value?.onboarding),
   };
 }
 
@@ -183,6 +203,24 @@ export function createProxyResponsePayload(values) {
     channel,
     communicated_at: communicatedDate.toISOString(),
     note: safeString(values?.note) || null,
+  };
+}
+
+export function createOnboardingDataPayload(values) {
+  const source = safeObject(values);
+  const onboardingData = {};
+  for (const key of ["name", "gender", "phone", "email", "home_address"]) {
+    const camelKey = key === "home_address" ? "homeAddress" : key;
+    const value = safeString(source[key] ?? source[camelKey]);
+    if (value) onboardingData[key] = value;
+  }
+  const expectedStartDate = safeString(source.expected_start_date ?? source.expectedStartDate);
+  if (Object.keys(onboardingData).length === 0 && !expectedStartDate) {
+    throw codedError("ONBOARDING_DATA_REQUIRED", "onboarding data required");
+  }
+  return {
+    onboarding_data: onboardingData,
+    ...(expectedStartDate ? { expected_start_date: expectedStartDate } : {}),
   };
 }
 
@@ -340,6 +378,34 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
     return normalizeHistory(response?.data);
   }
 
+  async function getOnboarding(applicationId, { signal } = {}) {
+    const id = requireId(applicationId, "APPLICATION_ID_REQUIRED");
+    const response = await client.request(`/api/v1/applications/${encodeURIComponent(id)}/onboarding`, requestOptions(signal));
+    return normalizeOnboarding(response?.data?.onboarding ?? response?.data);
+  }
+
+  async function updateOnboarding(onboarding, values, { signal } = {}) {
+    const id = requireId(onboarding?.id, "ONBOARDING_ID_REQUIRED");
+    const version = requireVersion(onboarding?.version);
+    const response = await client.request(`/api/v1/onboardings/${encodeURIComponent(id)}`, requestOptions(signal, {
+      method: "PUT",
+      body: createOnboardingDataPayload(values),
+      ifMatch: `"${version}"`,
+    }));
+    return normalizeOnboarding(response?.data?.onboarding ?? response?.data);
+  }
+
+  async function submitOnboarding(onboarding, { signal } = {}) {
+    const id = requireId(onboarding?.id, "ONBOARDING_ID_REQUIRED");
+    const version = requireVersion(onboarding?.version);
+    const response = await client.request(`/api/v1/onboardings/${encodeURIComponent(id)}/submissions`, requestOptions(signal, {
+      method: "POST",
+      ifMatch: `"${version}"`,
+      idempotencyKey: idempotencyKey(),
+    }));
+    return normalizeOnboarding(response?.data?.onboarding ?? response?.data);
+  }
+
   async function listPendingApprovals({ signal } = {}) {
     const response = await client.request("/api/v1/offer-approvals/pending", requestOptions(signal));
     return safeArray(response?.data).map(normalizePendingApproval).filter((item) => item.id && item.offerId);
@@ -426,6 +492,9 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
     withdraw,
     proxyResponse,
     listHistory,
+    getOnboarding,
+    updateOnboarding,
+    submitOnboarding,
     listPendingApprovals,
     listTemplates,
     createTemplate,

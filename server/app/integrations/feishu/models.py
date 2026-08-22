@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKeyConstraint, Index, Integer, LargeBinary, String, UniqueConstraint, Uuid
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKeyConstraint, Index, Integer, LargeBinary, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server.app.identity.models import Base, utcnow
@@ -70,6 +70,57 @@ class FeishuIdentityBinding(Base):
         UniqueConstraint("organization_id", "user_id"),
         UniqueConstraint("organization_id", "union_id"),
         UniqueConstraint("organization_id", "open_id"),
+    )
+
+
+class FeishuOnboardingConfig(Base):
+    __tablename__ = "feishu_onboarding_configs"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, unique=True)
+    approval_code: Mapped[str] = mapped_column(String(255), nullable=False)
+    field_mapping: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    validation_status: Mapped[str] = mapped_column(String(16), default="unvalidated", nullable=False)
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    validation_safe_error_code: Mapped[str | None] = mapped_column(String(100))
+    definition_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    updated_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    __table_args__ = (
+        ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+        ForeignKeyConstraint(["organization_id", "created_by"], ["users.organization_id", "users.id"]),
+        ForeignKeyConstraint(["organization_id", "updated_by"], ["users.organization_id", "users.id"]),
+        CheckConstraint("version >= 1", name="ck_feishu_onboarding_configs_version"),
+        CheckConstraint(
+            "validation_status in ('unvalidated','valid','invalid')",
+            name="ck_feishu_onboarding_configs_validation",
+        ),
+        CheckConstraint(
+            "not enabled or validation_status = 'valid'",
+            name="ck_feishu_onboarding_configs_enabled",
+        ),
+    )
+
+
+class FeishuDepartmentMapping(Base):
+    __tablename__ = "feishu_department_mappings"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    department_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    feishu_department_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    __table_args__ = (
+        UniqueConstraint("organization_id", "department_id"),
+        ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+        ForeignKeyConstraint(
+            ["organization_id", "department_id"],
+            ["departments.organization_id", "departments.id"],
+            ondelete="CASCADE",
+        ),
     )
 
 

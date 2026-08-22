@@ -891,6 +891,41 @@
   gap: 8px;
 }
 
+.settings-page .feishu-settings-stack { min-width: 0; display: grid; gap: 18px; }
+.settings-page .feishu-onboarding-loading { min-height: 120px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); }
+.settings-page .feishu-onboarding-form { min-width: 0; display: grid; gap: 18px; }
+.settings-page .feishu-onboarding-form .settings-section-heading h2 { display: flex; align-items: center; gap: 8px; }
+.settings-page .feishu-validation-status { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; color: #606067; background: #eeeef1; font-size: 12px; font-weight: 650; white-space: nowrap; }
+.settings-page .feishu-validation-status.valid { color: var(--green); background: var(--green-soft); }
+.settings-page .feishu-validation-status.invalid { color: #a51f2c; background: var(--red-soft); }
+.settings-page .feishu-onboarding-switch { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 8px; background: #f7f7f9; }
+.settings-page .feishu-onboarding-switch > span { min-width: 0; display: flex; align-items: flex-start; gap: 10px; }
+.settings-page .feishu-onboarding-switch > span > span { min-width: 0; display: grid; gap: 3px; }
+.settings-page .feishu-onboarding-switch small, .settings-page .feishu-approval-code small { color: var(--muted); font-weight: 400; line-height: 1.5; overflow-wrap: anywhere; }
+.settings-page .feishu-approval-code { max-width: 760px; }
+.settings-page .feishu-mapping-section { min-width: 0; display: grid; gap: 10px; padding-top: 2px; }
+.settings-page .feishu-mapping-section > header h3, .settings-page .feishu-mapping-section > header p { margin: 0; }
+.settings-page .feishu-mapping-section > header h3 { font-size: 15px; }
+.settings-page .feishu-mapping-section > header p { margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.settings-page .feishu-field-mapping { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; }
+.settings-page .feishu-mapping-head, .settings-page .feishu-mapping-row { min-width: 0; display: grid; grid-template-columns: minmax(120px, .7fr) minmax(220px, 1.5fr) minmax(150px, .8fr); align-items: center; gap: 12px; padding: 9px 12px; }
+.settings-page .feishu-mapping-head { color: var(--muted); background: #f7f7f9; font-size: 12px; }
+.settings-page .feishu-mapping-row { border-top: 1px solid var(--line); }
+.settings-page .feishu-mapping-row strong { min-width: 0; overflow-wrap: anywhere; }
+.settings-page .feishu-mapping-row label { min-width: 0; }
+.settings-page .feishu-mapping-row input, .settings-page .feishu-mapping-row select { min-height: 38px; }
+.settings-page .feishu-gender-options { display: grid; gap: 5px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #f7f7f9; }
+.settings-page .feishu-gender-options > p { margin: 0; color: var(--muted); font-size: 12px; }
+.settings-page .feishu-gender-options > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 4px; }
+.settings-page .feishu-gender-options label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; }
+.settings-page .feishu-gender-options label > span { font-weight: 600; }
+.settings-page .feishu-department-mapping { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+.settings-page .feishu-department-mapping label { min-width: 0; display: grid; grid-template-columns: minmax(100px, .8fr) minmax(0, 1.2fr); align-items: center; gap: 10px; }
+.settings-page .feishu-department-mapping label > span { min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.settings-page .feishu-mapping-empty { display: flex; align-items: center; gap: 8px; padding: 12px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); }
+.settings-page .feishu-onboarding-actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 9px; padding-top: 14px; border-top: 1px solid var(--line); }
+.settings-page .feishu-onboarding-actions > span { margin-right: auto; color: var(--muted); font-size: 12px; }
+
 .settings-page .settings-form label,
 .settings-page .password-settings-form label,
 .settings-drawer .password-settings-form label,
@@ -1322,6 +1357,16 @@
   .settings-page .feishu-form-footer { align-items: stretch; flex-direction: column; }
   .settings-page .feishu-form-actions { justify-content: stretch; }
   .settings-page .feishu-form-actions .button { flex: 1; justify-content: center; }
+  .settings-page .feishu-onboarding-switch { align-items: flex-start; }
+  .settings-page .feishu-mapping-head { display: none; }
+  .settings-page .feishu-mapping-row { grid-template-columns: 1fr; gap: 9px; }
+  .settings-page .feishu-mapping-row .mobile-field-label { display: block !important; margin-bottom: 2px; color: var(--muted); font-size: 12px; }
+  .settings-page .feishu-gender-options > div { grid-template-columns: 1fr; }
+  .settings-page .feishu-department-mapping { grid-template-columns: 1fr; }
+  .settings-page .feishu-department-mapping label { grid-template-columns: 1fr; gap: 5px; }
+  .settings-page .feishu-onboarding-actions { align-items: stretch; flex-direction: column; }
+  .settings-page .feishu-onboarding-actions > span { margin-right: 0; }
+  .settings-page .feishu-onboarding-actions .button { width: 100%; justify-content: center; }
   .settings-page .settings-sticky-actions { margin: 16px -13px -15px; padding: 12px 13px; }
   .settings-page .ai-settings-block { padding: 0 13px 17px; }
   .settings-page .ai-settings-block + .ai-settings-block { padding-top: 18px; }

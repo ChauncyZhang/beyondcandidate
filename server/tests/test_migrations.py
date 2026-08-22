@@ -15,13 +15,13 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from server.tests.test_interview_persistence_postgres import _seed_application
 
 
-TABLES = {"organizations", "departments", "workflow_templates", "users", "user_roles", "user_sessions", "user_recruiting_department_scopes", "jobs", "job_collaborators", "audit_logs", "candidates", "candidate_contacts", "file_objects", "resumes", "resume_profiles", "job_jd_versions", "screening_rule_versions", "applications", "application_stage_events", "application_review_tasks", "notification_reads", "user_notifications", "candidate_notes", "candidate_events", "download_tickets", "idempotency_records", "background_jobs", "job_attempts", "outbox_events", "queue_claim_cursors", "screening_runs", "screening_items", "screening_results", "candidate_duplicate_hints", "llm_provider_configs", "ocr_provider_configs", "email_provider_configs", "email_templates", "email_deliveries", "prompt_versions", "llm_invocations", "llm_screening_evaluations", "interviews", "interview_participants", "interview_events", "interview_feedbacks", "interview_feedback_revisions", "talent_pools", "talent_pool_grants", "talent_pool_memberships", "offer_templates", "organization_special_offer_approvers", "offers", "offer_versions", "offer_approvals", "offer_responses", "offer_events"}
+TABLES = {"organizations", "departments", "workflow_templates", "users", "user_roles", "user_sessions", "user_recruiting_department_scopes", "jobs", "job_collaborators", "audit_logs", "candidates", "candidate_contacts", "file_objects", "resumes", "resume_profiles", "job_jd_versions", "screening_rule_versions", "applications", "application_stage_events", "application_review_tasks", "notification_reads", "user_notifications", "candidate_notes", "candidate_events", "download_tickets", "idempotency_records", "background_jobs", "job_attempts", "outbox_events", "queue_claim_cursors", "screening_runs", "screening_items", "screening_results", "candidate_duplicate_hints", "llm_provider_configs", "ocr_provider_configs", "email_provider_configs", "email_templates", "email_deliveries", "prompt_versions", "llm_invocations", "llm_screening_evaluations", "interviews", "interview_participants", "interview_events", "interview_feedbacks", "interview_feedback_revisions", "talent_pools", "talent_pool_grants", "talent_pool_memberships", "offer_templates", "organization_special_offer_approvers", "offers", "offer_versions", "offer_approvals", "offer_responses", "offer_events", "onboarding_records", "feishu_onboarding_configs", "feishu_department_mappings"}
 
 
 def test_latest_migration_revision_is_current() -> None:
     script_directory = ScriptDirectory.from_config(Config("server/alembic.ini"))
 
-    assert script_directory.get_current_head() == "0039_email_delivery_cancelled"
+    assert script_directory.get_current_head() == "0040_feishu_onboarding"
 
 
 def test_email_delivery_schema_has_versioned_provider_and_dedupe_guards() -> None:
@@ -75,6 +75,14 @@ def test_0037_offer_approver_triggers_accept_persisted_active_status() -> None:
     assert "CREATE OR REPLACE FUNCTION validate_special_offer_approver" in migration
     assert "CREATE OR REPLACE FUNCTION validate_job_offer_defaults" in migration
     assert "lower(u.status) = 'active'" in migration
+
+
+def test_0040_onboarding_migration_removes_pii_when_candidate_is_redacted() -> None:
+    migration = Path("server/migrations/versions/0040_feishu_onboarding.py").read_text(encoding="utf-8")
+
+    assert "CREATE TRIGGER trg_delete_candidate_onboarding_records" in migration
+    assert "AFTER UPDATE OF deleted_at ON candidates" in migration
+    assert "DELETE FROM public.onboarding_records" in migration
 
 
 @pytest.mark.skipif(not os.getenv("POSTGRES_SMOKE_URL"), reason="PostgreSQL smoke URL not configured")

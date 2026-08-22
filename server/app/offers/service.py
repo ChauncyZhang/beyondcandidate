@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from sqlalchemy import exists, func, select
 
 from server.app.identity.models import AuditLog, Job
-from server.app.recruiting.models import Application
+from server.app.identity.models import Department
+from server.app.onboarding.models import OnboardingRecord
+from server.app.recruiting.models import Application, Candidate
 from server.app.recruiting.service import ResourceVersionConflict
 from server.app.offers.models import Offer, OfferAccessToken, OfferApproval, OfferEvent, OfferResponse, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
 from server.app.offers.pdf import offer_pdf_storage_key, render_offer_pdf
@@ -103,7 +105,8 @@ def public_offer_access(db, raw_token: str, *, codec: OfferTokenCodec, now: date
     return token, offer, version, application
 
 
-def _offer_response_hash(*, source, actor_user_id, decision, expected_start_date, reason_text, communication_channel, communicated_at, note):
+def _offer_response_hash(*, source, actor_user_id, decision, expected_start_date, reason_text, communication_channel, communicated_at, note, onboarding_data=None):
+    normalized_onboarding = onboarding_data.model_dump(mode="json") if onboarding_data is not None else None
     canonical = json.dumps({
         "source": source,
         "actor_user_id": str(actor_user_id) if actor_user_id else None,
@@ -113,6 +116,7 @@ def _offer_response_hash(*, source, actor_user_id, decision, expected_start_date
         "communication_channel": communication_channel,
         "communicated_at": _utc(communicated_at).isoformat() if communicated_at else None,
         "note": note,
+        "onboarding_data": normalized_onboarding,
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -134,6 +138,8 @@ def record_offer_response(
     now,
     trace_id,
     access_token_id=None,
+    onboarding_data=None,
+    onboarding_cipher=None,
 ):
     """Serialize candidate and proxy decisions on the same Offer row lock."""
     offer = _offer(db, organization_id, offer_id, lock=True)
@@ -141,6 +147,7 @@ def record_offer_response(
         source=source, actor_user_id=actor_user_id, decision=decision,
         expected_start_date=expected_start_date, reason_text=reason_text,
         communication_channel=communication_channel, communicated_at=communicated_at, note=note,
+        onboarding_data=onboarding_data,
     )
     existing = db.scalar(select(OfferResponse).where(
         OfferResponse.organization_id == organization_id,
@@ -199,6 +206,43 @@ def record_offer_response(
         note=note, request_hash=request_hash, responded_at=now,
     )
     db.add(response)
+    db.flush()
+    if decision == "accepted" and onboarding_data is not None:
+        if onboarding_cipher is None:
+            raise RuntimeError("onboarding cipher is required")
+        candidate = db.scalar(select(Candidate).where(
+            Candidate.organization_id == organization_id,
+            Candidate.id == application.candidate_id,
+            Candidate.deleted_at.is_(None),
+        ))
+        job = db.scalar(select(Job).where(
+            Job.organization_id == organization_id,
+            Job.id == application.job_id,
+        ))
+        department = db.scalar(select(Department).where(
+            Department.organization_id == organization_id,
+            Department.id == job.department_id,
+        )) if job is not None and job.department_id is not None else None
+        if candidate is None or job is None or department is None:
+            raise OfferApprovalError("onboarding job department is incomplete", code="onboarding_department_required")
+        pii = {
+            "name": candidate.display_name.strip(),
+            **onboarding_data.model_dump(mode="json"),
+        }
+        db.add(OnboardingRecord(
+            organization_id=organization_id,
+            offer_response_id=response.id,
+            offer_id=offer.id,
+            application_id=application.id,
+            candidate_id=candidate.id,
+            job_id=job.id,
+            department_id=department.id,
+            job_title=job.title,
+            department_name=department.name,
+            expected_start_date=expected_start_date,
+            pii_ciphertext=onboarding_cipher.encrypt(pii),
+            status="ready",
+        ))
     offer.status = response.status; offer.version += 1
     revoke_offer_access_tokens(db, offer, now=now)
     _audit(db, offer, actor_user_id, f"offer.{response.status}", trace_id, {
@@ -210,7 +254,7 @@ def record_offer_response(
     return response, False
 
 
-def record_public_offer_response(db, raw_token, payload, *, codec: OfferTokenCodec, now: datetime, trace_id: str):
+def record_public_offer_response(db, raw_token, payload, *, codec: OfferTokenCodec, now: datetime, trace_id: str, onboarding_cipher=None):
     token, offer, version, _ = public_offer_access(db, raw_token, codec=codec, now=now, allow_inactive=True)
     try:
         return record_offer_response(
@@ -219,12 +263,14 @@ def record_public_offer_response(db, raw_token, payload, *, codec: OfferTokenCod
             reason_text=payload.reason_text, source="candidate", actor_user_id=None,
             communication_channel=None, communicated_at=None, note=None,
             now=now, trace_id=trace_id, access_token_id=token.id,
+            onboarding_data=payload.onboarding_data,
+            onboarding_cipher=onboarding_cipher,
         )
     except OfferResponseUnavailable as error:
         raise OfferNotFound from error
 
 
-def record_proxy_offer_response(db, offer, payload, *, actor_user_id, now: datetime, trace_id: str):
+def record_proxy_offer_response(db, offer, payload, *, actor_user_id, onboarding_cipher=None, now: datetime, trace_id: str):
     return record_offer_response(
         db, organization_id=offer.organization_id, offer_id=offer.id,
         offer_version_id=offer.current_version_id, decision=payload.decision,
@@ -232,6 +278,8 @@ def record_proxy_offer_response(db, offer, payload, *, actor_user_id, now: datet
         source="hr_proxy", actor_user_id=actor_user_id,
         communication_channel=payload.channel, communicated_at=payload.communicated_at,
         note=payload.note, now=now, trace_id=trace_id,
+        onboarding_data=payload.onboarding_data,
+        onboarding_cipher=onboarding_cipher,
     )
 
 

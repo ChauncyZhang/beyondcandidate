@@ -10,10 +10,14 @@ test("public Offer state handles active and all terminal states", () => {
   for (const status of ["accepted", "declined", "expired", "withdrawn", "superseded", "invalid"]) assert.equal(publicOfferState({ status }), status);
   assert.equal(publicOfferState(null), "invalid");
 });
-test("accept validation requires expected start date", () => {
+const onboarding = { gender: "female", phone: " 13800138000 ", email: " candidate@example.com ", home_address: " 深圳市南山区 " };
+
+test("accept validation requires complete onboarding data", () => {
   assert.equal(publicOfferState({ status: "sent" }, "accepted", ""), "start-date-required");
-  assert.equal(responseBody("accepted", "", ""), null);
-  assert.deepEqual(responseBody("accepted", "2026-10-01", "ignored"), { decision: "accepted", expected_start_date: "2026-10-01" });
+  assert.equal(responseBody("accepted", "", "", onboarding), null);
+  assert.equal(responseBody("accepted", "2026-10-01", "", { ...onboarding, phone: "" }), null);
+  assert.equal(responseBody("accepted", "2026-10-01", "", { ...onboarding, gender: "unknown" }), null);
+  assert.deepEqual(responseBody("accepted", "2026-10-01", "ignored", onboarding), { decision: "accepted", expected_start_date: "2026-10-01", onboarding_data: { gender: "female", phone: "13800138000", email: "candidate@example.com", home_address: "深圳市南山区" } });
   assert.deepEqual(responseBody("declined", "", "时间不合适"), { decision: "declined", reason_text: "时间不合适" });
 });
 
@@ -28,5 +32,8 @@ test("public Offer page is company branded, HTML first, and keeps PDF optional",
   assert.match(source, /offer\.pdfAvailable/);
   assert.doesNotMatch(source, /<iframe/);
   assert.match(source, /confirm === "accepted"[\s\S]*预计到岗日期/);
+  assert.match(source, /onboardingPrefill/);
+  for (const field of ["性别", "手机号", "邮箱", "家庭住址"]) assert.match(source, new RegExp(field));
+  assert.doesNotMatch(source, /身份证|电子签名/);
   assert.match(source, /确认婉拒 Offer/);
 });

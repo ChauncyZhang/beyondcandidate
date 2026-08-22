@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { createApiClient } from "./apiClient.js";
-import { buildFeishuConfigPayload, getFeishuCallbackErrorCode, getFeishuConfigErrorMessage, getFeishuConnectionTestErrorMessage, getFeishuLoginErrorMessage, normalizeFeishuConfig, normalizeFeishuBinding, startFeishuAuthorization } from "./feishuIntegration.js";
+import { buildFeishuConfigPayload, buildFeishuOnboardingApprovalPayload, FEISHU_ONBOARDING_FIELDS, getFeishuCallbackErrorCode, getFeishuConfigErrorMessage, getFeishuConnectionTestErrorMessage, getFeishuLoginErrorMessage, getFeishuOnboardingApprovalErrorMessage, normalizeFeishuConfig, normalizeFeishuOnboardingApprovalConfig, normalizeFeishuBinding, startFeishuAuthorization } from "./feishuIntegration.js";
 
 function response(body, status = 200, headers = {}) {
   return new Response(body == null ? null : JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
@@ -21,6 +21,9 @@ test("Feishu API methods follow the organization login and binding contracts", a
   await client.getFeishuConfig();
   await client.saveFeishuConfig({ app_id: "cli", enabled: false });
   await client.testFeishuConnection();
+  await client.getFeishuOnboardingApprovalConfig();
+  await client.saveFeishuOnboardingApprovalConfig({ enabled: true }, { version: 2 });
+  await client.validateFeishuOnboardingApprovalConfig({ version: 3 });
   await client.authorizeFeishuLogin("acme");
   await client.authorizeFeishuBinding();
   await client.getFeishuBinding();
@@ -30,11 +33,45 @@ test("Feishu API methods follow the organization login and binding contracts", a
     ["/api/v1/settings/integrations/feishu", "GET"],
     ["/api/v1/settings/integrations/feishu", "PUT"],
     ["/api/v1/settings/integrations/feishu/test", "POST"],
+    ["/api/v1/settings/integrations/feishu/onboarding-approval", "GET"],
+    ["/api/v1/settings/integrations/feishu/onboarding-approval", "PUT"],
+    ["/api/v1/settings/integrations/feishu/onboarding-approval/validate", "POST"],
     ["/api/v1/auth/feishu/authorize", "POST"],
     ["/api/v1/me/integrations/feishu/authorize", "POST"],
     ["/api/v1/me/integrations/feishu", "GET"],
     ["/api/v1/me/integrations/feishu", "DELETE"],
   ]);
+});
+
+test("Feishu onboarding config normalizes camel or snake values and serializes eight explicit semantic mappings", () => {
+  const config = normalizeFeishuOnboardingApprovalConfig({
+    enabled: true,
+    approval_code: "APPROVAL-1",
+    field_mapping: {
+      candidate_name: { control_id: "name-id", type: "input" },
+      gender: { control_id: "gender-id", type: "radio", options: { male: "先生", female: "女士", other: "其他" } },
+    },
+    department_mappings: [{ department_id: "dep-1", department_name: "研发部", feishu_department_id: "od-1" }],
+    validation_status: "valid",
+    validated_at: "2026-08-18T10:00:00Z",
+    version: 4,
+  });
+  assert.equal(FEISHU_ONBOARDING_FIELDS.length, 8);
+  assert.equal(config.fieldMapping.candidate_name.controlId, "name-id");
+  assert.equal(config.fieldMapping.phone.type, "telephone");
+  assert.equal(config.fieldMapping.gender.options.female, "女士");
+  assert.equal(config.departmentMappings[0].feishuDepartmentId, "od-1");
+  const payload = buildFeishuOnboardingApprovalPayload(config);
+  assert.equal(payload.approval_code, "APPROVAL-1");
+  assert.equal(Object.keys(payload.field_mapping).length, 8);
+  assert.deepEqual(payload.field_mapping.gender.options, { male: "先生", female: "女士", other: "其他" });
+  assert.deepEqual(payload.department_mappings, [{ department_id: "dep-1", feishu_department_id: "od-1" }]);
+});
+
+test("Feishu onboarding errors remain Chinese and do not expose provider details", () => {
+  assert.match(getFeishuOnboardingApprovalErrorMessage("feishu_approval_control_unsupported"), /不支持/);
+  assert.match(getFeishuOnboardingApprovalErrorMessage("feishu_department_unmapped"), /部门/);
+  assert.doesNotMatch(getFeishuOnboardingApprovalErrorMessage({ code: "unknown", detail: "provider token" }), /provider token/);
 });
 
 test("Feishu projections keep only safe configuration and binding fields", () => {
@@ -137,6 +174,23 @@ test("Feishu settings keep the enable control and actions in one responsive foot
   assert.match(settings, /className="feishu-form-actions"/);
   assert.match(styles, /\.settings-page \.feishu-form-footer\s*\{/);
   assert.match(styles, /\.feishu-enabled-control input\[type="checkbox"\]/);
+});
+
+test("Feishu settings expose onboarding approval mapping and validation without a new navigation item", async () => {
+  const [settings, styles] = await Promise.all([
+    readFile(new URL("./FeishuIntegrationSettings.jsx", import.meta.url), "utf8"),
+    readFile(new URL("./product-theme-admin.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(settings, /入职审批/);
+  assert.match(settings, /Approval Code/);
+  assert.match(settings, /FEISHU_ONBOARDING_FIELDS\.map/);
+  assert.match(settings, /部门映射/);
+  assert.match(settings, /校验审批模板/);
+  assert.match(settings, /getFeishuOnboardingApprovalConfig/);
+  assert.match(settings, /saveFeishuOnboardingApprovalConfig/);
+  assert.match(settings, /validateFeishuOnboardingApprovalConfig/);
+  assert.match(styles, /\.settings-page \.feishu-field-mapping/);
+  assert.match(styles, /@media \(max-width: 640px\)/);
 });
 
 test("Feishu connection test reads the persisted test status instead of a missing ok field", async () => {

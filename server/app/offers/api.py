@@ -34,6 +34,7 @@ from server.app.recruiting.service import is_eligible_offer_approver
 from server.app.communications.interview_messages import CandidateEmailUnavailable, resolve_confirmed_candidate_email
 from server.app.communications.service import DeliveryCommand, EmailConfigurationUnavailable, SenderPolicy, enqueue_delivery
 from server.app.notifications.service import create_user_notification
+from server.app.onboarding.service import public_onboarding_prefill
 
 
 router = APIRouter()
@@ -458,6 +459,7 @@ def respond_to_offer_by_proxy(offer_id: UUID, payload: ProxyOfferResponse, reque
                     raise OfferVersionConflict
                 response, duplicate = record_proxy_offer_response(
                     db, offer, payload, actor_user_id=principal.user_id,
+                    onboarding_cipher=request.app.state.onboarding_pii_cipher,
                     now=datetime.now(timezone.utc), trace_id=request.state.trace_id,
                 )
                 if not duplicate:
@@ -655,7 +657,13 @@ def get_public_offer(token: str, request: Request):
         location = jd.content.get("location") if jd and isinstance(jd.content, dict) else None
         hr_contact = " · ".join(value for value in (hr.display_name if hr else None, hr.email if hr else None) if value)
         pdf_available = status == "sent" and all(getattr(version, field) is not None for field in ("pdf_object_key", "pdf_sha256", "pdf_size_bytes", "pdf_rendered_at"))
-        return _public_response({"status": status, "company_name": organization.name if organization else None, "candidate_name": candidate.display_name if candidate else None, "job_title": job.title if job else None, "location": location, "hr_contact": hr_contact or None, "content": version.content, "candidate_response_deadline": version.candidate_response_deadline.isoformat(), "pdf_available": pdf_available})
+        onboarding_prefill = public_onboarding_prefill(
+            db,
+            offer.organization_id,
+            application,
+            contact_cipher=request.app.state.contact_cipher,
+        ) if status == "sent" else None
+        return _public_response({"status": status, "company_name": organization.name if organization else None, "candidate_name": candidate.display_name if candidate else None, "job_title": job.title if job else None, "location": location, "hr_contact": hr_contact or None, "content": version.content, "candidate_response_deadline": version.candidate_response_deadline.isoformat(), "pdf_available": pdf_available, "onboarding_prefill": onboarding_prefill})
 
 
 @router.get("/api/public/v1/offers/{token}/pdf")
@@ -680,7 +688,15 @@ def respond_public_offer(token: str, payload: PublicOfferResponse, request: Requ
         return _public_error(request)
     with request.app.state.identity_store.sync_session() as db:
         try:
-            response, duplicate = record_public_offer_response(db, token, payload, codec=request.app.state.offer_token_codec, now=datetime.now(timezone.utc), trace_id=request.state.trace_id)
+            response, duplicate = record_public_offer_response(
+                db,
+                token,
+                payload,
+                codec=request.app.state.offer_token_codec,
+                onboarding_cipher=request.app.state.onboarding_pii_cipher,
+                now=datetime.now(timezone.utc),
+                trace_id=request.state.trace_id,
+            )
             if not duplicate:
                 offer = db.scalar(select(Offer).where(Offer.organization_id == response.organization_id, Offer.id == response.offer_id))
                 if offer is None:
@@ -689,6 +705,8 @@ def respond_public_offer(token: str, payload: PublicOfferResponse, request: Requ
             db.commit()
         except OfferVersionConflict:
             db.rollback(); return _public_response({"code": "offer_response_conflict"}, 409)
+        except OfferApprovalError as error:
+            db.rollback(); return _public_response({"code": error.code}, 409)
         except (OfferNotFound, ValueError):
             db.rollback(); return _public_error(request)
     return _public_response({"status": response.status, "duplicate": duplicate})

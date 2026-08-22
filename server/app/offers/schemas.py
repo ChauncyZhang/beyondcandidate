@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from server.app.onboarding.schemas import OnboardingData
+
 
 class OfferSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -93,7 +95,7 @@ class OfferDefaultApproverCommand(OfferSchema):
     offer_version: int = Field(ge=0)
 
 
-class PublicOfferResponse(OfferSchema):
+class OfferResponseBase(OfferSchema):
     decision: str
     expected_start_date: date | None = None
     reason_text: str | None = Field(default=None, max_length=2000)
@@ -112,7 +114,20 @@ class PublicOfferResponse(OfferSchema):
         return self
 
 
-class ProxyOfferResponse(PublicOfferResponse):
+class PublicOfferResponse(OfferResponseBase):
+    onboarding_data: OnboardingData | None = None
+
+    @model_validator(mode="after")
+    def validate_onboarding_data(self):
+        if self.decision == "accepted" and self.onboarding_data is None:
+            raise ValueError("accepted offers require onboarding_data")
+        if self.decision == "declined" and self.onboarding_data is not None:
+            raise ValueError("declined offers do not accept onboarding_data")
+        return self
+
+
+class ProxyOfferResponse(OfferResponseBase):
+    onboarding_data: OnboardingData | None = None
     channel: str
     communicated_at: datetime
     note: str | None = Field(default=None, max_length=2000)

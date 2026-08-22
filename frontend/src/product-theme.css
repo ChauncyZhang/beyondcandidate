@@ -440,6 +440,38 @@ input::placeholder, textarea::placeholder { color: #9b9ba1; }
 .offer-response-record dt { color: var(--muted); font-size: 12px; }
 .offer-response-record dd { margin: 3px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .offer-response-record .offer-response-note { grid-column: 1 / -1; }
+.onboarding-panel { min-width: 0; display: grid; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
+.onboarding-panel > header { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.onboarding-panel > header > div:nth-child(2) { min-width: 0; display: grid; gap: 4px; }
+.onboarding-panel h4, .onboarding-panel p { margin: 0; }
+.onboarding-panel p { color: var(--muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.onboarding-panel-icon { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 8px; color: var(--blue); background: var(--blue-soft); }
+.onboarding-status { padding: 5px 9px; border-radius: 999px; color: #5a5a61; background: #eeeef1; font-size: 12px; font-weight: 650; white-space: nowrap; }
+.onboarding-panel.status-submitted { border-color: #b9ddc7; }
+.onboarding-panel.status-submitted .onboarding-status { color: var(--green); background: var(--green-soft); }
+.onboarding-panel.status-submitting .onboarding-status { color: var(--blue); background: var(--blue-soft); }
+.onboarding-panel.status-failed .onboarding-status { color: var(--red); background: #fff0ef; }
+.onboarding-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.onboarding-summary > div { min-width: 0; padding: 12px; border-left: 1px solid var(--line); }
+.onboarding-summary > div:first-child { border-left: 0; }
+.onboarding-summary dt { color: var(--muted); font-size: 12px; }
+.onboarding-summary dd { margin: 5px 0 0; font-weight: 600; overflow-wrap: anywhere; }
+.onboarding-summary dd.is-complete { color: var(--green); }
+.onboarding-summary dd.is-incomplete { color: #8a4d00; }
+.onboarding-message { min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 11px 12px; border-radius: 8px; color: #6b541d; background: var(--orange-soft); }
+.onboarding-message svg { flex: 0 0 auto; margin-top: 1px; }
+.onboarding-message span { min-width: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.onboarding-message.is-error { color: var(--red); background: #fff0ef; }
+.onboarding-message.is-success { color: var(--green); background: var(--green-soft); }
+.onboarding-panel > footer { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 9px; padding-top: 2px; }
+.onboarding-editor-dialog { width: min(680px, 100%); }
+.onboarding-editor-form { gap: 16px; }
+.onboarding-existing-contact { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 12px; border-radius: 8px; color: var(--muted); background: #f7f7f9; }
+.onboarding-existing-contact span { min-width: 0; overflow-wrap: anywhere; }
+.onboarding-existing-contact strong { color: var(--ink-secondary); }
+.onboarding-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.onboarding-form-grid label { display: grid; min-width: 0; gap: 7px; color: var(--ink-secondary); font-size: 13px; font-weight: 600; }
+.onboarding-full-field { grid-column: 1 / -1; }
 .offer-proxy-backdrop { position: fixed; z-index: 120; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(25, 25, 28, .36); backdrop-filter: blur(5px); }
 .offer-proxy-dialog { width: min(580px, 100%); max-height: calc(100dvh - 40px); overflow-y: auto; border: 1px solid rgba(255,255,255,.6); border-radius: var(--radius); background: #fff; box-shadow: var(--shadow-float); }
 .offer-proxy-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
@@ -577,6 +609,14 @@ input::placeholder, textarea::placeholder { color: #9b9ba1; }
   .offer-response-record > header small { text-align: left; }
   .offer-response-record dl { grid-template-columns: 1fr; }
   .offer-response-record .offer-response-note { grid-column: auto; }
+  .onboarding-panel > header { grid-template-columns: 40px minmax(0, 1fr); }
+  .onboarding-status { grid-column: 2; justify-self: start; }
+  .onboarding-summary, .onboarding-existing-contact, .onboarding-form-grid { grid-template-columns: 1fr; }
+  .onboarding-summary > div { border-top: 1px solid var(--line); border-left: 0; }
+  .onboarding-summary > div:first-child { border-top: 0; }
+  .onboarding-full-field { grid-column: auto; }
+  .onboarding-panel > footer { display: grid; grid-template-columns: 1fr; }
+  .onboarding-panel > footer .button { width: 100%; }
   .offer-proxy-backdrop { align-items: end; padding: 0; }
   .offer-proxy-dialog { width: 100%; max-height: 100dvh; border-radius: 0; }
   .offer-proxy-body > footer, .offer-proxy-confirmation > footer { flex-direction: column-reverse; }

@@ -202,6 +202,22 @@ export function createApiClient({ fetchImpl = globalThis.fetch } = {}) {
     async getFeishuConfig() { const response = await request("/api/v1/settings/integrations/feishu"); return response?.data ?? null; },
     async saveFeishuConfig(body) { const response = await request("/api/v1/settings/integrations/feishu", { method: "PUT", body }); return response?.data ?? null; },
     async testFeishuConnection() { const response = await request("/api/v1/settings/integrations/feishu/test", { method: "POST" }); return response?.data ?? null; },
+    async getFeishuOnboardingApprovalConfig() { const response = await request("/api/v1/settings/integrations/feishu/onboarding-approval"); return response?.data ?? null; },
+    async saveFeishuOnboardingApprovalConfig(body, { version } = {}) {
+      const response = await request("/api/v1/settings/integrations/feishu/onboarding-approval", {
+        method: "PUT",
+        body,
+        ...(Number.isInteger(version) ? { ifMatch: `"${version}"` } : {}),
+      });
+      return response?.data ?? null;
+    },
+    async validateFeishuOnboardingApprovalConfig({ version } = {}) {
+      const response = await request("/api/v1/settings/integrations/feishu/onboarding-approval/validate", {
+        method: "POST",
+        ...(Number.isInteger(version) ? { ifMatch: `"${version}"` } : {}),
+      });
+      return response?.data ?? null;
+    },
     async authorizeFeishuLogin(organizationSlug) { const response = await request("/api/v1/auth/feishu/authorize", { method: "POST", body: { organization_slug: organizationSlug } }); return response?.data ?? null; },
     async authorizeFeishuBinding() { const response = await request("/api/v1/me/integrations/feishu/authorize", { method: "POST" }); return response?.data ?? null; },
     async getFeishuBinding() { const response = await request("/api/v1/me/integrations/feishu"); return response?.data ?? null; },
