@@ -16,7 +16,13 @@ from server.app.communications.service import (
 from server.app.identity.models import Job, User, UserStatus
 from server.app.interviews.domain import CalendarContact, build_calendar_invitation
 from server.app.interviews.models import Interview
-from server.app.recruiting.models import Application, Candidate, CandidateContact
+from server.app.recruiting.models import (
+    Application,
+    Candidate,
+    CandidateContact,
+    FileObject,
+    Resume,
+)
 from server.app.recruiting.security import ContactCipher
 
 
@@ -237,10 +243,67 @@ def resolve_confirmed_candidate_email(
         .limit(2)
         .with_for_update()
     ).all())
+    reused_identical_resume_email = False
+    if not contacts:
+        latest_resume_sha = db.scalar(
+            select(FileObject.sha256)
+            .join(
+                Resume,
+                (Resume.organization_id == FileObject.organization_id)
+                & (Resume.file_object_id == FileObject.id),
+            )
+            .where(
+                Resume.organization_id == organization_id,
+                Resume.candidate_id == candidate_id,
+            )
+            .order_by(Resume.version_number.desc(), Resume.created_at.desc())
+            .limit(1)
+        )
+        if latest_resume_sha:
+            contacts = list(db.scalars(
+                select(CandidateContact)
+                .join(
+                    Candidate,
+                    (Candidate.organization_id == CandidateContact.organization_id)
+                    & (Candidate.id == CandidateContact.candidate_id),
+                )
+                .where(
+                    CandidateContact.organization_id == organization_id,
+                    CandidateContact.kind == "email",
+                    Candidate.deleted_at.is_(None),
+                    select(Resume.id)
+                    .join(
+                        FileObject,
+                        (FileObject.organization_id == Resume.organization_id)
+                        & (FileObject.id == Resume.file_object_id),
+                    )
+                    .where(
+                        Resume.organization_id == organization_id,
+                        Resume.candidate_id == Candidate.id,
+                        FileObject.sha256 == latest_resume_sha,
+                    )
+                    .exists(),
+                    or_(
+                        CandidateContact.confirmation_status == "confirmed",
+                        CandidateContact.source.in_(AUTO_USABLE_CANDIDATE_EMAIL_SOURCES),
+                    ),
+                )
+                .order_by(
+                    (CandidateContact.confirmation_status == "confirmed").desc(),
+                    CandidateContact.confirmed_at.desc(),
+                    CandidateContact.created_at.desc(),
+                    CandidateContact.id.desc(),
+                )
+                .limit(2)
+                .with_for_update()
+            ).all())
+            reused_identical_resume_email = bool(contacts)
     if not contacts:
         raise CandidateEmailUnavailable
     contact = contacts[0]
-    if contact.confirmation_status != "confirmed" and len(contacts) > 1:
+    if len(contacts) > 1 and (
+        reused_identical_resume_email or contact.confirmation_status != "confirmed"
+    ):
         raise CandidateEmailUnavailable
     try:
         return contact_cipher.decrypt(contact.ciphertext)

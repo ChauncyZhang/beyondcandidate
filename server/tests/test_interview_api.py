@@ -1226,6 +1226,178 @@ def test_create_interview_accepts_auto_extracted_email_without_manual_confirmati
         assert database.scalar(select(BackgroundJob).where(BackgroundJob.type == "communications.send_email")) is not None
 
 
+def test_create_interview_reuses_unique_email_from_an_identical_resume_candidate(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with app.state.identity_store.sync_session() as database:
+        current_candidate = database.get(Candidate, seed["candidate_id"])
+        current_resume = database.scalar(
+            select(Resume).where(Resume.candidate_id == current_candidate.id)
+        )
+        current_file = database.get(FileObject, current_resume.file_object_id)
+        current_contact = database.scalar(
+            select(CandidateContact).where(CandidateContact.candidate_id == current_candidate.id)
+        )
+        database.delete(current_contact)
+        prior_candidate = Candidate(
+            organization_id=current_candidate.organization_id,
+            display_name=current_candidate.display_name,
+            owner_id=current_candidate.owner_id,
+        )
+        prior_file = FileObject(
+            organization_id=current_candidate.organization_id,
+            storage_key="interviews/prior-resume.pdf",
+            original_filename=current_file.original_filename,
+            mime_type=current_file.mime_type,
+            size_bytes=current_file.size_bytes,
+            sha256=current_file.sha256,
+            uploaded_by=seed["admin_id"],
+        )
+        duplicate_prior_file = FileObject(
+            organization_id=current_candidate.organization_id,
+            storage_key="interviews/prior-resume-copy.pdf",
+            original_filename=current_file.original_filename,
+            mime_type=current_file.mime_type,
+            size_bytes=current_file.size_bytes,
+            sha256=current_file.sha256,
+            uploaded_by=seed["admin_id"],
+        )
+        database.add_all([prior_candidate, prior_file, duplicate_prior_file])
+        database.flush()
+        protected = app.state.contact_cipher.protect("email", "candidate@example.com")
+        database.add_all([
+            Resume(
+                organization_id=current_candidate.organization_id,
+                candidate_id=prior_candidate.id,
+                file_object_id=prior_file.id,
+                version_number=1,
+                parsed_text="Python RAG Agent\nEmail: candidate@example.com",
+            ),
+            Resume(
+                organization_id=current_candidate.organization_id,
+                candidate_id=prior_candidate.id,
+                file_object_id=duplicate_prior_file.id,
+                version_number=2,
+                parsed_text="Python RAG Agent\nEmail: candidate@example.com",
+            ),
+            CandidateContact(
+                organization_id=current_candidate.organization_id,
+                candidate_id=prior_candidate.id,
+                kind="email",
+                ciphertext=protected.ciphertext,
+                lookup_hash=protected.lookup_hash,
+                masked_value=protected.masked_value,
+                source="native",
+                confirmation_status="confirmed",
+                confirmed_by=seed["admin_id"],
+                confirmed_at=datetime.now(timezone.utc),
+                version=1,
+            ),
+        ])
+        database.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/interviews",
+            json=interview_payload(seed),
+            headers={**login(client, "interview-admin@example.test"), "Idempotency-Key": "identical-resume-email"},
+        )
+
+    assert response.status_code == 201
+    with app.state.identity_store.sync_session() as database:
+        assert database.scalar(select(Interview)) is not None
+        assert database.scalar(select(EmailDelivery)) is not None
+        assert database.scalar(
+            select(BackgroundJob).where(BackgroundJob.type == "communications.send_email")
+        ) is not None
+        assert database.scalar(
+            select(CandidateContact).where(CandidateContact.candidate_id == seed["candidate_id"])
+        ) is None
+
+
+def test_create_interview_rejects_ambiguous_emails_from_identical_resume_candidates(tmp_path) -> None:
+    app = make_app(tmp_path)
+    seed = seed_application(app)
+    with app.state.identity_store.sync_session() as database:
+        current_candidate = database.get(Candidate, seed["candidate_id"])
+        current_resume = database.scalar(
+            select(Resume).where(Resume.candidate_id == current_candidate.id)
+        )
+        current_file = database.get(FileObject, current_resume.file_object_id)
+        current_contact = database.scalar(
+            select(CandidateContact).where(CandidateContact.candidate_id == current_candidate.id)
+        )
+        database.delete(current_contact)
+        prior_candidate = Candidate(
+            organization_id=current_candidate.organization_id,
+            display_name=current_candidate.display_name,
+            owner_id=current_candidate.owner_id,
+        )
+        prior_file = FileObject(
+            organization_id=current_candidate.organization_id,
+            storage_key="interviews/ambiguous-prior-resume.pdf",
+            original_filename=current_file.original_filename,
+            mime_type=current_file.mime_type,
+            size_bytes=current_file.size_bytes,
+            sha256=current_file.sha256,
+            uploaded_by=seed["admin_id"],
+        )
+        database.add_all([prior_candidate, prior_file])
+        database.flush()
+        confirmed = app.state.contact_cipher.protect("email", "confirmed@example.com")
+        automatic = app.state.contact_cipher.protect("email", "automatic@example.com")
+        database.add_all([
+            Resume(
+                organization_id=current_candidate.organization_id,
+                candidate_id=prior_candidate.id,
+                file_object_id=prior_file.id,
+                version_number=1,
+                parsed_text="confirmed@example.com automatic@example.com",
+            ),
+            CandidateContact(
+                organization_id=current_candidate.organization_id,
+                candidate_id=prior_candidate.id,
+                kind="email",
+                ciphertext=confirmed.ciphertext,
+                lookup_hash=confirmed.lookup_hash,
+                masked_value=confirmed.masked_value,
+                source="native",
+                confirmation_status="confirmed",
+                confirmed_by=seed["admin_id"],
+                confirmed_at=datetime.now(timezone.utc),
+                version=1,
+            ),
+            CandidateContact(
+                organization_id=current_candidate.organization_id,
+                candidate_id=prior_candidate.id,
+                kind="email",
+                ciphertext=automatic.ciphertext,
+                lookup_hash=automatic.lookup_hash,
+                masked_value=automatic.masked_value,
+                source="ocr",
+                confirmation_status="unconfirmed",
+                version=1,
+            ),
+        ])
+        database.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/interviews",
+            json=interview_payload(seed),
+            headers={**login(client, "interview-admin@example.test"), "Idempotency-Key": "ambiguous-resume-email"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "candidate_email_unconfirmed"
+    with app.state.identity_store.sync_session() as database:
+        assert database.scalar(select(Interview)) is None
+        assert database.scalar(select(EmailDelivery)) is None
+        assert database.scalar(
+            select(BackgroundJob).where(BackgroundJob.type == "communications.send_email")
+        ) is None
+
+
 def test_create_interview_requires_selection_when_multiple_emails_were_auto_extracted(tmp_path) -> None:
     app = make_app(tmp_path)
     seed = seed_application(app)
