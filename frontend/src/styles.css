@@ -496,3 +496,58 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @media (max-width: 760px) {
   .schedule-slot-grid > section:has(button.unconfirmed) { display: block; margin-bottom: 8px; }
 }
+.route-error-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: #f6f7f9;
+}
+
+.route-error-panel {
+  width: min(560px, 100%);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid #dce1e7;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgb(15 23 42 / 8%);
+}
+
+.route-error-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  color: #b42318;
+  border-radius: 50%;
+  background: #fef3f2;
+}
+
+.route-error-panel h1 {
+  margin: 0 0 8px;
+  font-size: 22px;
+  letter-spacing: 0;
+}
+
+.route-error-panel p {
+  margin: 0;
+  color: #667085;
+  line-height: 1.6;
+}
+
+.route-error-actions {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+@media (max-width: 560px) {
+  .route-error-page { padding: 16px; }
+  .route-error-panel { grid-template-columns: 1fr; padding: 20px; }
+  .route-error-actions { grid-column: 1; }
+}

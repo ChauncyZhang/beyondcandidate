@@ -16,13 +16,23 @@ function saveBrowserFile({ blob, filename }) {
 }
 
 export function InterviewFeedbackWorkspace({ record, controller, children }) {
-  const [activePane, setActivePane] = useState("resume");
+  const [activePane, setActivePane] = useState("evaluation");
+  const [wideLayout, setWideLayout] = useState(() => window.matchMedia("(min-width: 1180px)").matches);
   const [resumeState, setResumeState] = useState({ status: "loading", file: null, error: "" });
   const [reload, setReload] = useState(0);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState("");
+  const showResume = wideLayout || activePane === "resume";
 
   useEffect(() => {
+    const query = window.matchMedia("(min-width: 1180px)");
+    const updateLayout = (event) => setWideLayout(event.matches);
+    query.addEventListener("change", updateLayout);
+    return () => query.removeEventListener("change", updateLayout);
+  }, []);
+
+  useEffect(() => {
+    if (!showResume) return undefined;
     const abortController = new AbortController();
     let active = true;
     let previewUrl = "";
@@ -42,7 +52,7 @@ export function InterviewFeedbackWorkspace({ record, controller, children }) {
       abortController.abort();
       if (previewUrl) URL.revokeObjectURL(previewUrl);
     };
-  }, [controller, record.id, reload]);
+  }, [controller, record.id, reload, showResume]);
 
   async function downloadOriginal() {
     setDownloading(true);
@@ -62,7 +72,7 @@ export function InterviewFeedbackWorkspace({ record, controller, children }) {
       <button type="button" role="tab" id="evaluation-tab" aria-controls="evaluation-panel" aria-selected={activePane === "evaluation"} className={activePane === "evaluation" ? "active" : ""} onClick={() => setActivePane("evaluation")}>评价</button>
     </div>
     <div id="resume-panel" role="tabpanel" aria-labelledby="resume-tab" className={`interview-workspace-pane resume-pane ${activePane === "resume" ? "is-active" : ""}`}>
-      <Suspense fallback={<div className="pdf-viewer-state" role="status" aria-live="polite">正在加载 PDF 阅读器</div>}><PdfResumeViewer file={resumeState.file} status={resumeState.status} error={resumeState.error} onRetry={() => setReload((value) => value + 1)} onDownload={() => void downloadOriginal()} downloading={downloading} /></Suspense>
+      {showResume && <Suspense fallback={<div className="pdf-viewer-state" role="status" aria-live="polite">正在加载 PDF 阅读器</div>}><PdfResumeViewer file={resumeState.file} status={resumeState.status} error={resumeState.error} onRetry={() => setReload((value) => value + 1)} onDownload={() => void downloadOriginal()} downloading={downloading} /></Suspense>}
       {downloadError && <div className="workspace-download-error" role="alert"><CircleAlert size={16} />{downloadError}</div>}
     </div>
     <div id="evaluation-panel" role="tabpanel" aria-labelledby="evaluation-tab" className={`interview-workspace-pane evaluation-pane ${activePane === "evaluation" ? "is-active" : ""}`}>
