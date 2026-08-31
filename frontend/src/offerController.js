@@ -104,6 +104,7 @@ function normalizeOffer(value) {
     pdfReady: value?.pdf_ready === true,
     contentReady: value?.content_ready === true,
     sendQueued: value?.send_queued === true,
+    deadlineExpired: value?.deadline_expired === true,
     pendingApprovalId: safeString(value?.pending_approval_id),
     allowedActions: normalizeAllowedActions(value?.allowed_actions),
     response: normalizeResponse(value?.response),

@@ -2,6 +2,7 @@ import hashlib
 import re
 from datetime import datetime, timezone
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse, Response
@@ -157,6 +158,9 @@ def _offer_view(db, offer, principal):
     response = db.scalar(select(OfferResponse).where(OfferResponse.organization_id == offer.organization_id, OfferResponse.offer_id == offer.id))
     content = current.content if current and can_view_sensitive else {"redacted": True}
     content_ready = bool(current and _offer_content_ready(current.content))
+    deadline_expired = bool(
+        current and _utc(current.candidate_response_deadline) <= datetime.now(timezone.utc)
+    )
     send_queued = bool(current and offer.status == "ready_to_send" and db.scalar(select(OfferAccessToken.id).where(
         OfferAccessToken.organization_id == offer.organization_id,
         OfferAccessToken.offer_id == offer.id,
@@ -176,13 +180,14 @@ def _offer_view(db, offer, principal):
         "can_view_sensitive_content": can_view_sensitive,
         "pdf_ready": bool(current and current.pdf_object_key),
         "content_ready": content_ready, "send_queued": send_queued,
+        "deadline_expired": deadline_expired,
         "pending_approval_id": str(pending_approval_id) if pending_approval_id else None,
         "response": _offer_response_view(response),
         "allowed_actions": {
             "update": can_manage and offer.status in {"draft", "changes_requested", "ready_to_send", "sent"},
             "submit": can_manage and offer.status in {"draft", "changes_requested"},
             "withdraw": can_manage and offer.status not in {"withdrawn", "expired"},
-            "send": can_manage and offer.status == "ready_to_send" and current is not None and content_ready and not send_queued,
+            "send": can_manage and offer.status == "ready_to_send" and current is not None and content_ready and not deadline_expired and not send_queued,
             "decide": is_assignee and offer.status == "pending_approval",
             "proxy_response": can_manage and offer.status == "sent" and current is not None and current.id == offer.current_version_id,
         },
@@ -571,8 +576,13 @@ def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(N
                 if offer.version != expected: raise OfferVersionConflict
                 current = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == offer.organization_id, OfferVersion.id == offer.current_version_id).with_for_update())
                 now = datetime.now(timezone.utc)
-                if offer.status != "ready_to_send" or current is None or not _offer_content_ready(current.content) or _utc(current.candidate_response_deadline) <= now:
+                if offer.status != "ready_to_send" or current is None or not _offer_content_ready(current.content):
                     raise OfferApprovalError
+                if _utc(current.candidate_response_deadline) <= now:
+                    raise OfferApprovalError(
+                        "candidate response deadline has expired",
+                        code="offer_response_deadline_expired",
+                    )
                 if request.app.state.settings.offer_public_base_url is None:
                     raise RuntimeError("offer public base URL is not configured")
                 application = db.scalar(select(Application).where(Application.organization_id == offer.organization_id, Application.id == offer.application_id).with_for_update())
@@ -595,7 +605,7 @@ def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(N
                 token, _ = issue_offer_access_token(db, offer.organization_id, offer, current, codec=request.app.state.offer_token_codec, now=now)
                 # The worker reconstructs the capability from token row ID.  Delivery storage holds no link or raw token.
                 brand_name = organization.name if organization else request.app.state.settings.email_from_name
-                deadline = _utc(current.candidate_response_deadline).strftime("%Y-%m-%d %H:%M UTC")
+                deadline = _utc(current.candidate_response_deadline).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
                 message_body = (
                     f"{candidate.display_name}，您好：\n\n"
                     f"感谢您参与 {brand_name} 的招聘流程。经过综合评估，我们诚挚邀请您加入，担任 {job.title}。\n\n"
@@ -614,8 +624,8 @@ def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(N
             db.rollback(); return _error(request, 404, "resource_not_found")
         except OfferVersionConflict:
             db.rollback(); return _error(request, 409, "resource_version_conflict")
-        except OfferApprovalError:
-            db.rollback(); return _error(request, 409, "offer_not_ready_to_send")
+        except OfferApprovalError as error:
+            db.rollback(); return _error(request, 409, error.code if error.code != "invalid_offer_state" else "offer_not_ready_to_send")
         except RuntimeError:
             db.rollback(); return _error(request, 409, "offer_send_unavailable")
         except IdempotencyConflict:

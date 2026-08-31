@@ -23,6 +23,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { apiClient } from "./apiClient.js";
+import { displayOfferDeadline, offerDeadlineDateValue, offerDeadlineEndOfDay } from "./offerDeadline.js";
 import { canPerformAction } from "./roleCapabilities.js";
 import { createProxyResponsePayload, filterEligibleSpecialApprovers } from "./offerController.js";
 
@@ -67,6 +68,8 @@ export function canRenderOfferAction(role, offer, action) {
 export function offerErrorMessage(error, action = "操作") {
   if (error?.code === "resource_version_conflict") return "Offer 已被其他成员更新。当前填写内容已保留，请刷新最新版本后核对。";
   if (error?.code === "candidate_email_unconfirmed") return "候选人邮箱尚未确认，请先确认邮箱后再发送。";
+  if (error?.code === "offer_response_deadline_expired") return "候选人回复截止时间已过，请更新截止时间并重新提交审批。";
+  if (error?.code === "offer_not_ready_to_send") return "Offer 当前状态不可发送，请刷新并核对审批状态和内容。";
   if (error?.code === "offer_send_unavailable") return "当前版本暂不可发送，请稍后重试。";
   if (error?.code === "offer_approver_required") return "当前职位尚未配置默认 Offer 审批人，请先编辑职位并完成配置后再提交。";
   if (error?.code === "offer_approver_ineligible") return "当前职位的默认 Offer 审批人已停用或无审批权限，请先编辑职位并重新选择。";
@@ -130,7 +133,7 @@ function offerDraft(offer) {
     body: content.body || "",
     compensation: content.compensation || "",
     benefits: content.benefits || "",
-    candidateResponseDeadline: deadlineInputValue(offer?.candidateResponseDeadline || offer?.candidate_response_deadline),
+    candidateResponseDeadline: offerDeadlineDateValue(offer?.candidateResponseDeadline || offer?.candidate_response_deadline),
     isSpecial: Boolean(offer?.isSpecial ?? offer?.is_special),
     specialReason: offer?.specialReason || offer?.special_reason || "",
   };
@@ -139,7 +142,7 @@ function offerDraft(offer) {
 function draftPayload(draft) {
   return {
     templateId: draft.templateId || null,
-    candidateResponseDeadline: new Date(draft.candidateResponseDeadline).toISOString(),
+    candidateResponseDeadline: offerDeadlineEndOfDay(draft.candidateResponseDeadline).toISOString(),
     content: {
       title: draft.title.trim(),
       body: draft.body.trim(),
@@ -371,7 +374,8 @@ function OfferDraftForm({ offer, templates, applicationId, controller, role, onS
 
   function validate() {
     if (!draft.title.trim() || !draft.body.trim() || !draft.compensation.trim()) return "请完整填写标题、正文和薪酬方案。";
-    if (!draft.candidateResponseDeadline || Number.isNaN(new Date(draft.candidateResponseDeadline).getTime())) return "请设置候选人回复截止时间。";
+    if (!draft.candidateResponseDeadline || Number.isNaN(offerDeadlineEndOfDay(draft.candidateResponseDeadline).getTime())) return "请设置候选人回复截止日期。";
+    if (offerDeadlineEndOfDay(draft.candidateResponseDeadline).getTime() <= Date.now()) return "候选人回复截止日期不能早于今天。";
     if (draft.isSpecial && !draft.specialReason.trim()) return "特殊 Offer 必须填写说明。";
     return "";
   }
@@ -439,12 +443,13 @@ function OfferDraftForm({ offer, templates, applicationId, controller, role, onS
   }
 
   const busy = status !== "idle";
-  const canSubmit = !offer || canRenderOfferAction(role, offer, "submit");
+  const canSubmit = !offer || canRenderOfferAction(role, offer, "submit") || offer.status === "ready_to_send";
   return <form className="offer-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
     {offer?.status === "changes_requested" && <header className="offer-form-heading"><Undo2 size={20} /><div><h4>修改 Offer</h4><p>请按审批意见调整下方内容。修改完成后点击“保存并提交审批”，系统会重新发起审批。</p></div></header>}
+    {offer?.status === "ready_to_send" && <header className="offer-form-heading"><Clock3 size={20} /><div><h4>更新候选人回复截止时间</h4><p>原截止时间已过。修改后点击“保存并提交审批”，系统会为新版本重新发起审批。</p></div></header>}
     <div className="offer-form-grid">
       <label className="offer-compact-field">Offer 模板<select aria-label="Offer 模板" disabled={busy} value={draft.templateId} onChange={(event) => change("templateId", event.target.value)}><option value="">使用职位默认模板</option>{templates.map((item) => <option key={item.id} value={item.id} disabled={item.status === "inactive" && item.id !== draft.templateId}>{item.name}{item.status === "inactive" ? "（已停用）" : ""}</option>)}</select><small>{templates.length ? "可覆盖职位默认模板。" : "未加载到可选模板，将使用职位默认模板。"}</small></label>
-      <label className="offer-compact-field">候选人回复截止时间<input aria-label="候选人回复截止时间" required type="datetime-local" disabled={busy} value={draft.candidateResponseDeadline} onChange={(event) => change("candidateResponseDeadline", event.target.value)} /><small>候选人需要在此时间前完成确认。</small></label>
+      <label className="offer-compact-field">候选人回复截止日期<input aria-label="候选人回复截止日期" required type="date" min={offerDeadlineDateValue(new Date())} disabled={busy} value={draft.candidateResponseDeadline} onChange={(event) => change("candidateResponseDeadline", event.target.value)} /><small>候选人可在所选日期当天完成确认。</small></label>
       <label className="offer-full-field">Offer 标题<input aria-label="Offer 标题" required disabled={busy} value={draft.title} onChange={(event) => change("title", event.target.value)} placeholder="例如：正式录用通知" /></label>
       <label className="offer-full-field">Offer 正文<textarea aria-label="Offer 正文" required rows="7" disabled={busy} value={draft.body} onChange={(event) => change("body", event.target.value)} placeholder="填写岗位、汇报关系、入职安排等内容" /></label>
       <label>薪酬方案<textarea aria-label="薪酬方案" required rows="4" disabled={busy} value={draft.compensation} onChange={(event) => change("compensation", event.target.value)} /></label>
@@ -702,10 +707,10 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
     return () => { active = false; clearInterval(timer); };
   }, [applicationId, controller, onNotify, state.offer?.applicationId, state.onboarding?.status]);
 
-  async function run(name, command, message) {
+  async function run(name, command, message, errorAction = message) {
     setAction(name);
     try { const offer = await command(); setState((current) => ({ ...current, offer })); onNotify(message); await load(); }
-    catch (error) { setState((current) => ({ ...current, error: offerErrorMessage(error, message) })); }
+    catch (error) { setState((current) => ({ ...current, error: offerErrorMessage(error, errorAction) })); }
     finally { setAction(""); }
   }
 
@@ -718,30 +723,35 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
   const sensitive = Boolean(offer.canViewSensitiveContent ?? offer.can_view_sensitive_content);
   const contentReady = Boolean(offer.contentReady ?? offer.content_ready);
   const sendQueued = Boolean(offer.sendQueued ?? offer.send_queued);
+  const deadlineValue = offer.candidateResponseDeadline || offer.candidate_response_deadline;
+  const deadlineExpired = Boolean(offer.deadlineExpired ?? offer.deadline_expired)
+    || (deadlineValue && !Number.isNaN(new Date(deadlineValue).getTime()) && new Date(deadlineValue).getTime() <= Date.now());
   const decisionApprovalId = approvalId || offer.pendingApprovalId || offer.pending_approval_id;
   const canDecide = canRenderOfferAction(role, offer, "decide") && Boolean(decisionApprovalId);
   const latestRejectionReason = state.history?.approvals?.slice().reverse().find((item) => item.status === "rejected")?.reason;
-  const deadline = displayDate(offer.candidateResponseDeadline || offer.candidate_response_deadline);
+  const deadline = displayOfferDeadline(deadlineValue);
   return <div className="offer-workspace">
-    <header className="offer-heading"><div><h3>Offer 管理</h3><p>{[offer.candidateName, offer.jobTitle].filter(Boolean).join(" · ") || "办理 Offer 审批、发送与候选人确认。"}</p><span className="offer-heading-meta"><Clock3 size={15} />候选人回复截止：{deadline}</span></div><span className={`offer-status ${offer.status}`}>{offerStatusLabel(offer.status)}</span></header>
+    <header className="offer-heading"><div><h3>Offer 管理</h3><p>{[offer.candidateName, offer.jobTitle].filter(Boolean).join(" · ") || "办理 Offer 审批、发送与候选人确认。"}</p><span className="offer-heading-meta"><Clock3 size={15} />候选人回复截止日期：{deadline}</span></div><span className={`offer-status ${offer.status}`}>{offerStatusLabel(offer.status)}</span></header>
     <OfferProgress status={offer.status} />
     {state.error && <div className="offer-error" role="alert"><AlertTriangle size={17} />{state.error}<button type="button" onClick={() => void load()}>刷新</button></div>}
     {offer.status === "pending_approval" && <div className="offer-pending-notice" role="status"><Clock3 size={20} /><div className="offer-notice-content"><strong>{canDecide ? "该 Offer 等待你审批" : "Offer 已提交审批"}</strong><small>{canDecide ? "请核对下方 Offer 内容并完成审批；批准后将交由 HR 明确发送。" : "当前暂不需要 HR 操作。审批通过后，本页会出现“确认并发送 Offer”按钮。"}</small></div><button className="button secondary" type="button" disabled={state.status === "loading"} onClick={() => void load()}><RefreshCw size={16} />刷新状态</button></div>}
-    {offer.status === "ready_to_send" && <div className={`offer-ready-notice${sendQueued ? " is-sending" : ""}`} role="status" aria-live="polite"><CheckCircle2 size={20} /><div className="offer-notice-content"><strong>{sendQueued ? "发送请求已提交" : contentReady ? "审批已完成，但尚未发送" : "Offer 信息不完整"}</strong><small>{sendQueued ? "邮件正在投递，页面会自动更新发送结果。" : !contentReady ? "请返回修改并补全 Offer 标题、正文和薪酬方案。" : canRenderOfferAction(role, offer, "send") ? "请 HR 核对 Offer 内容和候选人邮箱后，点击“确认并发送 Offer”。" : "当前账号无发送权限，请联系负责 HR 操作。"}</small></div></div>}
+    {offer.status === "ready_to_send" && (deadlineExpired
+      ? <div className="offer-changes-notice" role="alert"><AlertTriangle size={20} /><div className="offer-notice-content"><strong>候选人回复截止时间已过</strong><small>请在下方设置新的截止时间并重新提交审批；当前版本不会进入发送队列。</small></div></div>
+      : <div className={`offer-ready-notice${sendQueued ? " is-sending" : ""}`} role="status" aria-live="polite"><CheckCircle2 size={20} /><div className="offer-notice-content"><strong>{sendQueued ? "发送请求已提交" : contentReady ? "审批已完成，但尚未发送" : "Offer 信息不完整"}</strong><small>{sendQueued ? "邮件正在投递，页面会自动更新发送结果。" : !contentReady ? "请返回修改并补全 Offer 标题、正文和薪酬方案。" : canRenderOfferAction(role, offer, "send") ? "请 HR 核对 Offer 内容和候选人邮箱后，点击“确认并发送 Offer”。" : "当前账号无发送权限，请联系负责 HR 操作。"}</small></div></div>)}
     {offer.status === "sent" && <div className="offer-sent-notice" role="status"><CheckCircle2 size={20} /><div className="offer-notice-content"><strong>Offer 已发送</strong><small>邮件已投递，正在等待候选人确认；候选人需在 {deadline} 前回复。</small></div></div>}
     {offer.status === "changes_requested" && <div className="offer-changes-notice" role="alert"><Undo2 size={20} /><div className="offer-notice-content"><strong>审批未通过，需要修改 Offer</strong><p><b>退回原因：</b>{latestRejectionReason || "审批人未填写具体原因，请联系审批人确认。"}</p><small>请在下方修改内容，保存后重新提交审批。</small></div></div>}
     {["accepted", "declined"].includes(offer.status) && <section className="offer-result" aria-labelledby="offer-result-title"><h4 id="offer-result-title">最终确认结果</h4><OfferResponseRecord response={offer.response || state.history?.responses?.at(-1)} current /></section>}
     {offer.status === "accepted" && <OnboardingSection onboarding={state.onboarding || offer.onboarding} loadingError={state.onboardingError} controller={controller} onChanged={(onboarding) => setState((current) => ({ ...current, onboarding, onboardingError: "" }))} onNotify={onNotify} />}
     {!sensitive ? <div className="offer-redacted" role="status"><ShieldCheck size={22} /><strong>敏感内容已由服务端隐藏</strong><span>当前账号只能查看 Offer 状态，薪酬和正文不会在浏览器中展示。</span></div> : <>
-      {["draft", "changes_requested"].includes(offer.status) && canRenderOfferAction(role, offer, "update") && <OfferDraftForm offer={offer} templates={state.templates} applicationId={applicationId} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} />}
-      {!(["draft", "changes_requested"].includes(offer.status) && canRenderOfferAction(role, offer, "update")) && <section className="offer-preview" aria-labelledby="offer-preview-title"><header><h4 id="offer-preview-title">Offer 预览</h4>{offer.isSpecial ?? offer.is_special ? <span>特殊 Offer</span> : null}</header><h5>{offer.content?.title || "正式录用通知"}</h5><p className="offer-body-copy">{offer.content?.body || "正文未填写"}</p><dl><div><dt>薪酬方案</dt><dd>{offer.content?.compensation || "未填写"}</dd></div><div><dt>福利与补充说明</dt><dd>{offer.content?.benefits || "未填写"}</dd></div>{(offer.specialReason || offer.special_reason) && <div><dt>特殊说明</dt><dd>{offer.specialReason || offer.special_reason}</dd></div>}</dl></section>}
+      {(["draft", "changes_requested"].includes(offer.status) || (offer.status === "ready_to_send" && deadlineExpired)) && canRenderOfferAction(role, offer, "update") && <OfferDraftForm offer={offer} templates={state.templates} applicationId={applicationId} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} />}
+      {!((["draft", "changes_requested"].includes(offer.status) || (offer.status === "ready_to_send" && deadlineExpired)) && canRenderOfferAction(role, offer, "update")) && <section className="offer-preview" aria-labelledby="offer-preview-title"><header><h4 id="offer-preview-title">Offer 预览</h4>{offer.isSpecial ?? offer.is_special ? <span>特殊 Offer</span> : null}</header><h5>{offer.content?.title || "正式录用通知"}</h5><p className="offer-body-copy">{offer.content?.body || "正文未填写"}</p><dl><div><dt>薪酬方案</dt><dd>{offer.content?.compensation || "未填写"}</dd></div><div><dt>福利与补充说明</dt><dd>{offer.content?.benefits || "未填写"}</dd></div>{(offer.specialReason || offer.special_reason) && <div><dt>特殊说明</dt><dd>{offer.specialReason || offer.special_reason}</dd></div>}</dl></section>}
     </>}
     {canDecide && <ApprovalDecision offer={offer} approvalId={decisionApprovalId} controller={controller} onSaved={(saved) => setState((current) => ({ ...current, offer: saved }))} onNotify={onNotify} />}
     <div className="offer-actions">
       {canRenderOfferAction(role, offer, "withdraw") && <button className="button secondary" type="button" disabled={Boolean(action)} onClick={() => void run("withdraw", () => controller.withdraw(offer), "Offer 已撤回")}><XCircle size={16} />{action === "withdraw" ? "撤回中…" : "撤回 Offer"}</button>}
-      {canRenderOfferAction(role, offer, "send") && <button className="button primary" type="button" disabled={Boolean(action)} onClick={() => void run("send", () => controller.send(offer), "已加入发送队列")}><Send size={16} />{action === "send" ? "提交中…" : "确认并发送 Offer"}</button>}
+      {canRenderOfferAction(role, offer, "send") && <button className="button primary" type="button" disabled={Boolean(action)} onClick={() => void run("send", () => controller.send(offer), "已加入发送队列", "Offer 发送")}><Send size={16} />{action === "send" ? "提交中…" : "确认并发送 Offer"}</button>}
       {offer.status === "sent" && canRenderOfferAction(role, offer, "proxy_response") && <button ref={proxyButtonRef} className="button primary" type="button" disabled={Boolean(action)} onClick={() => setProxyOpen(true)}><CheckCircle2 size={16} />代候选人确认</button>}
-      {offer.status === "ready_to_send" && !canRenderOfferAction(role, offer, "send") && <button className="button secondary" type="button" disabled aria-disabled="true"><Send size={16} />{sendQueued ? "邮件发送中" : contentReady ? "当前账号无发送权限" : "请先补全 Offer"}</button>}
+      {offer.status === "ready_to_send" && !canRenderOfferAction(role, offer, "send") && <button className="button secondary" type="button" disabled aria-disabled="true"><Send size={16} />{sendQueued ? "邮件发送中" : deadlineExpired ? "请先更新截止时间" : contentReady ? "当前账号无发送权限" : "请先补全 Offer"}</button>}
     </div>
     <OfferHistory history={state.history} />
     {proxyOpen && <ProxyResponseDialog offer={offer} controller={controller} onClose={closeProxyDialog} onResolved={async (saved) => { setState((current) => ({ ...current, offer: saved, error: "" })); await load(); }} onNotify={onNotify} />}

@@ -36,4 +36,6 @@ test("public Offer page is company branded, HTML first, and keeps PDF optional",
   for (const field of ["性别", "手机号", "邮箱", "家庭住址"]) assert.match(source, new RegExp(field));
   assert.doesNotMatch(source, /身份证|电子签名/);
   assert.match(source, /确认婉拒 Offer/);
+  assert.match(source, /displayOfferDeadline/);
+  assert.doesNotMatch(source, /hour: "2-digit"|minute: "2-digit"/);
 });

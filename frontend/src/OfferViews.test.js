@@ -25,8 +25,12 @@ test("Offer workspace makes approval state and the next HR action explicit", () 
 });
 
 test("Offer form and history use stable aligned structures", () => {
-  assert.match(source, /className="offer-compact-field">候选人回复截止时间/);
-  assert.match(source, /候选人需要在此时间前完成确认/);
+  assert.match(source, /className="offer-compact-field">候选人回复截止日期/);
+  assert.match(source, /type="date"/);
+  assert.match(source, /offerDeadlineDateValue/);
+  assert.match(source, /offerDeadlineEndOfDay/);
+  assert.match(source, /displayOfferDeadline/);
+  assert.match(source, /候选人可在所选日期当天完成确认/);
   assert.match(source, /审批记录/);
   assert.match(source, /退回原因/);
   assert.match(source, /请根据以上意见修改 Offer/);
@@ -50,6 +54,18 @@ test("approved Offer remains explicitly unsent until HR acts", () => {
   assert.doesNotMatch(source, /PDF 生成中/);
   assert.doesNotMatch(source, /disabled=\{Boolean\(action\) \|\| !\(offer\.pdfReady \?\? offer\.pdf_ready\)\}/);
   assert.doesNotMatch(source, /发送功能暂未开放|Task 9 安全令牌流程接入后开放/);
+});
+
+test("expired approved Offer explains the conflict and exposes a revision path", () => {
+  assert.match(source, /offer_response_deadline_expired/);
+  assert.match(source, /候选人回复截止时间已过，请更新截止时间并重新提交审批/);
+  assert.match(source, /候选人回复截止日期不能早于今天/);
+  assert.match(source, /deadlineExpired/);
+  assert.match(source, /当前版本不会进入发送队列/);
+  assert.match(source, /更新候选人回复截止时间/);
+  assert.match(source, /系统会为新版本重新发起审批/);
+  assert.match(source, /"已加入发送队列", "Offer 发送"/);
+  assert.match(source, /请先更新截止时间/);
 });
 
 test("special Offer requires an explicit explanation", () => {

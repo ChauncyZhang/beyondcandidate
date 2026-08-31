@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
@@ -181,7 +181,21 @@ def test_offer_lifecycle_is_idempotent_versioned_and_sends_html_without_pdf(tmp_
         incomplete = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["admin"]))
         blocked_send = client.post(f"/api/v1/offers/{offer_id}/send", headers={**login(client, seed["admin"]), "Idempotency-Key": "send-incomplete", "If-Match": '"3"'})
         with app.state.identity_store.sync_session() as db:
-            db.scalar(select(OfferVersion).where(OfferVersion.offer_id == UUID(offer_id))).content = content
+            offer_row = db.get(Offer, UUID(offer_id))
+            version_row = db.scalar(select(OfferVersion).where(OfferVersion.offer_id == UUID(offer_id)))
+            version_row.content = content
+            expired_deadline = datetime.now(timezone.utc) - timedelta(minutes=1)
+            offer_row.candidate_response_deadline = expired_deadline
+            version_row.candidate_response_deadline = expired_deadline
+            db.commit()
+        expired = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["admin"]))
+        expired_send = client.post(f"/api/v1/offers/{offer_id}/send", headers={**login(client, seed["admin"]), "Idempotency-Key": "send-expired", "If-Match": '"3"'})
+        with app.state.identity_store.sync_session() as db:
+            offer_row = db.get(Offer, UUID(offer_id))
+            version_row = db.scalar(select(OfferVersion).where(OfferVersion.offer_id == UUID(offer_id)))
+            future_deadline = datetime(2099, 8, 20, tzinfo=timezone.utc)
+            offer_row.candidate_response_deadline = future_deadline
+            version_row.candidate_response_deadline = future_deadline
             db.commit()
         ready = client.get(f"/api/v1/offers/{offer_id}", headers=login(client, seed["admin"]))
         history = client.get(f"/api/v1/offers/{offer_id}/history", headers=login(client, seed["approver"]))
@@ -222,7 +236,13 @@ def test_offer_lifecycle_is_idempotent_versioned_and_sends_html_without_pdf(tmp_
     assert incomplete.json()["data"]["content_ready"] is False
     assert incomplete.json()["data"]["allowed_actions"]["send"] is False
     assert blocked_send.status_code == 409
+    assert expired.status_code == 200
+    assert expired.json()["data"]["deadline_expired"] is True
+    assert expired.json()["data"]["allowed_actions"]["send"] is False
+    assert expired_send.status_code == 409
+    assert expired_send.json()["code"] == "offer_response_deadline_expired"
     assert ready.json()["data"]["allowed_actions"]["send"] is True
+    assert ready.json()["data"]["deadline_expired"] is False
     assert len(history.json()["data"]["versions"]) == 1
     assert history.json()["data"]["versions"][0]["content"] == content
     assert history.json()["data"]["approvals"][0]["status"] == "approved"
@@ -237,7 +257,8 @@ def test_offer_lifecycle_is_idempotent_versioned_and_sends_html_without_pdf(tmp_
     assert queued[0].resource_type == "offer_access_token"
     assert "录用通知" in queued[0].subject and "Offer role" in queued[0].subject
     assert "Candidate" in queued[0].body and "{{offer_public_link}}" in queued[0].body
-    for response in (created, replay, missing, submitted, denied, approver_offer, pending, approved, incomplete, blocked_send, ready, history, redacted, send):
+    assert "回复截止：2099-08-20" in queued[0].body and "UTC" not in queued[0].body
+    for response in (created, replay, missing, submitted, denied, approver_offer, pending, approved, incomplete, blocked_send, expired, expired_send, ready, history, redacted, send):
         assert response.headers["Cache-Control"] == "no-store"
 
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BadgeCheck, BriefcaseBusiness, Check, Clock3, Download, FileLock2, RefreshCw, ShieldCheck } from "lucide-react";
+import { displayOfferDeadline } from "./offerDeadline.js";
 import { publicOfferController } from "./publicOfferController.js";
 import { publicOfferLoadState, publicOfferState, responseBody } from "./publicOfferViewState.js";
 import "./product-theme-public-offer.css";
@@ -12,13 +13,6 @@ const terminal = {
   superseded: ["Offer 已更新", "该链接对应的版本已失效，请使用最新邮件中的链接。"],
   invalid: ["链接无效", "该 Offer 链接无效或已失效。"],
 };
-
-function displayDeadline(value) {
-  if (!value) return "请联系招聘团队";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString("zh-CN", { hour12: false, year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" });
-}
 
 function todayInputValue() {
   const date = new Date();
@@ -143,7 +137,7 @@ export function PublicOfferView({ token, controller = publicOfferController }) {
         {offer.benefits && <section className="public-offer-section"><h2><BadgeCheck size={19} />福利与补充说明</h2><p>{offer.benefits}</p></section>}
         <section className="public-offer-section"><h2><FileLock2 size={19} />确认说明</h2><p>本页面内容仅供您本人查阅。请在回复截止时间前确认是否接受；如有疑问，请先联系招聘负责人。</p></section>
 
-        <div className="public-offer-deadline"><Clock3 size={19} /><span><strong>请于 {displayDeadline(offer.deadline)} 前回复</strong><small>超过截止时间后，确认链接将自动失效。</small></span></div>
+        <div className="public-offer-deadline"><Clock3 size={19} /><span><strong>请于 {offer.deadline ? displayOfferDeadline(offer.deadline) : "请联系招聘团队"} 前回复</strong><small>超过截止时间后，确认链接将自动失效。</small></span></div>
 
         <div className="public-offer-actions">
           <div className="public-offer-contact"><strong>招聘联系人</strong><span>{offer.contact || "请回复 Offer 邮件联系招聘团队"}</span>{offer.pdfAvailable && <button className="public-offer-download" type="button" disabled={pdf.loading} onClick={() => void downloadPdf()}><Download size={15} />{pdf.loading ? "正在准备…" : "下载 Offer 文件"}</button>}{pdf.error && <small role="alert">{pdf.error}</small>}</div>
