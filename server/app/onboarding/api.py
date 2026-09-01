@@ -22,6 +22,7 @@ from server.app.onboarding.service import (
     OnboardingVersionConflict,
     create_onboarding_from_accepted_offer,
     onboarding_projection,
+    normalize_stored_field_mapping,
     start_onboarding_submission,
     update_onboarding,
     validate_definition,
@@ -214,6 +215,7 @@ def submit_onboarding(
                 expected_version=expected,
                 generation=generation,
                 actor_user_id=principal.user_id,
+                cipher=request.app.state.onboarding_pii_cipher,
                 now=now,
                 trace_id=request.state.trace_id,
             )
@@ -236,7 +238,7 @@ def _config_view(config, mappings):
             "type": value.get("control_type", value.get("type")),
             **({"options": value["options"]} if value.get("options") is not None else {}),
         }
-        for semantic, value in config.field_mapping.items()
+        for semantic, value in normalize_stored_field_mapping(config.field_mapping).items()
     }
     return {
         "configured": True,
@@ -300,7 +302,11 @@ def put_onboarding_config(
                 return expected
             if config.version != expected:
                 return problem(request, 409, "resource_version_conflict", "The Feishu onboarding configuration changed.")
-        definition_unchanged = bool(config and config.approval_code == payload.approval_code and config.field_mapping == mapping_value)
+        definition_unchanged = bool(
+            config
+            and config.approval_code == payload.approval_code
+            and normalize_stored_field_mapping(config.field_mapping) == mapping_value
+        )
         if payload.enabled and (config is None or not definition_unchanged or config.validation_status != "valid"):
             return problem(request, 409, "feishu_onboarding_validation_required", "Validate the approval definition before enabling it.")
         if config is None:
@@ -369,7 +375,8 @@ def validate_onboarding_config(request: Request, if_match: str | None = Header(d
             base.calendar_id,
         )
         config_id, config_version = config.id, config.version
-        approval_code, field_mapping = config.approval_code, config.field_mapping
+        approval_code = config.approval_code
+        field_mapping = normalize_stored_field_mapping(config.field_mapping)
 
     definition = None
     safe_error_code = None

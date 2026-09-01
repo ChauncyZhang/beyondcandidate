@@ -14,13 +14,13 @@ export const FEISHU_ONBOARDING_FIELDS = Object.freeze([
   { key: "phone", label: "手机号", defaultType: "telephone" },
   { key: "email", label: "邮箱", defaultType: "input" },
   { key: "home_address", label: "家庭住址", defaultType: "textarea" },
-  { key: "expected_start_date", label: "预计到岗日期", defaultType: "date" },
 ]);
 
 export const FEISHU_APPROVAL_CONTROL_TYPES = Object.freeze([
   { value: "input", label: "单行文本" },
   { value: "textarea", label: "多行文本" },
   { value: "radio", label: "单选" },
+  { value: "radioV2", label: "单选（新版）" },
   { value: "department", label: "部门" },
   { value: "telephone", label: "电话" },
   { value: "date", label: "日期" },
@@ -68,7 +68,6 @@ function normalizeFieldMapping(value) {
         options: {
           male: safeString(mapping.options?.male) || "男",
           female: safeString(mapping.options?.female) || "女",
-          other: safeString(mapping.options?.other) || "其他",
         },
       } : {}),
     }];
@@ -118,7 +117,6 @@ export function buildFeishuOnboardingApprovalPayload(draft) {
           options: {
             male: safeString(mapping.options?.male).trim(),
             female: safeString(mapping.options?.female).trim(),
-            other: safeString(mapping.options?.other).trim(),
           },
         } : {}),
       }];
@@ -135,8 +133,8 @@ export function getFeishuOnboardingApprovalErrorMessage(errorOrCode) {
   const messages = {
     feishu_approval_control_unsupported: "审批模板包含不支持的入职专用控件，请改用普通文本、单选、部门、电话和日期控件。",
     feishu_approval_option_metadata_missing: "无法读取性别控件的选项，请确认使用普通单选控件后重新校验。",
-    feishu_approval_option_invalid: "性别选项 ID 与飞书模板不一致，请重新填写男、女、其他对应的选项 ID。",
-    feishu_approval_option_duplicate: "男、女、其他必须分别映射到三个不同的飞书选项 ID。",
+    feishu_approval_option_invalid: "性别选项 ID 与飞书模板不一致，请重新填写男、女对应的选项 ID。",
+    feishu_approval_option_duplicate: "男、女必须分别映射到两个不同的飞书选项 ID。",
     feishu_approval_permission_denied: "飞书应用缺少审批定义读取或审批实例创建权限，请补充权限并发布最新版本。",
     feishu_onboarding_initiator_unbound: "办理入职的 HR 必须先在个人设置中绑定飞书账号。",
     feishu_department_unmapped: "仍有本地部门未填写飞书部门 ID，请补充后再校验。",

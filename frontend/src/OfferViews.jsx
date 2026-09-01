@@ -490,10 +490,12 @@ const ONBOARDING_STATUS_LABELS = Object.freeze({
 });
 
 const ONBOARDING_ERROR_MESSAGES = Object.freeze({
+  feishu_onboarding_not_configured: "飞书入职审批尚未配置，请管理员前往“设置 → 飞书集成 → 入职审批”完成配置并校验。",
   feishu_onboarding_disabled: "飞书入职审批尚未启用，请管理员先完成配置。",
   feishu_onboarding_config_invalid: "飞书入职审批模板未通过校验，请管理员检查配置。",
   feishu_onboarding_initiator_unbound: "当前 HR 尚未绑定飞书账号，请先在个人设置中完成绑定。",
   feishu_department_unmapped: "该职位所属部门尚未映射到飞书部门，请管理员补充映射。",
+  onboarding_gender_invalid: "候选人性别资料需要更正，请点击“修改资料”并选择男或女。",
   feishu_approval_control_unsupported: "当前飞书审批模板包含暂不支持的控件，请管理员更换控件后重新校验。",
   feishu_approval_option_metadata_missing: "飞书审批模板的性别选项无法读取，请管理员检查模板配置。",
   feishu_approval_option_invalid: "飞书审批模板的性别选项配置不一致，请管理员重新校验。",
@@ -508,7 +510,8 @@ function onboardingErrorMessage(code, fallback = "入职办理暂时未完成，
 }
 
 function OnboardingEditorDialog({ onboarding, controller, onClose, onSaved }) {
-  const [values, setValues] = useState({ name: "", gender: "", phone: "", email: "", homeAddress: "", expectedStartDate: onboarding.expectedStartDate || "" });
+  const genderCorrectionOnly = onboarding.status === "failed" && onboarding.blockingReason === "onboarding_gender_invalid";
+  const [values, setValues] = useState({ name: "", gender: "", phone: "", email: "", homeAddress: "", expectedStartDate: genderCorrectionOnly ? "" : onboarding.expectedStartDate || "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const titleRef = useRef(null);
@@ -538,11 +541,13 @@ function OnboardingEditorDialog({ onboarding, controller, onClose, onSaved }) {
   async function save(event) {
     event.preventDefault();
     if (busy) return;
-    const changed = Object.entries(values).some(([key, value]) => key === "expectedStartDate" ? value !== onboarding.expectedStartDate : value.trim());
+    const changed = genderCorrectionOnly
+      ? Boolean(values.gender)
+      : Object.entries(values).some(([key, value]) => key === "expectedStartDate" ? value !== onboarding.expectedStartDate : value.trim());
     if (!changed) { setError("请至少补充或修改一项资料。"); return; }
     setBusy(true); setError("");
     try {
-      const saved = await controller.updateOnboarding(onboarding, values);
+      const saved = await controller.updateOnboarding(onboarding, genderCorrectionOnly ? { gender: values.gender } : values);
       onSaved(saved);
       onClose();
     } catch (requestError) {
@@ -556,14 +561,14 @@ function OnboardingEditorDialog({ onboarding, controller, onClose, onSaved }) {
     <section ref={dialogRef} className="offer-proxy-dialog onboarding-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="onboarding-editor-title">
       <header><div><h2 id="onboarding-editor-title" ref={titleRef} tabIndex="-1">补充入职资料</h2><p>只填写需要补充或更正的项目；已保存的联系方式仅显示掩码，不会在页面回显明文。</p></div><button type="button" aria-label="关闭入职资料" disabled={busy} onClick={onClose}>×</button></header>
       <form className="offer-proxy-body onboarding-editor-form" onSubmit={save}>
-        <div className="onboarding-existing-contact"><span>已保存手机：<strong>{onboarding.maskedPhone || "未提供"}</strong></span><span>已保存邮箱：<strong>{onboarding.maskedEmail || "未提供"}</strong></span></div>
+        {!genderCorrectionOnly && <div className="onboarding-existing-contact"><span>已保存手机：<strong>{onboarding.maskedPhone || "未提供"}</strong></span><span>已保存邮箱：<strong>{onboarding.maskedEmail || "未提供"}</strong></span></div>}
         <div className="onboarding-form-grid">
-          <label>姓名<input autoComplete="name" disabled={busy} value={values.name} onChange={(event) => change("name", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>
-          <label>性别<select disabled={busy} value={values.gender} onChange={(event) => change("gender", event.target.value)}><option value="">保持现有信息</option><option value="male">男</option><option value="female">女</option><option value="other">其他</option></select></label>
-          <label>手机号<input autoComplete="tel" disabled={busy} value={values.phone} onChange={(event) => change("phone", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>
-          <label>邮箱<input type="email" autoComplete="email" disabled={busy} value={values.email} onChange={(event) => change("email", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>
-          <label className="onboarding-full-field">家庭住址<input autoComplete="street-address" disabled={busy} value={values.homeAddress} onChange={(event) => change("homeAddress", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>
-          <label className="onboarding-full-field">预计到岗日期<input type="date" disabled={busy} value={values.expectedStartDate} onChange={(event) => change("expectedStartDate", event.target.value)} /></label>
+          {!genderCorrectionOnly && <label>姓名<input autoComplete="name" disabled={busy} value={values.name} onChange={(event) => change("name", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>}
+          <label>性别<select disabled={busy} value={values.gender} onChange={(event) => change("gender", event.target.value)}><option value="">保持现有信息</option><option value="male">男</option><option value="female">女</option></select></label>
+          {!genderCorrectionOnly && <label>手机号<input autoComplete="tel" disabled={busy} value={values.phone} onChange={(event) => change("phone", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>}
+          {!genderCorrectionOnly && <label>邮箱<input type="email" autoComplete="email" disabled={busy} value={values.email} onChange={(event) => change("email", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>}
+          {!genderCorrectionOnly && <label className="onboarding-full-field">家庭住址<input autoComplete="street-address" disabled={busy} value={values.homeAddress} onChange={(event) => change("homeAddress", event.target.value)} placeholder="仅在缺失或需要更正时填写" /></label>}
+          {!genderCorrectionOnly && <label className="onboarding-full-field">预计到岗日期<input type="date" disabled={busy} value={values.expectedStartDate} onChange={(event) => change("expectedStartDate", event.target.value)} /></label>}
         </div>
         {error && <div className="offer-error" role="alert"><AlertTriangle size={17} />{error}</div>}
         <footer><button className="button secondary" type="button" disabled={busy} onClick={onClose}>取消</button><button className="button primary" type="submit" disabled={busy}>{busy ? "保存中…" : "保存入职资料"}</button></footer>
@@ -589,7 +594,7 @@ function OnboardingSection({ onboarding, loadingError, controller, onChanged, on
   const canStart = onboarding.complete && onboarding.canSubmit && !submitted && !submitting;
   const statusText = ONBOARDING_STATUS_LABELS[onboarding.status] || "待准备";
   const blocker = !onboarding.complete
-    ? "入职资料尚未完整，请先补充后再办理。"
+    ? onboardingErrorMessage(onboarding.blockingReason, "入职资料尚未完整，请先补充后再办理。")
     : !onboarding.canSubmit && !submitted && !submitting
       ? `预计到岗日 ${displayDate(onboarding.expectedStartDate, true)} 到达后可办理入职。`
       : failed

@@ -78,6 +78,7 @@ test("Offer projection normalizes snake and camel onboarding fields without expo
       complete: true,
       can_submit: false,
       allowed_actions: { update: true },
+      blocking_reason: "onboarding_gender_invalid",
       safe_error_code: "",
       instance_code: "",
     },
@@ -96,10 +97,11 @@ test("Offer projection normalizes snake and camel onboarding fields without expo
     complete: true,
     canSubmit: false,
     canUpdate: true,
+    blockingReason: "onboarding_gender_invalid",
     safeErrorCode: "",
     instanceCode: "",
   });
-  assert.equal(normalizeOnboarding({ canSubmit: true, expectedStartDate: "2026-09-16" }).canSubmit, true);
+  assert.equal(normalizeOnboarding({ canSubmit: true, expectedStartDate: "2026-09-16", blocking_reason: "onboarding_gender_invalid" }).blockingReason, "onboarding_gender_invalid");
 });
 
 test("onboarding read, partial update, and idempotent submission use the frozen contracts", async () => {
@@ -130,6 +132,33 @@ test("onboarding update omits blank and masked values and requires an actual cha
     onboarding_data: { email: "candidate@example.com", home_address: "深圳" },
   });
   assert.throws(() => createOnboardingDataPayload({ phone: "", email: "" }), { code: "ONBOARDING_DATA_REQUIRED" });
+});
+
+test("historical gender correction sends only gender and never repeats the prefilled start date", async () => {
+  const onboarding = {
+    id: "99999999-9999-4999-8999-999999999999",
+    status: "failed",
+    version: 7,
+    blockingReason: "onboarding_gender_invalid",
+    expectedStartDate: "2026-09-15",
+  };
+  const { client, calls } = queuedClient([{ data: { ...onboarding, status: "failed", version: 8, complete: true } }]);
+  const controller = createOfferController({ client });
+
+  await controller.updateOnboarding(onboarding, {
+    gender: "female",
+    phone: "13800138001",
+    expectedStartDate: "2026-09-15",
+  });
+
+  assert.deepEqual(calls, [{
+    path: `/api/v1/onboardings/${onboarding.id}`,
+    options: {
+      method: "PUT",
+      body: { onboarding_data: { gender: "female" } },
+      ifMatch: '"7"',
+    },
+  }]);
 });
 
 test("application lookup uses the exact query contract and returns newest Offer or null", async () => {

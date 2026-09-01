@@ -11,6 +11,7 @@ from server.app.onboarding.models import OnboardingRecord
 from server.app.onboarding.schemas import OnboardingUpdateCommand
 from server.app.onboarding.security import OnboardingPiiCipher
 from server.app.onboarding.service import create_onboarding_from_accepted_offer
+from server.app.notifications.models import UserNotification  # noqa: F401 - register metadata for isolated tests
 from server.app.offers.models import Offer, OfferAccessToken, OfferResponse, OfferVersion
 from server.app.offers.schemas import ProxyOfferResponse, PublicOfferResponse
 from server.app.offers.service import (
@@ -70,7 +71,7 @@ def _sent_offer(db):
 
 def _onboarding_data():
     return {
-        "gender": "other",
+        "gender": "female",
         "phone": "+8613800138000",
         "email": "candidate@example.com",
         "home_address": "Shenzhen",

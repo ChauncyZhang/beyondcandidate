@@ -17,6 +17,7 @@ test("accept validation requires complete onboarding data", () => {
   assert.equal(responseBody("accepted", "", "", onboarding), null);
   assert.equal(responseBody("accepted", "2026-10-01", "", { ...onboarding, phone: "" }), null);
   assert.equal(responseBody("accepted", "2026-10-01", "", { ...onboarding, gender: "unknown" }), null);
+  assert.equal(responseBody("accepted", "2026-10-01", "", { ...onboarding, gender: "other" }), null);
   assert.deepEqual(responseBody("accepted", "2026-10-01", "ignored", onboarding), { decision: "accepted", expected_start_date: "2026-10-01", onboarding_data: { gender: "female", phone: "13800138000", email: "candidate@example.com", home_address: "深圳市南山区" } });
   assert.deepEqual(responseBody("declined", "", "时间不合适"), { decision: "declined", reason_text: "时间不合适" });
 });
@@ -34,6 +35,7 @@ test("public Offer page is company branded, HTML first, and keeps PDF optional",
   assert.match(source, /confirm === "accepted"[\s\S]*预计到岗日期/);
   assert.match(source, /onboardingPrefill/);
   for (const field of ["性别", "手机号", "邮箱", "家庭住址"]) assert.match(source, new RegExp(field));
+  assert.doesNotMatch(source, /value="other">其他/);
   assert.doesNotMatch(source, /身份证|电子签名/);
   assert.match(source, /确认婉拒 Offer/);
   assert.match(source, /displayOfferDeadline/);

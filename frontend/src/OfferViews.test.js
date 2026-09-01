@@ -135,6 +135,10 @@ test("accepted Offer exposes one guarded onboarding workspace without rendering 
   assert.match(source, /预计到岗日 .* 到达后可办理入职/);
   assert.match(source, /实例编号/);
   assert.match(source, /重试办理入职/);
+  assert.match(source, /feishu_onboarding_not_configured: "飞书入职审批尚未配置/);
+  assert.match(source, /onboarding_gender_invalid: "候选人性别资料需要更正/);
+  assert.match(source, /genderCorrectionOnly/);
+  assert.match(source, /设置 → 飞书集成 → 入职审批/);
   assert.match(source, /controller\.updateOnboarding/);
   assert.match(source, /controller\.submitOnboarding/);
   assert.match(source, /setInterval\(async \(\) =>/);

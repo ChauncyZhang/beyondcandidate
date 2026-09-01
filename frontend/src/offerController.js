@@ -61,6 +61,7 @@ export function normalizeOnboarding(value) {
     complete: value.complete === true,
     canSubmit: value.can_submit === true || value.canSubmit === true,
     canUpdate: value?.allowed_actions?.update === true || value?.allowedActions?.update === true,
+    blockingReason: safeString(value.blocking_reason ?? value.blockingReason),
     safeErrorCode: safeString(value.safe_error_code ?? value.safeErrorCode),
     instanceCode: safeString(value.instance_code ?? value.instanceCode),
   };
@@ -388,9 +389,10 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
   async function updateOnboarding(onboarding, values, { signal } = {}) {
     const id = requireId(onboarding?.id, "ONBOARDING_ID_REQUIRED");
     const version = requireVersion(onboarding?.version);
+    const correctionOnly = onboarding?.status === "failed" && onboarding?.blockingReason === "onboarding_gender_invalid";
     const response = await client.request(`/api/v1/onboardings/${encodeURIComponent(id)}`, requestOptions(signal, {
       method: "PUT",
-      body: createOnboardingDataPayload(values),
+      body: createOnboardingDataPayload(correctionOnly ? { gender: values?.gender } : values),
       ifMatch: `"${version}"`,
     }));
     return normalizeOnboarding(response?.data?.onboarding ?? response?.data);

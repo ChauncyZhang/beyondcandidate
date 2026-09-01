@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { createApiClient } from "./apiClient.js";
-import { buildFeishuConfigPayload, buildFeishuOnboardingApprovalPayload, FEISHU_ONBOARDING_FIELDS, getFeishuCallbackErrorCode, getFeishuConfigErrorMessage, getFeishuConnectionTestErrorMessage, getFeishuLoginErrorMessage, getFeishuOnboardingApprovalErrorMessage, normalizeFeishuConfig, normalizeFeishuOnboardingApprovalConfig, normalizeFeishuBinding, startFeishuAuthorization } from "./feishuIntegration.js";
+import { buildFeishuConfigPayload, buildFeishuOnboardingApprovalPayload, FEISHU_APPROVAL_CONTROL_TYPES, FEISHU_ONBOARDING_FIELDS, getFeishuCallbackErrorCode, getFeishuConfigErrorMessage, getFeishuConnectionTestErrorMessage, getFeishuLoginErrorMessage, getFeishuOnboardingApprovalErrorMessage, normalizeFeishuConfig, normalizeFeishuOnboardingApprovalConfig, normalizeFeishuBinding, startFeishuAuthorization } from "./feishuIntegration.js";
 
 function response(body, status = 200, headers = {}) {
   return new Response(body == null ? null : JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
@@ -43,28 +43,30 @@ test("Feishu API methods follow the organization login and binding contracts", a
   ]);
 });
 
-test("Feishu onboarding config normalizes camel or snake values and serializes eight explicit semantic mappings", () => {
+test("Feishu onboarding config serializes the seven fields sent to Feishu and keeps the start date internal", () => {
   const config = normalizeFeishuOnboardingApprovalConfig({
     enabled: true,
     approval_code: "APPROVAL-1",
     field_mapping: {
       candidate_name: { control_id: "name-id", type: "input" },
-      gender: { control_id: "gender-id", type: "radio", options: { male: "先生", female: "女士", other: "其他" } },
+      gender: { control_id: "gender-id", type: "radio", options: { male: "先生", female: "女士" } },
     },
     department_mappings: [{ department_id: "dep-1", department_name: "研发部", feishu_department_id: "od-1" }],
     validation_status: "valid",
     validated_at: "2026-08-18T10:00:00Z",
     version: 4,
   });
-  assert.equal(FEISHU_ONBOARDING_FIELDS.length, 8);
+  assert.equal(FEISHU_ONBOARDING_FIELDS.length, 7);
+  assert.equal(FEISHU_ONBOARDING_FIELDS.some((field) => field.key === "expected_start_date"), false);
+  assert.equal(FEISHU_APPROVAL_CONTROL_TYPES.some((type) => type.value === "radioV2"), true);
   assert.equal(config.fieldMapping.candidate_name.controlId, "name-id");
   assert.equal(config.fieldMapping.phone.type, "telephone");
   assert.equal(config.fieldMapping.gender.options.female, "女士");
   assert.equal(config.departmentMappings[0].feishuDepartmentId, "od-1");
   const payload = buildFeishuOnboardingApprovalPayload(config);
   assert.equal(payload.approval_code, "APPROVAL-1");
-  assert.equal(Object.keys(payload.field_mapping).length, 8);
-  assert.deepEqual(payload.field_mapping.gender.options, { male: "先生", female: "女士", other: "其他" });
+  assert.equal(Object.keys(payload.field_mapping).length, 7);
+  assert.deepEqual(payload.field_mapping.gender.options, { male: "先生", female: "女士" });
   assert.deepEqual(payload.department_mappings, [{ department_id: "dep-1", feishu_department_id: "od-1" }]);
 });
 

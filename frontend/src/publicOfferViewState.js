@@ -14,7 +14,7 @@ export function responseBody(decision, startDate, reason, onboardingData = {}) {
       email: text(onboardingData.email),
       home_address: text(onboardingData.home_address),
     };
-    if (!text(startDate) || !["male", "female", "other"].includes(normalized.gender) || Object.values(normalized).some((value) => !value)) return null;
+    if (!text(startDate) || !["male", "female"].includes(normalized.gender) || Object.values(normalized).some((value) => !value)) return null;
     return { decision, expected_start_date: text(startDate), onboarding_data: normalized };
   }
   return decision === "declined" ? { decision, reason_text: text(reason) || null } : null;

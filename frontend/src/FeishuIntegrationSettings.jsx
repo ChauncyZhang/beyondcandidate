@@ -145,7 +145,7 @@ function FeishuOnboardingApprovalSettings({ client, onNotify }) {
       <div className="feishu-gender-options">
         <strong>性别选项值</strong>
         <p>填写飞书“性别”单选控件中的实际选项值。</p>
-        <div>{[["male", "男"], ["female", "女"], ["other", "其他"]].map(([key, label]) => <label key={key}><span>{label}</span><input aria-label={`性别选项${label}`} value={draft.fieldMapping.gender?.options?.[key] || ""} disabled={busy} onChange={(event) => updateGenderOption(key, event.target.value)} required /></label>)}</div>
+        <div>{[["male", "男"], ["female", "女"]].map(([key, label]) => <label key={key}><span>{label}</span><input aria-label={`性别选项${label}`} value={draft.fieldMapping.gender?.options?.[key] || ""} disabled={busy} onChange={(event) => updateGenderOption(key, event.target.value)} required /></label>)}</div>
       </div>
     </section>
     <section className="feishu-mapping-section" aria-labelledby="feishu-department-mapping-title">

@@ -164,7 +164,7 @@ export function PublicOfferView({ token, controller = publicOfferController }) {
                 <div><span>职位</span><strong>{offer.onboardingPrefill?.jobTitle || offer.jobTitle || "由招聘团队确认"}</strong></div>
               </div>
               <div className="public-offer-form-grid">
-                <label>性别<select name="gender" required value={onboardingData.gender} onChange={(event) => updateOnboardingField("gender", event.target.value)}><option value="">请选择</option><option value="male">男</option><option value="female">女</option><option value="other">其他</option></select></label>
+                <label>性别<select name="gender" required value={onboardingData.gender} onChange={(event) => updateOnboardingField("gender", event.target.value)}><option value="">请选择</option><option value="male">男</option><option value="female">女</option></select></label>
                 <label>手机号<input name="phone" type="tel" autoComplete="tel" required value={onboardingData.phone} onChange={(event) => updateOnboardingField("phone", event.target.value)} /></label>
                 <label className="public-offer-form-wide">邮箱<input name="email" type="email" autoComplete="email" required value={onboardingData.email} onChange={(event) => updateOnboardingField("email", event.target.value)} /></label>
                 <label className="public-offer-form-wide">家庭住址<textarea name="home_address" autoComplete="street-address" required value={onboardingData.home_address} placeholder="请填写当前家庭住址" onChange={(event) => updateOnboardingField("home_address", event.target.value)} /></label>

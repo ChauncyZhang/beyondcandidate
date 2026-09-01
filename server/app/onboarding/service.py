@@ -24,9 +24,9 @@ REQUIRED_SEMANTICS = {
     "phone",
     "email",
     "home_address",
-    "expected_start_date",
 }
 UNSUPPORTED_CONTROL_TYPES = {"apaascorehrOnboardingGroup"}
+VALID_GENDERS = {"male", "female"}
 
 
 class OnboardingNotFound(Exception):
@@ -99,6 +99,41 @@ def _mask_phone(value: str) -> str:
     return f"***{digits[-4:]}"
 
 
+def normalize_stored_field_mapping(field_mapping: dict) -> dict:
+    """Read configurations saved under the previous eight-field contract safely."""
+    normalized = {
+        semantic: dict(value)
+        for semantic, value in field_mapping.items()
+        if semantic in REQUIRED_SEMANTICS
+    }
+    gender = normalized.get("gender")
+    if gender is not None and gender.get("options") is not None:
+        gender["options"] = {
+            key: value
+            for key, value in gender["options"].items()
+            if key in VALID_GENDERS
+        }
+    return normalized
+
+
+def onboarding_data_blocking_reason(pii: dict) -> str | None:
+    if pii.get("gender") not in VALID_GENDERS:
+        return "onboarding_gender_invalid"
+    if not all(pii.get(field) for field in ("name", "phone", "email", "home_address")):
+        return "onboarding_data_incomplete"
+    return None
+
+
+def can_update_onboarding(record: OnboardingRecord, data_blocking_reason: str | None) -> bool:
+    if record.status == "ready":
+        return True
+    return (
+        record.status == "failed"
+        and data_blocking_reason == "onboarding_gender_invalid"
+        and record.safe_error_code != "feishu_approval_reconciliation_required"
+    )
+
+
 def onboarding_projection(
     record: OnboardingRecord | None,
     *,
@@ -130,9 +165,16 @@ def onboarding_projection(
             "blocking_reason": "onboarding_data_missing",
         }
     pii = cipher.decrypt(record.pii_ciphertext)
-    complete = all(pii.get(field) for field in ("name", "gender", "phone", "email", "home_address"))
+    data_blocking_reason = onboarding_data_blocking_reason(pii)
+    complete = data_blocking_reason is None
     date_reached = business_date(now) >= record.expected_start_date
     can_start = complete and date_reached and record.status in {"ready", "failed"}
+    can_update = can_update_onboarding(record, data_blocking_reason)
+    protected_failure_reason = (
+        record.safe_error_code
+        if record.status == "failed" and not can_update and data_blocking_reason is not None
+        else None
+    )
     return {
         "id": str(record.id),
         "status": record.status,
@@ -151,14 +193,16 @@ def onboarding_projection(
         "safe_error_code": record.safe_error_code,
         "instance_code": record.feishu_instance_code,
         "allowed_actions": {
-            "update": record.status == "ready",
+            "update": can_update,
             "start_onboarding": can_start,
         },
         "blocking_reason": None if can_start else (
-            "expected_start_date_not_reached" if not date_reached else
-            "onboarding_submission_in_progress" if record.status == "submitting" else
-            "onboarding_already_submitted" if record.status == "submitted" else
-            record.safe_error_code
+            protected_failure_reason
+            or data_blocking_reason
+            or ("expected_start_date_not_reached" if not date_reached else None)
+            or ("onboarding_submission_in_progress" if record.status == "submitting" else None)
+            or ("onboarding_already_submitted" if record.status == "submitted" else None)
+            or record.safe_error_code
         ),
     }
 
@@ -166,20 +210,28 @@ def onboarding_projection(
 def update_onboarding(db, record: OnboardingRecord, payload, *, cipher, expected_version: int, actor_user_id, trace_id: str):
     if record.version != expected_version:
         raise OnboardingVersionConflict
-    if record.status != "ready":
-        raise OnboardingNotReady("onboarding_update_not_allowed")
     current = cipher.decrypt(record.pii_ciphertext)
+    if not can_update_onboarding(record, onboarding_data_blocking_reason(current)):
+        raise OnboardingNotReady("onboarding_update_not_allowed")
+    preserve_failed_submission = record.status == "failed"
+    if preserve_failed_submission and (
+        payload.expected_start_date is not None
+        or payload.onboarding_data is None
+        or payload.onboarding_data.model_fields_set != {"gender"}
+    ):
+        raise OnboardingNotReady("onboarding_update_not_allowed")
     if payload.onboarding_data is not None:
         current.update(payload.onboarding_data.model_dump(mode="json", exclude_unset=True, exclude_none=True))
     if payload.expected_start_date is not None:
         record.expected_start_date = payload.expected_start_date
     record.pii_ciphertext = cipher.encrypt(current)
-    record.status = "ready"
-    record.generation = None
-    record.started_by = None
-    record.started_at = None
-    record.failed_at = None
-    record.safe_error_code = None
+    if not preserve_failed_submission:
+        record.status = "ready"
+        record.generation = None
+        record.started_by = None
+        record.started_at = None
+        record.failed_at = None
+        record.safe_error_code = None
     record.version += 1
     db.add(AuditLog(
         organization_id=record.organization_id,
@@ -286,6 +338,7 @@ def start_onboarding_submission(
     expected_version: int,
     generation: uuid.UUID,
     actor_user_id,
+    cipher,
     now: datetime,
     trace_id: str,
 ):
@@ -297,6 +350,9 @@ def start_onboarding_submission(
         raise OnboardingNotReady("onboarding_submission_not_allowed")
     if business_date(now) < record.expected_start_date:
         raise OnboardingNotReady("expected_start_date_not_reached")
+    data_blocking_reason = onboarding_data_blocking_reason(cipher.decrypt(record.pii_ciphertext))
+    if data_blocking_reason:
+        raise OnboardingNotReady(data_blocking_reason)
     config = db.scalar(select(FeishuOnboardingConfig).where(
         FeishuOnboardingConfig.organization_id == record.organization_id,
         FeishuOnboardingConfig.enabled.is_(True),

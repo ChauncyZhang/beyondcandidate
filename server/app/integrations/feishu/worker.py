@@ -22,7 +22,7 @@ from server.app.integrations.feishu.provider import ApprovalInstanceRequest, Cal
 from server.app.interviews.models import Interview, InterviewParticipant
 from server.app.notifications.models import UserNotification
 from server.app.onboarding.models import OnboardingRecord
-from server.app.onboarding.service import validate_definition
+from server.app.onboarding.service import onboarding_data_blocking_reason, normalize_stored_field_mapping, validate_definition
 from server.app.queue.service import PermanentJobError, RetryableJobError
 from server.app.recruiting.models import Application, ApplicationReviewTask, Candidate, CandidateContact
 from server.app.recruiting.review_assignments import review_notification_user_ids
@@ -643,14 +643,15 @@ def _approval_form_value(semantic: str, mapping: dict, value, *, feishu_departme
     if semantic == "department":
         return [{"open_id": feishu_department_id}]
     if semantic == "gender":
-        return (mapping.get("options") or {}).get(value, value)
+        option = (mapping.get("options") or {}).get(value)
+        if option is None:
+            raise FeishuProviderError("onboarding_gender_invalid", retryable=False)
+        return option
     if semantic == "phone" and control_type == "telephone":
         digits = str(value).lstrip("+")
         if digits.startswith("86") and len(digits) > 11:
             return {"countryCode": "+86", "nationalNumber": digits[2:]}
         return {"countryCode": "+86", "nationalNumber": digits}
-    if semantic == "expected_start_date" and control_type == "date":
-        return f"{value}T00:00:00+08:00"
     return value
 
 
@@ -711,6 +712,7 @@ class FeishuOnboardingOutboxHandler:
                 FeishuDepartmentMapping.organization_id == organization_id,
                 FeishuDepartmentMapping.department_id == record.department_id,
             ))
+            pii = None
             if config is None or base is None or base.encrypted_app_secret is None:
                 safe_code = "feishu_onboarding_not_configured"
             elif binding is None or not binding.open_id:
@@ -718,7 +720,8 @@ class FeishuOnboardingOutboxHandler:
             elif department is None:
                 safe_code = "feishu_department_unmapped"
             else:
-                safe_code = None
+                pii = self._onboarding_cipher.decrypt(record.pii_ciphertext)
+                safe_code = onboarding_data_blocking_reason(pii)
             preflight_error = safe_code
             if preflight_error:
                 record.status = "failed"
@@ -737,8 +740,7 @@ class FeishuOnboardingOutboxHandler:
                     base.redirect_uri,
                     base.calendar_id,
                 )
-                pii = self._onboarding_cipher.decrypt(record.pii_ciphertext)
-                field_mapping = dict(config.field_mapping)
+                field_mapping = normalize_stored_field_mapping(config.field_mapping)
                 expected_fingerprint = config.definition_fingerprint
                 approval_code = config.approval_code
                 initiator_open_id = binding.open_id
@@ -751,7 +753,6 @@ class FeishuOnboardingOutboxHandler:
                     "phone": pii["phone"],
                     "email": pii["email"],
                     "home_address": pii["home_address"],
-                    "expected_start_date": record.expected_start_date.isoformat(),
                 }
 
         if preflight_error:

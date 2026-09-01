@@ -27,24 +27,30 @@ from server.app.integrations.feishu.provider import (
     HttpFeishuProvider,
 )
 from server.app.integrations.feishu.service import FeishuSecretCipher
-from server.app.integrations.feishu.worker import FeishuOnboardingOutboxHandler
+from server.app.integrations.feishu.worker import FeishuOnboardingOutboxHandler, _approval_form_value
 from server.app.onboarding.models import OnboardingRecord
-from server.app.onboarding.schemas import FeishuOnboardingConfigWrite, OnboardingData, OnboardingUpdateCommand
+from server.app.onboarding.schemas import FeishuOnboardingConfigWrite, OnboardingData, OnboardingUpdate, OnboardingUpdateCommand
 from server.app.onboarding.security import OnboardingPiiCipher
-from server.app.onboarding.service import OnboardingNotReady, start_onboarding_submission, validate_definition
+from server.app.onboarding.service import (
+    OnboardingNotReady,
+    normalize_stored_field_mapping,
+    onboarding_projection,
+    start_onboarding_submission,
+    update_onboarding,
+    validate_definition,
+)
 from server.app.queue.models import OutboxEvent
 
 
 KEY = b"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 SEMANTICS = {
     "candidate_name": {"control_id": "name", "control_type": "input"},
-    "gender": {"control_id": "gender", "control_type": "radio", "options": {"male": "M", "female": "F", "other": "O"}},
+    "gender": {"control_id": "gender", "control_type": "radio", "options": {"male": "M", "female": "F"}},
     "department": {"control_id": "department", "control_type": "department"},
     "job_title": {"control_id": "job", "control_type": "input"},
     "phone": {"control_id": "phone", "control_type": "telephone"},
     "email": {"control_id": "email", "control_type": "input"},
     "home_address": {"control_id": "address", "control_type": "textarea"},
-    "expected_start_date": {"control_id": "start", "control_type": "date"},
 }
 
 
@@ -77,6 +83,14 @@ def test_onboarding_data_is_normalized_and_encrypted_with_a_purpose_separated_ke
     assert b"Candidate" not in ciphertext and b"candidate@example.com" not in ciphertext
     assert cipher.decrypt(ciphertext)["gender"] == "female"
 
+    with pytest.raises(ValueError, match="gender must be male or female"):
+        OnboardingData(
+            gender="other",
+            phone="13800138000",
+            email="candidate@example.com",
+            home_address="Shenzhen",
+        )
+
 
 def test_hr_onboarding_update_accepts_nested_partial_data_and_expected_date():
     command = OnboardingUpdateCommand.model_validate({
@@ -107,14 +121,289 @@ def test_definition_validation_requires_exact_ids_and_rejects_corehr_onboarding_
     assert validate_definition(SEMANTICS, unsupported) == "feishu_approval_control_unsupported"
     changed = {**SEMANTICS, "email": {"control_id": "missing", "control_type": "input"}}
     assert validate_definition(changed, definition) == "feishu_approval_control_missing"
-    invalid_option = {**SEMANTICS, "gender": {**SEMANTICS["gender"], "options": {"male": "invalid", "female": "F", "other": "O"}}}
+    invalid_option = {**SEMANTICS, "gender": {**SEMANTICS["gender"], "options": {"male": "invalid", "female": "F"}}}
     assert validate_definition(invalid_option, definition) == "feishu_approval_option_invalid"
-    duplicate_option = {**SEMANTICS, "gender": {**SEMANTICS["gender"], "options": {"male": "M", "female": "M", "other": "O"}}}
+    duplicate_option = {**SEMANTICS, "gender": {**SEMANTICS["gender"], "options": {"male": "M", "female": "M"}}}
     assert validate_definition(duplicate_option, definition) == "feishu_approval_option_duplicate"
 
 
+def test_definition_validation_accepts_native_template_without_start_date_mapping():
+    mapping = {
+        **SEMANTICS,
+        "gender": {"control_id": "gender", "control_type": "radioV2", "options": {"male": "male-option", "female": "female-option"}},
+        "phone": {"control_id": "phone", "control_type": "input"},
+        "home_address": {"control_id": "address", "control_type": "input"},
+    }
+    definition = ApprovalDefinition(
+        "approval_onboarding",
+        "Onboarding",
+        "ACTIVE",
+        (
+            ApprovalControl("name", None, "input"),
+            ApprovalControl("gender", None, "radioV2", ("female-option", "male-option")),
+            ApprovalControl("department", None, "department"),
+            ApprovalControl("job", None, "input"),
+            ApprovalControl("phone", None, "input"),
+            ApprovalControl("email", None, "input"),
+            ApprovalControl("address", None, "input"),
+            ApprovalControl("remarks", None, "textarea"),
+        ),
+        "f" * 64,
+    )
+
+    assert validate_definition(mapping, definition) is None
+    assert "expected_start_date" not in mapping
+
+
+def test_legacy_eight_field_mapping_is_normalized_without_changing_the_saved_value():
+    legacy = {
+        **SEMANTICS,
+        "gender": {**SEMANTICS["gender"], "options": {"male": "M", "female": "F", "other": "O"}},
+        "expected_start_date": {"control_id": "start", "control_type": "date"},
+    }
+
+    normalized = normalize_stored_field_mapping(legacy)
+
+    assert validate_definition(normalized, _definition()) is None
+    assert set(normalized) == set(SEMANTICS)
+    assert normalized["gender"]["options"] == {"male": "M", "female": "F"}
+    assert "expected_start_date" in legacy and "other" in legacy["gender"]["options"]
+
+
+def test_historical_other_gender_is_incomplete_editable_and_cannot_be_submitted():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    cipher = OnboardingPiiCipher(KEY)
+    record = OnboardingRecord(
+        organization_id=uuid4(),
+        offer_response_id=uuid4(),
+        offer_id=uuid4(),
+        application_id=uuid4(),
+        candidate_id=uuid4(),
+        job_id=uuid4(),
+        department_id=uuid4(),
+        job_title="Role",
+        department_name="Department",
+        expected_start_date=date(2026, 8, 18),
+        pii_ciphertext=cipher.encrypt({
+            "name": "Candidate",
+            "gender": "other",
+            "phone": "+8613800138000",
+            "email": "candidate@example.test",
+            "home_address": "Shenzhen",
+        }),
+        status="ready",
+    )
+    with Session(engine) as db:
+        db.add(record)
+        db.flush()
+        projection = onboarding_projection(
+            record,
+            cipher=cipher,
+            now=datetime(2026, 8, 18, 1, tzinfo=timezone.utc),
+        )
+        assert projection["complete"] is False
+        assert projection["can_submit"] is False
+        assert projection["blocking_reason"] == "onboarding_gender_invalid"
+        assert projection["allowed_actions"]["update"] is True
+        with pytest.raises(OnboardingNotReady, match="onboarding_gender_invalid"):
+            start_onboarding_submission(
+                db,
+                record,
+                expected_version=1,
+                generation=uuid4(),
+                actor_user_id=uuid4(),
+                cipher=cipher,
+                now=datetime(2026, 8, 18, 1, tzinfo=timezone.utc),
+                trace_id="historical-other",
+            )
+        assert db.scalar(select(OutboxEvent).where(OutboxEvent.aggregate_id == record.id)) is None
+
+
+def test_gender_form_value_never_falls_back_to_an_unmapped_value():
+    with pytest.raises(FeishuProviderError, match="onboarding_gender_invalid"):
+        _approval_form_value(
+            "gender",
+            SEMANTICS["gender"],
+            "other",
+            feishu_department_id="od_department",
+        )
+
+
+def test_reconciliation_failure_cannot_be_edited_or_lose_its_generation():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    cipher = OnboardingPiiCipher(KEY)
+    generation = uuid4()
+    record = OnboardingRecord(
+        organization_id=uuid4(),
+        offer_response_id=uuid4(),
+        offer_id=uuid4(),
+        application_id=uuid4(),
+        candidate_id=uuid4(),
+        job_id=uuid4(),
+        department_id=uuid4(),
+        job_title="Role",
+        department_name="Department",
+        expected_start_date=date(2026, 8, 18),
+        pii_ciphertext=cipher.encrypt({
+            "name": "Candidate",
+            "gender": "female",
+            "phone": "+8613800138000",
+            "email": "candidate@example.test",
+            "home_address": "Shenzhen",
+        }),
+        status="failed",
+        generation=generation,
+        started_by=uuid4(),
+        started_at=datetime(2026, 8, 18, 0, tzinfo=timezone.utc),
+        failed_at=datetime(2026, 8, 18, 0, 1, tzinfo=timezone.utc),
+        safe_error_code="feishu_approval_reconciliation_required",
+    )
+    with Session(engine) as db:
+        db.add(record)
+        db.flush()
+        projection = onboarding_projection(
+            record,
+            cipher=cipher,
+            now=datetime(2026, 8, 18, 1, tzinfo=timezone.utc),
+        )
+        assert projection["allowed_actions"]["update"] is False
+        with pytest.raises(OnboardingNotReady, match="onboarding_update_not_allowed"):
+            update_onboarding(
+                db,
+                record,
+                OnboardingUpdateCommand(onboarding_data=OnboardingUpdate(gender="male")),
+                cipher=cipher,
+                expected_version=1,
+                actor_user_id=uuid4(),
+                trace_id="reconciliation-edit",
+            )
+        assert record.generation == generation
+        assert record.status == "failed"
+
+        record.pii_ciphertext = cipher.encrypt({
+            "name": "Candidate",
+            "gender": "other",
+            "phone": "+8613800138000",
+            "email": "candidate@example.test",
+            "home_address": "Shenzhen",
+        })
+        protected_projection = onboarding_projection(
+            record,
+            cipher=cipher,
+            now=datetime(2026, 8, 18, 1, tzinfo=timezone.utc),
+        )
+        assert protected_projection["blocking_reason"] == "feishu_approval_reconciliation_required"
+        assert protected_projection["allowed_actions"]["update"] is False
+
+
+def test_historical_other_can_be_corrected_after_a_retryable_failure_without_changing_generation():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    cipher = OnboardingPiiCipher(KEY)
+    generation = uuid4()
+    actor_id = uuid4()
+    record = OnboardingRecord(
+        organization_id=uuid4(),
+        offer_response_id=uuid4(),
+        offer_id=uuid4(),
+        application_id=uuid4(),
+        candidate_id=uuid4(),
+        job_id=uuid4(),
+        department_id=uuid4(),
+        job_title="Role",
+        department_name="Department",
+        expected_start_date=date(2026, 8, 18),
+        pii_ciphertext=cipher.encrypt({
+            "name": "Candidate",
+            "gender": "other",
+            "phone": "+8613800138000",
+            "email": "candidate@example.test",
+            "home_address": "Shenzhen",
+        }),
+        status="failed",
+        generation=generation,
+        started_by=actor_id,
+        started_at=datetime(2026, 8, 18, 0, tzinfo=timezone.utc),
+        failed_at=datetime(2026, 8, 18, 0, 1, tzinfo=timezone.utc),
+        safe_error_code="feishu_timeout",
+    )
+    with Session(engine) as db:
+        db.add(record)
+        db.add_all([
+            FeishuOnboardingConfig(
+                organization_id=record.organization_id,
+                approval_code="approval",
+                field_mapping=SEMANTICS,
+                enabled=True,
+                validation_status="valid",
+                definition_fingerprint="f" * 64,
+                created_by=actor_id,
+                updated_by=actor_id,
+            ),
+            FeishuDepartmentMapping(
+                organization_id=record.organization_id,
+                department_id=record.department_id,
+                feishu_department_id="od_department",
+            ),
+        ])
+        db.flush()
+        before = onboarding_projection(
+            record,
+            cipher=cipher,
+            now=datetime(2026, 8, 18, 1, tzinfo=timezone.utc),
+        )
+        assert before["allowed_actions"]["update"] is True
+
+        with pytest.raises(OnboardingNotReady, match="onboarding_update_not_allowed"):
+            update_onboarding(
+                db,
+                record,
+                OnboardingUpdateCommand(onboarding_data=OnboardingUpdate(phone="13800138001")),
+                cipher=cipher,
+                expected_version=1,
+                actor_user_id=actor_id,
+                trace_id="reject-unrelated-failed-edit",
+            )
+
+        update_onboarding(
+            db,
+            record,
+            OnboardingUpdateCommand(onboarding_data=OnboardingUpdate(gender="male")),
+            cipher=cipher,
+            expected_version=1,
+            actor_user_id=actor_id,
+            trace_id="correct-historical-other",
+        )
+
+        assert record.status == "failed"
+        assert record.generation == generation
+        assert record.started_by == actor_id
+        assert record.safe_error_code == "feishu_timeout"
+        corrected = onboarding_projection(
+            record,
+            cipher=cipher,
+            now=datetime(2026, 8, 18, 1, tzinfo=timezone.utc),
+        )
+        assert corrected["complete"] is True and corrected["can_submit"] is True
+
+        start_onboarding_submission(
+            db,
+            record,
+            expected_version=2,
+            generation=uuid4(),
+            actor_user_id=actor_id,
+            cipher=cipher,
+            now=datetime(2026, 8, 18, 1, tzinfo=timezone.utc),
+            trace_id="retry-corrected-historical-other",
+        )
+        event = db.scalar(select(OutboxEvent).where(OutboxEvent.aggregate_id == record.id))
+        assert event.payload["generation"] == str(generation)
+
+
 def test_onboarding_config_rejects_duplicate_gender_option_ids():
-    duplicate = {**SEMANTICS, "gender": {**SEMANTICS["gender"], "options": {"male": "M", "female": "M", "other": "O"}}}
+    duplicate = {**SEMANTICS, "gender": {**SEMANTICS["gender"], "options": {"male": "M", "female": "M"}}}
     with pytest.raises(ValueError, match="must be unique"):
         FeishuOnboardingConfigWrite.model_validate({
             "approval_code": "approval",
@@ -140,7 +429,13 @@ def test_failed_onboarding_retry_reuses_the_original_generation():
         job_title="Role",
         department_name="Department",
         expected_start_date=date(2026, 8, 18),
-        pii_ciphertext=b"encrypted",
+        pii_ciphertext=OnboardingPiiCipher(KEY).encrypt({
+            "name": "Candidate",
+            "gender": "female",
+            "phone": "+8613800138000",
+            "email": "candidate@example.test",
+            "home_address": "Shenzhen",
+        }),
         status="failed",
         generation=original_generation,
         started_by=uuid4(),
@@ -176,6 +471,7 @@ def test_failed_onboarding_retry_reuses_the_original_generation():
             expected_version=1,
             generation=uuid4(),
             actor_user_id=record.started_by,
+            cipher=OnboardingPiiCipher(KEY),
             now=datetime(2026, 8, 18, 1, tzinfo=timezone.utc),
             trace_id="retry-same-generation",
         )
@@ -278,6 +574,7 @@ def test_hr_submission_queues_only_ids_and_worker_marks_submitted_after_provider
             expected_version=1,
             generation=generation,
             actor_user_id=actor_id,
+            cipher=pii_cipher,
             now=datetime(2026, 8, 18, 0, tzinfo=timezone.utc),
             trace_id="trace-onboarding",
         )
@@ -341,6 +638,7 @@ def test_hr_submission_is_blocked_before_shanghai_start_date():
                 expected_version=1,
                 generation=uuid4(),
                 actor_user_id=uuid4(),
+                cipher=OnboardingPiiCipher(KEY),
                 now=datetime(2026, 8, 18, 15, 59, tzinfo=timezone.utc),
                 trace_id="trace",
             )

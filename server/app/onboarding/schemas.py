@@ -19,8 +19,8 @@ class OnboardingData(BaseModel):
     @field_validator("gender")
     @classmethod
     def validate_gender(cls, value: str) -> str:
-        if value not in {"male", "female", "other"}:
-            raise ValueError("gender must be male, female, or other")
+        if value not in {"male", "female"}:
+            raise ValueError("gender must be male or female")
         return value
 
     @field_validator("phone")
@@ -54,8 +54,8 @@ class OnboardingUpdate(BaseModel):
     @field_validator("gender")
     @classmethod
     def validate_gender(cls, value: str | None) -> str | None:
-        if value is not None and value not in {"male", "female", "other"}:
-            raise ValueError("gender must be male, female, or other")
+        if value is not None and value not in {"male", "female"}:
+            raise ValueError("gender must be male or female")
         return value
 
     @field_validator("phone")
@@ -133,7 +133,6 @@ REQUIRED_ONBOARDING_SEMANTICS = {
     "phone",
     "email",
     "home_address",
-    "expected_start_date",
 }
 
 
@@ -161,8 +160,8 @@ class FeishuOnboardingConfigWrite(BaseModel):
         if len(set(department_ids)) != len(department_ids):
             raise ValueError("department mappings must be unique")
         gender = self.field_mapping["gender"]
-        if gender.options is None or set(gender.options) != {"male", "female", "other"}:
-            raise ValueError("gender options must map male, female, and other")
+        if gender.options is None or set(gender.options) != {"male", "female"}:
+            raise ValueError("gender options must map male and female")
         if any(not value.strip() for value in gender.options.values()):
             raise ValueError("gender option values must not be blank")
         if len(set(gender.options.values())) != len(gender.options):
