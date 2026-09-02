@@ -187,11 +187,15 @@ test("Feishu settings expose onboarding approval mapping and validation without 
   assert.match(settings, /Approval Code/);
   assert.match(settings, /FEISHU_ONBOARDING_FIELDS\.map/);
   assert.match(settings, /部门映射/);
+  assert.match(settings, /新增部门/);
+  assert.match(settings, /client\.createDepartment\(\{ name, parent_id: null \}\)/);
+  assert.match(settings, /部门已创建并加入飞书映射/);
   assert.match(settings, /校验审批模板/);
   assert.match(settings, /getFeishuOnboardingApprovalConfig/);
   assert.match(settings, /saveFeishuOnboardingApprovalConfig/);
   assert.match(settings, /validateFeishuOnboardingApprovalConfig/);
   assert.match(styles, /\.settings-page \.feishu-field-mapping/);
+  assert.match(styles, /\.settings-page \.feishu-department-create/);
   assert.match(styles, /@media \(max-width: 640px\)/);
 });
 

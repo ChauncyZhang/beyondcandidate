@@ -20,8 +20,14 @@ before(async () => {
   browser = await chromium.launch({ headless: true });
 });
 
-async function openAuthenticatedPage(viewport, { currentRole = "recruiting_admin" } = {}) {
+async function openAuthenticatedPage(viewport, {
+  currentRole = "recruiting_admin",
+  initialDepartments = [{ id: "dep-1", name: "技术部", parent_id: null, member_count: 1, job_count: 1, status: "active" }],
+  onboardingConfig = { enabled: false, approval_code: "", field_mapping: {}, department_mappings: [], validation_status: "unvalidated", version: 1 },
+  departmentCreateError = null,
+} = {}) {
   const context = await browser.newContext({ viewport });
+  let departments = [...initialDepartments];
   let users = [
     { id: "user-1", display_name: "Admin", email: "admin@example.test", department_id: "dep-1", department_name: "技术部", roles: ["recruiting_admin"], status: "active", recruiting_scope_type: "organization", recruiting_department_ids: [] },
     { id: "user-2", display_name: "林岚", email: "lin@example.test", department_id: "dep-1", department_name: "技术部", roles: ["recruiter"], status: "active", recruiting_scope_type: "departments", recruiting_department_ids: ["dep-1"] },
@@ -46,8 +52,24 @@ async function openAuthenticatedPage(viewport, { currentRole = "recruiting_admin
       });
       return;
     }
+    if (pathname === "/api/v1/settings/departments" && route.request().method() === "POST") {
+      const body = route.request().postDataJSON();
+      assert.deepEqual(body, { name: "产品部", parent_id: null });
+      if (departmentCreateError) {
+        await route.fulfill({
+          status: departmentCreateError.status,
+          contentType: "application/problem+json",
+          body: JSON.stringify({ status: departmentCreateError.status, code: departmentCreateError.code }),
+        });
+        return;
+      }
+      const department = { id: "dep-2", name: body.name, parent_id: null, member_count: 0, job_count: 0, status: "active" };
+      departments = [...departments, department];
+      await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ data: department }) });
+      return;
+    }
     if (pathname === "/api/v1/settings/departments") {
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [{ id: "dep-1", name: "技术部", parent_id: null, member_count: 1, job_count: 1 }] }) });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: departments }) });
       return;
     }
     if (pathname === "/api/v1/settings/users" && route.request().method() === "GET") {
@@ -70,6 +92,10 @@ async function openAuthenticatedPage(viewport, { currentRole = "recruiting_admin
     }
     if (pathname === "/api/v1/settings/integrations/feishu") {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { enabled: false, configured: false, app_id: "", redirect_uri: "", calendar_id: "" } }) });
+      return;
+    }
+    if (pathname === "/api/v1/settings/integrations/feishu/onboarding-approval" && route.request().method() === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: onboardingConfig }) });
       return;
     }
     await route.fulfill({ status: 503, contentType: "application/problem+json", body: JSON.stringify({ status: 503 }) });
@@ -305,6 +331,75 @@ test("invite member opens a usable server-backed invitation drawer", { timeout: 
     assert.equal(await drawer.getByRole("button", { name: "发送邀请", exact: true }).isEnabled(), true);
   } finally {
     await context.close();
+  }
+});
+
+test("Feishu onboarding mapping can create a department without leaving the current draft", { timeout: 60_000 }, async () => {
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: {
+      enabled: true,
+      approval_code: "approval-original",
+      field_mapping: { candidate_name: { control_id: "candidate-control", type: "input" } },
+      department_mappings: [{ department_id: "dep-1", feishu_department_id: "od-existing" }],
+      validation_status: "valid",
+      version: 3,
+    },
+  });
+  try {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "飞书集成", exact: true }).click();
+    await page.getByRole("heading", { name: "入职审批", exact: true }).waitFor();
+    await page.getByRole("button", { name: "新增部门", exact: true }).click();
+    await page.getByLabel("新增部门名称", { exact: true }).fill("产品部");
+    await page.getByRole("button", { name: "确认新增", exact: true }).click();
+    await page.getByLabel("产品部飞书部门 ID", { exact: true }).waitFor();
+    assert.equal(await page.getByLabel("启用飞书入职审批", { exact: true }).isChecked(), false);
+    assert.equal(await page.getByLabel("姓名控件 ID", { exact: true }).inputValue(), "candidate-control");
+    assert.equal(await page.getByLabel("技术部飞书部门 ID", { exact: true }).inputValue(), "od-existing");
+    assert.equal(await page.getByLabel("产品部飞书部门 ID", { exact: true }).inputValue(), "");
+    assert.equal(await page.locator(".feishu-approval-code input").inputValue(), "approval-original");
+    assert.match(await page.locator(".feishu-onboarding-form").innerText(), /部门已创建，请继续填写对应的飞书部门 ID/);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await assertNoHorizontalOverflow(page, "390px Feishu department quick create");
+  } finally {
+    await context.close();
+  }
+});
+
+test("Feishu onboarding mapping explains inline creation when no department exists", { timeout: 60_000 }, async () => {
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, { initialDepartments: [] });
+  try {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "飞书集成", exact: true }).click();
+    const emptyState = page.locator(".feishu-mapping-empty");
+    await emptyState.waitFor();
+    assert.match(await emptyState.innerText(), /点击“新增部门”直接创建/);
+    assert.equal(await page.getByRole("button", { name: "新增部门", exact: true }).isEnabled(), true);
+  } finally {
+    await context.close();
+  }
+});
+
+test("Feishu onboarding department creation keeps input and explains server failures", { timeout: 60_000 }, async () => {
+  const scenarios = [
+    [{ status: 409, code: "department_already_exists" }, /该部门已存在/],
+    [{ status: 403, code: "forbidden" }, /没有新增部门的权限/],
+    [{ status: 503, code: "service_unavailable" }, /部门创建失败，请稍后重试/],
+  ];
+  for (const [departmentCreateError, expectedMessage] of scenarios) {
+    const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, { departmentCreateError });
+    try {
+      await page.getByRole("button", { name: "设置", exact: true }).click();
+      await page.getByRole("button", { name: "飞书集成", exact: true }).click();
+      await page.getByRole("button", { name: "新增部门", exact: true }).click();
+      await page.getByLabel("新增部门名称", { exact: true }).fill("产品部");
+      await page.getByRole("button", { name: "确认新增", exact: true }).click();
+      await page.getByRole("status").filter({ hasText: expectedMessage }).waitFor();
+      assert.equal(await page.getByLabel("新增部门名称", { exact: true }).inputValue(), "产品部");
+      assert.equal(await page.getByRole("button", { name: "确认新增", exact: true }).isEnabled(), true);
+    } finally {
+      await context.close();
+    }
   }
 });
 

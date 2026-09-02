@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle2, ClipboardCheck, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ClipboardCheck, Plus, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { apiClient } from "./apiClient.js";
 import {
   buildFeishuConfigPayload,
@@ -34,6 +34,8 @@ function FeishuOnboardingApprovalSettings({ client, onNotify }) {
   const [draft, setDraft] = useState(() => approvalDraft(normalizeFeishuOnboardingApprovalConfig(), []));
   const [status, setStatus] = useState("loading");
   const [message, setMessage] = useState("");
+  const [addingDepartment, setAddingDepartment] = useState(false);
+  const [departmentName, setDepartmentName] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -52,7 +54,7 @@ function FeishuOnboardingApprovalSettings({ client, onNotify }) {
   }, [client]);
 
   const dirty = JSON.stringify(buildFeishuOnboardingApprovalPayload(draft)) !== JSON.stringify(buildFeishuOnboardingApprovalPayload(config));
-  const busy = ["saving", "validating"].includes(status);
+  const busy = ["saving", "validating", "creating_department"].includes(status);
 
   function updateField(key, property, value) {
     setDraft((current) => ({
@@ -85,6 +87,32 @@ function FeishuOnboardingApprovalSettings({ client, onNotify }) {
       },
     }));
     setMessage("");
+  }
+
+  async function createDepartment() {
+    const name = departmentName.trim();
+    if (!name || busy) return;
+    setStatus("creating_department"); setMessage("");
+    try {
+      const department = await client.createDepartment({ name, parent_id: null });
+      setDraft((current) => current.departmentMappings.some((item) => item.departmentId === department.id) ? current : ({
+        ...current,
+        enabled: false,
+        departmentMappings: [...current.departmentMappings, {
+          departmentId: department.id,
+          departmentName: department.name || name,
+          feishuDepartmentId: "",
+        }],
+      }));
+      setDepartmentName("");
+      setAddingDepartment(false);
+      setStatus("ready");
+      setMessage("部门已创建，请继续填写对应的飞书部门 ID。");
+      onNotify("部门已创建并加入飞书映射");
+    } catch (error) {
+      setStatus("error");
+      setMessage(error?.code === "department_already_exists" ? "该部门已存在，请前往“组织与权限 → 部门”检查。" : error?.status === 403 ? "当前账号没有新增部门的权限。" : "部门创建失败，请稍后重试。");
+    }
   }
 
   async function save(event) {
@@ -149,10 +177,11 @@ function FeishuOnboardingApprovalSettings({ client, onNotify }) {
       </div>
     </section>
     <section className="feishu-mapping-section" aria-labelledby="feishu-department-mapping-title">
-      <header><div><h3 id="feishu-department-mapping-title">部门映射</h3><p>飞书部门 ID 必须对应实际接收新员工的部门；未映射的职位不能办理入职。</p></div></header>
+      <header className="feishu-mapping-section-header"><div><h3 id="feishu-department-mapping-title">部门映射</h3><p>飞书部门 ID 必须对应实际接收新员工的部门；未映射的职位不能办理入职。</p></div><button className="button secondary" type="button" disabled={busy} aria-expanded={addingDepartment} onClick={() => { setAddingDepartment((current) => !current); setMessage(""); }}><Plus size={16} />新增部门</button></header>
+      {addingDepartment && <div className="feishu-department-create"><label><span>部门名称</span><input aria-label="新增部门名称" autoFocus maxLength="200" value={departmentName} disabled={busy} onChange={(event) => setDepartmentName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void createDepartment(); } }} placeholder="例如：产品部" /></label><div><button className="icon-button" type="button" aria-label="取消新增部门" disabled={busy} onClick={() => { setAddingDepartment(false); setDepartmentName(""); }}><X size={18} /></button><button className="button primary" type="button" disabled={busy || !departmentName.trim()} onClick={() => void createDepartment()}>{status === "creating_department" ? "创建中…" : "确认新增"}</button></div></div>}
       {draft.departmentMappings.length ? <div className="feishu-department-mapping">
         {draft.departmentMappings.map((item) => <label key={item.departmentId}><span>{item.departmentName}</span><input aria-label={`${item.departmentName}飞书部门 ID`} value={item.feishuDepartmentId} disabled={busy} onChange={(event) => updateDepartment(item.departmentId, event.target.value)} placeholder="od-xxxxxxxx" required={draft.enabled} /></label>)}
-      </div> : <div className="feishu-mapping-empty"><AlertTriangle size={17} />组织内尚未创建部门，请先在“组织与权限”中添加部门。</div>}
+      </div> : <div className="feishu-mapping-empty"><AlertTriangle size={17} />组织内尚未创建部门，可点击“新增部门”直接创建；重命名、停用等完整管理请前往“组织与权限 → 部门”。</div>}
     </section>
     <div className="feishu-onboarding-actions"><span>{dirty ? "有未保存的修改" : config.validationStatus === "valid" ? `最近校验：${config.validatedAt ? new Date(config.validatedAt).toLocaleString("zh-CN", { hour12: false }) : "已通过"}` : "保存后请校验审批模板"}</span><button className="button secondary" type="button" disabled={busy || dirty || !config.approvalCode} onClick={() => void validate()}>{status === "validating" ? "校验中…" : "校验审批模板"}</button><button className="button primary" type="submit" disabled={busy || !dirty}>{status === "saving" ? "保存中…" : "保存入职审批配置"}</button></div>
   </form>;
