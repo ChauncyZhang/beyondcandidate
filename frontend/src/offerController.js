@@ -16,6 +16,77 @@ function safeArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+const OFFER_CONTENT_FIELDS = Object.freeze(["title", "body", "compensation", "benefits"]);
+const OFFER_REQUIRED_FIELDS = new Set(["title", "body", "compensation"]);
+const OFFER_VARIABLE_LABELS = Object.freeze({
+  candidate_name: "候选人姓名",
+  job_title: "职位",
+  department_name: "部门",
+  recruiter_name: "招聘负责人",
+  work_location: "工作地点",
+});
+
+function offerContentText(value) {
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return String(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  return safeString(value.text ?? value.value ?? value.salary ?? value.description);
+}
+
+function offerTemplateVariables(context) {
+  const source = safeObject(context);
+  return {
+    candidate_name: safeString(source.candidateName ?? source.candidate_name),
+    job_title: safeString(source.jobTitle ?? source.job_title),
+    department_name: safeString(source.departmentName ?? source.department_name),
+    recruiter_name: safeString(source.recruiterName ?? source.recruiter_name),
+    work_location: safeString(source.workLocation ?? source.work_location),
+  };
+}
+
+export function renderOfferTemplateText(value, context = {}) {
+  const variables = offerTemplateVariables(context);
+  return offerContentText(value).replace(/{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}/g, (placeholder, name) => variables[name] || placeholder);
+}
+
+export function offerTemplateSyntaxIssue(value) {
+  const text = offerContentText(value);
+  const residue = text.replace(/{{\s*[A-Za-z][A-Za-z0-9_]*\s*}}/g, "");
+  return residue.includes("{") || residue.includes("}") ? "模板变量格式有误" : "";
+}
+
+export function applyOfferTemplate(draft, template, context = {}, { overwrite = false } = {}) {
+  const current = safeObject(draft);
+  const content = safeObject(template?.content);
+  const variables = offerTemplateVariables(context);
+  const generated = {
+    title: content.title || (variables.job_title ? `${variables.job_title}正式录用通知` : "正式录用通知"),
+    body: content.body || (variables.candidate_name || variables.job_title
+      ? `${variables.candidate_name ? `${variables.candidate_name}，您好：\n\n` : ""}很高兴通知您，您已通过${variables.job_title ? `“${variables.job_title}”职位的` : "本次"}招聘流程。具体录用条件请查看下方信息。`
+      : ""),
+    compensation: content.compensation,
+    benefits: content.benefits,
+  };
+  const next = { ...current, templateId: safeString(template?.id) || safeString(current.templateId) };
+  for (const field of OFFER_CONTENT_FIELDS) {
+    const rendered = renderOfferTemplateText(generated[field], context);
+    if (overwrite) next[field] = rendered;
+    else if (rendered && !offerContentText(current[field]).trim()) next[field] = rendered;
+  }
+  return next;
+}
+
+export function offerDraftFieldIssue(field, value) {
+  const text = offerContentText(value).trim();
+  if (!text) return OFFER_REQUIRED_FIELDS.has(field)
+    ? { tone: "required", label: "需填写" }
+    : { tone: "optional", label: "可补充" };
+  const syntaxIssue = offerTemplateSyntaxIssue(text);
+  if (syntaxIssue) return { tone: "required", label: syntaxIssue };
+  const unresolved = [...text.matchAll(/{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}/g)].map((match) => OFFER_VARIABLE_LABELS[match[1]] || match[1]);
+  return unresolved.length ? { tone: "required", label: `需补充：${[...new Set(unresolved)].join("、")}` } : null;
+}
+
 function codedError(code, message) {
   const error = new Error(message);
   error.code = code;
@@ -419,6 +490,12 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
     return safeArray(response?.data).map(normalizeTemplate).filter((item) => item.id);
   }
 
+  async function getJobOfferDefaults(jobId, { signal } = {}) {
+    const id = requireId(jobId, "JOB_ID_REQUIRED");
+    const response = await client.request(`/api/v1/job-definitions/${encodeURIComponent(id)}`, requestOptions(signal));
+    return { templateId: safeString(response?.data?.job?.offer_template_id) };
+  }
+
   async function createTemplate(values, { signal } = {}) {
     const response = await client.request("/api/v1/offer-templates", requestOptions(signal, {
       method: "POST", body: templateBody(values), idempotencyKey: idempotencyKey(),
@@ -500,6 +577,7 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
     submitOnboarding,
     listPendingApprovals,
     listTemplates,
+    getJobOfferDefaults,
     createTemplate,
     updateTemplate,
     getSpecialApprovers,

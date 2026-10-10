@@ -4,12 +4,17 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.orm import object_session
 
-from server.app.identity.models import AuditLog, Department, Job
-from server.app.integrations.feishu.models import FeishuDepartmentMapping, FeishuOnboardingConfig
+from server.app.governance.deletion_service import lock_candidate
+from server.app.identity.models import AuditLog, Department, Job, User, UserStatus
+from server.app.integrations.feishu.models import FeishuDepartmentMapping, FeishuIdentityBinding, FeishuOnboardingConfig
 from server.app.integrations.feishu.provider import ApprovalDefinition
 from server.app.onboarding.models import OnboardingRecord
+from server.app.onboarding.eligibility import candidate_deletion_pending
+from server.app.onboarding.schemas import FeishuApprovalNode, FeishuNodeApprovers
 from server.app.offers.models import Offer, OfferResponse
 from server.app.queue.repository import QueueRepository
 from server.app.recruiting.models import Application, Candidate, CandidateContact
@@ -41,6 +46,27 @@ class OnboardingNotReady(Exception):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+def lock_onboarding_candidate(db, organization_id, candidate_id):
+    """Serialize with governance before taking application/onboarding locks."""
+    return lock_candidate(db, organization_id, candidate_id)
+
+
+def lock_onboarding_record(db, organization_id, onboarding_id):
+    candidate_id = db.scalar(select(OnboardingRecord.candidate_id).where(
+        OnboardingRecord.organization_id == organization_id,
+        OnboardingRecord.id == onboarding_id,
+    ))
+    if candidate_id is None:
+        return None
+    lock_onboarding_candidate(db, organization_id, candidate_id)
+    # Redaction can remove the row while we wait for Candidate. Re-read it.
+    # SQLite has no row-lock wait; preserve its in-memory timezone-aware values.
+    return db.scalar(select(OnboardingRecord).where(
+        OnboardingRecord.organization_id == organization_id,
+        OnboardingRecord.id == onboarding_id,
+    ).with_for_update().execution_options(populate_existing=db.get_bind().dialect.name != "sqlite"))
 
 
 def business_date(now: datetime):
@@ -143,7 +169,14 @@ def onboarding_projection(
     job: Job | None = None,
     department: Department | None = None,
     expected_start_date=None,
+    db=None,
 ) -> dict:
+    subject = record if record is not None else application
+    if db is None and subject is not None:
+        db = object_session(subject)
+    deletion_pending = bool(db is not None and subject is not None and candidate_deletion_pending(
+        db, subject.organization_id, subject.candidate_id,
+    ))
     if record is None:
         return {
             "id": str(application.id) if application else None,
@@ -161,15 +194,15 @@ def onboarding_projection(
             "masked_phone": None,
             "masked_email": None,
             "instance_code": None,
-            "allowed_actions": {"update": application is not None, "start_onboarding": False},
-            "blocking_reason": "onboarding_data_missing",
+            "allowed_actions": {"update": application is not None and not deletion_pending, "start_onboarding": False},
+            "blocking_reason": "candidate_deletion_pending" if deletion_pending else "onboarding_data_missing",
         }
     pii = cipher.decrypt(record.pii_ciphertext)
     data_blocking_reason = onboarding_data_blocking_reason(pii)
     complete = data_blocking_reason is None
     date_reached = business_date(now) >= record.expected_start_date
-    can_start = complete and date_reached and record.status in {"ready", "failed"}
-    can_update = can_update_onboarding(record, data_blocking_reason)
+    can_start = complete and date_reached and record.status in {"ready", "failed"} and not deletion_pending
+    can_update = can_update_onboarding(record, data_blocking_reason) and not deletion_pending
     protected_failure_reason = (
         record.safe_error_code
         if record.status == "failed" and not can_update and data_blocking_reason is not None
@@ -197,7 +230,8 @@ def onboarding_projection(
             "start_onboarding": can_start,
         },
         "blocking_reason": None if can_start else (
-            protected_failure_reason
+            ("candidate_deletion_pending" if deletion_pending else None)
+            or protected_failure_reason
             or data_blocking_reason
             or ("expected_start_date_not_reached" if not date_reached else None)
             or ("onboarding_submission_in_progress" if record.status == "submitting" else None)
@@ -208,8 +242,13 @@ def onboarding_projection(
 
 
 def update_onboarding(db, record: OnboardingRecord, payload, *, cipher, expected_version: int, actor_user_id, trace_id: str):
+    record = lock_onboarding_record(db, record.organization_id, record.id)
+    if record is None:
+        raise OnboardingNotReady("onboarding_update_not_allowed")
     if record.version != expected_version:
         raise OnboardingVersionConflict
+    if candidate_deletion_pending(db, record.organization_id, record.candidate_id):
+        raise OnboardingNotReady("candidate_deletion_pending")
     current = cipher.decrypt(record.pii_ciphertext)
     if not can_update_onboarding(record, onboarding_data_blocking_reason(current)):
         raise OnboardingNotReady("onboarding_update_not_allowed")
@@ -257,6 +296,13 @@ def create_onboarding_from_accepted_offer(
     actor_user_id,
     trace_id: str,
 ):
+    lock_onboarding_candidate(db, application.organization_id, application.candidate_id)
+    application = db.scalar(select(Application).where(
+        Application.organization_id == application.organization_id,
+        Application.id == application.id,
+    ).with_for_update().execution_options(populate_existing=True))
+    if application is None:
+        raise OnboardingNotReady("accepted_offer_context_incomplete")
     if expected_version != 0:
         raise OnboardingVersionConflict
     values = (
@@ -273,6 +319,8 @@ def create_onboarding_from_accepted_offer(
     ).with_for_update())
     if existing is not None:
         raise OnboardingVersionConflict
+    if candidate_deletion_pending(db, application.organization_id, application.candidate_id):
+        raise OnboardingNotReady("candidate_deletion_pending")
     offer = db.scalar(select(Offer).where(
         Offer.organization_id == application.organization_id,
         Offer.application_id == application.id,
@@ -331,6 +379,93 @@ def create_onboarding_from_accepted_offer(
     return record
 
 
+def onboarding_config_blocking_reason(config: FeishuOnboardingConfig | None) -> str | None:
+    if config is None:
+        return "feishu_onboarding_not_configured"
+    if config.validation_status == "unvalidated":
+        return "feishu_onboarding_validation_required"
+    if config.validation_status != "valid":
+        return "feishu_onboarding_config_invalid"
+    if config.approval_nodes is None:
+        return "feishu_onboarding_validation_required"
+    if not config.enabled:
+        return "feishu_onboarding_disabled"
+    return None
+
+
+def approval_nodes_snapshot(definition: ApprovalDefinition) -> list[dict]:
+    nodes = getattr(definition, "nodes", None)
+    if nodes is None:
+        raise OnboardingNotReady("feishu_approval_node_metadata_missing")
+    try:
+        snapshot = [FeishuApprovalNode.model_validate({
+            "node_id": node.node_id, "name": node.name or node.node_id,
+            "need_approver": node.need_approver, "allow_multiple": node.allow_multiple,
+        }).model_dump() for node in nodes if node.need_approver]
+    except (ValidationError, AttributeError, TypeError):
+        raise OnboardingNotReady("feishu_approval_node_metadata_invalid") from None
+    if len({node["node_id"] for node in snapshot}) != len(snapshot):
+        raise OnboardingNotReady("feishu_approval_node_metadata_invalid")
+    return snapshot
+
+
+def approver_members(db, organization_id) -> list[dict]:
+    rows = db.execute(select(User, FeishuIdentityBinding.open_id).outerjoin(
+        FeishuIdentityBinding,
+        (FeishuIdentityBinding.organization_id == User.organization_id)
+        & (FeishuIdentityBinding.user_id == User.id),
+    ).where(User.organization_id == organization_id, User.status == UserStatus.ACTIVE)
+      .order_by(User.display_name, User.id)).all()
+    return [{
+        "user_id": str(user.id), "display_name": user.display_name,
+        "available": bool(open_id and open_id.strip()),
+        "unavailable_reason": None if open_id and open_id.strip() else "feishu_approver_unbound",
+    } for user, open_id in rows]
+
+
+def resolve_approver_members(db, organization_id, selections: list) -> tuple[dict, ...]:
+    try:
+        parsed = [FeishuNodeApprovers.model_validate(item) for item in selections]
+    except (ValidationError, TypeError):
+        raise OnboardingNotReady("feishu_approver_selection_invalid") from None
+    if len({item.node_id for item in parsed}) != len(parsed):
+        raise OnboardingNotReady("feishu_approver_selection_invalid")
+    user_ids = {user_id for item in parsed for user_id in item.user_ids}
+    bindings = dict(db.execute(select(User.id, FeishuIdentityBinding.open_id).join(
+        FeishuIdentityBinding,
+        (FeishuIdentityBinding.organization_id == User.organization_id)
+        & (FeishuIdentityBinding.user_id == User.id),
+    ).where(User.organization_id == organization_id, User.status == UserStatus.ACTIVE,
+            User.id.in_(user_ids))).all()) if user_ids else {}
+    if any(not bindings.get(user_id) or not bindings[user_id].strip() for user_id in user_ids):
+        raise OnboardingNotReady("feishu_approver_unavailable")
+    return tuple({"key": item.node_id, "value": [bindings[user_id] for user_id in item.user_ids]}
+                 for item in parsed if item.user_ids)
+
+
+def resolve_node_approvers(db, organization_id, selections: list, nodes: list | None) -> tuple[dict, ...]:
+    if nodes is None:
+        raise OnboardingNotReady("feishu_onboarding_validation_required")
+    try:
+        metadata = [FeishuApprovalNode.model_validate(node) for node in nodes]
+        selected = [FeishuNodeApprovers.model_validate(item) for item in selections]
+    except (ValidationError, TypeError):
+        raise OnboardingNotReady("feishu_approver_selection_invalid") from None
+    by_id = {node.node_id: node for node in metadata}
+    if len(by_id) != len(metadata):
+        raise OnboardingNotReady("feishu_approval_node_metadata_invalid")
+    selected_ids = {item.node_id for item in selected}
+    if selected_ids - by_id.keys():
+        raise OnboardingNotReady("feishu_approver_node_invalid")
+    for node in metadata:
+        users = next((item.user_ids for item in selected if item.node_id == node.node_id), [])
+        if node.need_approver and not users:
+            raise OnboardingNotReady("feishu_approver_required")
+        if not node.allow_multiple and len(users) > 1:
+            raise OnboardingNotReady("feishu_approver_multiple_not_allowed")
+    return resolve_approver_members(db, organization_id, selections)
+
+
 def start_onboarding_submission(
     db,
     record: OnboardingRecord,
@@ -342,10 +477,15 @@ def start_onboarding_submission(
     now: datetime,
     trace_id: str,
 ):
+    record = lock_onboarding_record(db, record.organization_id, record.id)
+    if record is None:
+        raise OnboardingNotReady("onboarding_submission_not_allowed")
     if record.generation == generation and record.status in {"submitting", "submitted"}:
         return record, True
     if record.version != expected_version:
         raise OnboardingVersionConflict
+    if candidate_deletion_pending(db, record.organization_id, record.candidate_id):
+        raise OnboardingNotReady("candidate_deletion_pending")
     if record.status not in {"ready", "failed"}:
         raise OnboardingNotReady("onboarding_submission_not_allowed")
     if business_date(now) < record.expected_start_date:
@@ -355,11 +495,11 @@ def start_onboarding_submission(
         raise OnboardingNotReady(data_blocking_reason)
     config = db.scalar(select(FeishuOnboardingConfig).where(
         FeishuOnboardingConfig.organization_id == record.organization_id,
-        FeishuOnboardingConfig.enabled.is_(True),
-        FeishuOnboardingConfig.validation_status == "valid",
     ))
-    if config is None:
-        raise OnboardingNotReady("feishu_onboarding_not_configured")
+    config_blocking_reason = onboarding_config_blocking_reason(config)
+    if config_blocking_reason:
+        raise OnboardingNotReady(config_blocking_reason)
+    resolve_node_approvers(db, record.organization_id, config.node_approvers, config.approval_nodes)
     mapping = db.scalar(select(FeishuDepartmentMapping).where(
         FeishuDepartmentMapping.organization_id == record.organization_id,
         FeishuDepartmentMapping.department_id == record.department_id,

@@ -40,6 +40,7 @@ from server.app.onboarding.service import (
     validate_definition,
 )
 from server.app.queue.models import OutboxEvent
+from server.app.queue.service import PermanentJobError
 
 
 KEY = b"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
@@ -336,6 +337,7 @@ def test_historical_other_can_be_corrected_after_a_retryable_failure_without_cha
                 organization_id=record.organization_id,
                 approval_code="approval",
                 field_mapping=SEMANTICS,
+                approval_nodes=[],
                 enabled=True,
                 validation_status="valid",
                 definition_fingerprint="f" * 64,
@@ -452,6 +454,7 @@ def test_failed_onboarding_retry_reuses_the_original_generation():
                 organization_id=record.organization_id,
                 approval_code="approval",
                 field_mapping=SEMANTICS,
+                approval_nodes=[],
                 enabled=True,
                 validation_status="valid",
                 definition_fingerprint="f" * 64,
@@ -489,7 +492,7 @@ def test_http_provider_reads_approval_option_ids_from_legacy_and_v2_shapes():
         if request.url.path.endswith("/tenant_access_token/internal"):
             return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant"})
         if request.url.path.endswith("/approval/v4/approvals/approval"):
-            return httpx.Response(200, json={"code": 0, "data": {"form": json.dumps([
+            return httpx.Response(200, json={"code": 0, "data": {"node_list": [], "form": json.dumps([
                 {"id": "legacy", "type": "radio", "option": [{"value": "M"}, {"value": "F"}]},
                 {"id": "v2", "type": "radioV2", "value": [{"key": "O"}]},
             ])}})
@@ -528,6 +531,7 @@ def test_hr_submission_queues_only_ids_and_worker_marks_submitted_after_provider
                 organization_id=organization_id,
                 approval_code=definition.approval_code,
                 field_mapping=SEMANTICS,
+                approval_nodes=[],
                 enabled=True,
                 validation_status="valid",
                 definition_fingerprint=definition.fingerprint,
@@ -609,6 +613,130 @@ def test_hr_submission_queues_only_ids_and_worker_marks_submitted_after_provider
         assert request.department_id is None
         assert idempotency_key == str(generation)
         assert {item["id"] for item in request.form} == {value["control_id"] for value in SEMANTICS.values()}
+
+
+@pytest.mark.parametrize("validation_status,enabled,expected_code", [
+    (None, False, "feishu_onboarding_not_configured"),
+    ("unvalidated", False, "feishu_onboarding_validation_required"),
+    ("invalid", False, "feishu_onboarding_config_invalid"),
+    ("valid", False, "feishu_onboarding_disabled"),
+    ("valid", True, None),
+])
+@pytest.mark.parametrize("consumer", ["submission", "worker"])
+def test_onboarding_config_states_preserve_gate_and_report_specific_reason(
+    validation_status, enabled, expected_code, consumer,
+):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    pii_cipher = OnboardingPiiCipher(KEY)
+    feishu_cipher = FeishuSecretCipher(KEY)
+    organization_id, actor_id, department_id = uuid4(), uuid4(), uuid4()
+    generation = uuid4()
+    now = datetime(2026, 8, 18, tzinfo=timezone.utc)
+    with sessions.begin() as db:
+        record = OnboardingRecord(
+            organization_id=organization_id, offer_response_id=uuid4(), offer_id=uuid4(),
+            application_id=uuid4(), candidate_id=uuid4(), job_id=uuid4(),
+            department_id=department_id, job_title="Role", department_name="Department",
+            expected_start_date=now.date(),
+            pii_ciphertext=pii_cipher.encrypt({
+                "name": "Candidate", "gender": "female", "phone": "+8613800138000",
+                "email": "candidate@example.test", "home_address": "Shenzhen",
+            }),
+            status="submitting" if consumer == "worker" else "ready",
+            generation=generation if consumer == "worker" else None,
+            started_by=actor_id if consumer == "worker" else None,
+            started_at=now if consumer == "worker" else None,
+        )
+        db.add_all([
+            record,
+            FeishuOrganizationConfig(
+                organization_id=organization_id, app_id="cli_test",
+                encrypted_app_secret=feishu_cipher.encrypt("secret-value"),
+                redirect_uri="https://hr.example.test/api/v1/auth/feishu/callback",
+                enabled=True, created_by=actor_id, updated_by=actor_id,
+            ),
+            FeishuDepartmentMapping(
+                organization_id=organization_id, department_id=department_id,
+                feishu_department_id="od_engineering",
+            ),
+            FeishuIdentityBinding(organization_id=organization_id, user_id=actor_id, open_id="ou_hr"),
+            FeishuOnboardingConfig(
+                organization_id=uuid4(), approval_code="other_org", field_mapping=SEMANTICS,
+                enabled=True, validation_status="valid", created_by=actor_id, updated_by=actor_id,
+            ),
+        ])
+        config = None
+        if validation_status is not None:
+            config = FeishuOnboardingConfig(
+                organization_id=organization_id, approval_code=_definition().approval_code,
+                field_mapping=SEMANTICS, enabled=enabled, validation_status=validation_status,
+                approval_nodes=[],
+                definition_fingerprint=_definition().fingerprint,
+                created_by=actor_id, updated_by=actor_id,
+            )
+            db.add(config)
+        db.flush()
+        record_id = record.id
+        if consumer == "submission":
+            def submit():
+                return start_onboarding_submission(
+                    db, record, expected_version=1, generation=generation,
+                    actor_user_id=actor_id, cipher=pii_cipher, now=now, trace_id="config-state",
+                )
+            if expected_code:
+                with pytest.raises(OnboardingNotReady) as error:
+                    submit()
+                assert error.value.code == expected_code
+                assert (record.status, record.version, record.generation) == ("ready", 1, None)
+                assert db.scalar(select(OutboxEvent)) is None
+            else:
+                submit()
+                assert record.status == "submitting"
+                assert db.scalar(select(OutboxEvent).where(OutboxEvent.aggregate_id == record.id)) is not None
+        if config is not None:
+            assert (config.validation_status, config.enabled, config.version) == (validation_status, enabled, 1)
+
+    if consumer == "worker":
+        class GuardedProvider(FakeFeishuProvider):
+            def get_approval_definition(self, credentials, approval_code):
+                assert expected_code is None, "Blocked config must not call Feishu"
+                return super().get_approval_definition(credentials, approval_code)
+
+        provider = GuardedProvider()
+        provider.approval_definition = _definition()
+        handler = FeishuOnboardingOutboxHandler(sessions, provider, feishu_cipher, pii_cipher)
+        event = SimpleNamespace(payload={
+            "organization_id": str(organization_id), "onboarding_id": str(record_id),
+            "generation": str(generation),
+        })
+        from server.app.queue.repository import QueueRepository
+        with sessions.begin() as db:
+            persisted_event = QueueRepository(db).append_outbox(
+                organization_id, "feishu.approval.onboarding.create", "feishu_onboarding", record_id, event.payload,
+            )
+            event_id = persisted_event.id
+        if expected_code:
+            with pytest.raises(PermanentJobError, match=expected_code):
+                asyncio.run(handler(event, event_id))
+        else:
+            asyncio.run(handler(event, event_id))
+        with sessions() as db:
+            record = db.get(OnboardingRecord, record_id)
+            assert record.status == ("failed" if expected_code else "submitted")
+            assert record.safe_error_code == expected_code
+            assert record.generation == generation
+            assert record.version == 2
+            if expected_code:
+                assert record.failed_at is not None
+                assert provider.approval_instances == []
+            config = db.scalar(select(FeishuOnboardingConfig).where(
+                FeishuOnboardingConfig.organization_id == organization_id,
+            ))
+            if config is not None:
+                assert (config.validation_status, config.enabled, config.version) == (validation_status, enabled, 1)
+    engine.dispose()
 
 
 def test_hr_submission_is_blocked_before_shanghai_start_date():

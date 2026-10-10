@@ -534,6 +534,21 @@ test("server candidate detail exposes the connected interview path and reports c
   assert.deepEqual(candidateHelpers.candidateWorkflowActions("待决策", "用人经理").map((item) => item.id), ["hiring_approved", "hiring_rejected"]);
   assert.deepEqual(candidateHelpers.candidateWorkflowActions("待安排", "HR 招聘专员"), []);
   assert.deepEqual(candidateHelpers.candidateWorkflowActions("已通过", "招聘管理员"), []);
+  assert.deepEqual(candidateHelpers.candidateWorkflowActions("待复核", "用人经理", {
+    currentUserId: "manager-1",
+    reviewTask: { assigneeId: "manager-1" },
+    serverBacked: true,
+  }).map((item) => item.id), ["review_approved", "review_rejected"]);
+  assert.deepEqual(candidateHelpers.candidateWorkflowActions("待复核", "用人经理", {
+    currentUserId: "manager-2",
+    reviewTask: { assigneeId: "manager-1" },
+    serverBacked: true,
+  }), []);
+  assert.deepEqual(candidateHelpers.candidateWorkflowActions("待复核", "招聘管理员", {
+    currentUserId: "admin-1",
+    reviewTask: { assigneeId: "manager-1" },
+    serverBacked: true,
+  }).map((item) => item.id), ["review_approved", "review_rejected"]);
   assert.equal(candidateHelpers.candidateNextStep("已通过"), "HR 在 Offer 页完成审批、发送与候选人确认");
   assert.equal(candidateHelpers.candidateNextStep("面试中"), "完成当前面试与面试官反馈");
   assert.equal(candidateHelpers.candidateNextStep("待安排", "archived"), "当前职位不在招聘中，不能安排新的面试");

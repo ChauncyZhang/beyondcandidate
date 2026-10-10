@@ -27,7 +27,7 @@ test("loads server-backed members and departments without seed data", async () =
   await controller.load();
 
   assert.deepEqual(controller.getSnapshot().users, [{
-    id: "user-1", name: "林岚", email: "lin@example.test", departmentId: "dep-1", department: "技术部", roleValues: ["recruiter"], roles: ["HR 招聘专员"], role: "HR 招聘专员", recruitingScopeType: "jobs", recruitingDepartmentIds: [], status: "待激活",
+    id: "user-1", name: "林岚", email: "lin@example.test", departmentId: "dep-1", department: "技术部", roleValues: ["recruiter"], roles: ["HR 招聘专员"], role: "HR 招聘专员", recruitingScopeType: "jobs", recruitingDepartmentIds: [], status: "待激活", rawStatus: "invited",
   }]);
   assert.deepEqual(controller.getSnapshot().departments, [{ id: "dep-1", name: "技术部", parentId: null, status: "active", memberCount: 6, jobCount: 3 }]);
   assert.equal(controller.getSnapshot().status, "ready");

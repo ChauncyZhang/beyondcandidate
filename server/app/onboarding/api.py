@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import delete, select
 
@@ -20,9 +20,14 @@ from server.app.onboarding.schemas import FeishuOnboardingConfigWrite, Onboardin
 from server.app.onboarding.service import (
     OnboardingNotReady,
     OnboardingVersionConflict,
+    approval_nodes_snapshot,
+    approver_members,
     create_onboarding_from_accepted_offer,
+    lock_onboarding_candidate,
     onboarding_projection,
     normalize_stored_field_mapping,
+    resolve_approver_members,
+    resolve_node_approvers,
     start_onboarding_submission,
     update_onboarding,
     validate_definition,
@@ -65,7 +70,13 @@ def _authorized_application(db, principal, application_id, *, lock=False):
             AUTH.job_predicate(principal, RecruitingAction.MANAGE_CANDIDATE, Job),
         )
     )
-    return db.scalar(query.with_for_update() if lock else query)
+    if not lock:
+        return db.scalar(query)
+    application = db.scalar(query)
+    if application is None:
+        return None
+    lock_onboarding_candidate(db, application.organization_id, application.candidate_id)
+    return db.scalar(query.with_for_update(of=Application).execution_options(populate_existing=True))
 
 
 def _authorized_record(db, principal, onboarding_id, *, lock=False):
@@ -81,7 +92,13 @@ def _authorized_record(db, principal, onboarding_id, *, lock=False):
             AUTH.job_predicate(principal, RecruitingAction.MANAGE_CANDIDATE, Job),
         )
     )
-    return db.scalar(query.with_for_update() if lock else query)
+    if not lock:
+        return db.scalar(query)
+    record = db.scalar(query)
+    if record is None:
+        return None
+    lock_onboarding_candidate(db, record.organization_id, record.candidate_id)
+    return db.scalar(query.with_for_update(of=OnboardingRecord).execution_options(populate_existing=True))
 
 
 @router.get("/applications/{application_id}/onboarding")
@@ -231,7 +248,7 @@ def submit_onboarding(
 
 def _config_view(config, mappings):
     if config is None:
-        return {"configured": False, "enabled": False, "validation_status": "unvalidated", "department_mappings": []}
+        return {"configured": False, "enabled": False, "validation_status": "unvalidated", "department_mappings": [], "node_approvers": [], "approval_nodes": None}
     field_mapping = {
         semantic: {
             "control_id": value["control_id"],
@@ -244,6 +261,8 @@ def _config_view(config, mappings):
         "configured": True,
         "approval_code": config.approval_code,
         "field_mapping": field_mapping,
+        "node_approvers": config.node_approvers,
+        "approval_nodes": config.approval_nodes,
         "enabled": config.enabled,
         "validation_status": config.validation_status,
         "validated_at": config.validated_at.isoformat() if config.validated_at else None,
@@ -286,7 +305,12 @@ def put_onboarding_config(
     if not _config_admin(principal):
         return problem(request, 403, "forbidden", "The operation is not permitted.")
     mapping_value = {key: value.model_dump(mode="json", exclude_none=True) for key, value in payload.field_mapping.items()}
+    node_approvers = [item.model_dump(mode="json") for item in payload.node_approvers]
     with request.app.state.identity_store.sync_session() as db:
+        try:
+            resolve_approver_members(db, principal.organization_id, node_approvers)
+        except OnboardingNotReady as error:
+            return problem(request, 422, error.code, "An approver is not an active, Feishu-bound organization member.")
         department_ids = set(db.scalars(select(Department.id).where(
             Department.organization_id == principal.organization_id,
             Department.id.in_([item.department_id for item in payload.department_mappings]),
@@ -306,14 +330,21 @@ def put_onboarding_config(
             config
             and config.approval_code == payload.approval_code
             and normalize_stored_field_mapping(config.field_mapping) == mapping_value
+            and config.node_approvers == node_approvers
         )
-        if payload.enabled and (config is None or not definition_unchanged or config.validation_status != "valid"):
+        if payload.enabled and (config is None or not definition_unchanged or config.validation_status != "valid" or config.approval_nodes is None):
             return problem(request, 409, "feishu_onboarding_validation_required", "Validate the approval definition before enabling it.")
+        if payload.enabled:
+            try:
+                resolve_node_approvers(db, principal.organization_id, node_approvers, config.approval_nodes)
+            except OnboardingNotReady as error:
+                return problem(request, 409, error.code, "The fixed approval selections are invalid.")
         if config is None:
             config = FeishuOnboardingConfig(
                 organization_id=principal.organization_id,
                 approval_code=payload.approval_code,
                 field_mapping=mapping_value,
+                node_approvers=node_approvers,
                 enabled=False,
                 created_by=principal.user_id,
                 updated_by=principal.user_id,
@@ -322,6 +353,7 @@ def put_onboarding_config(
         else:
             config.approval_code = payload.approval_code
             config.field_mapping = mapping_value
+            config.node_approvers = node_approvers
             config.enabled = payload.enabled
             config.updated_by = principal.user_id
             config.version += 1
@@ -330,6 +362,7 @@ def put_onboarding_config(
                 config.validated_at = None
                 config.validation_safe_error_code = None
                 config.definition_fingerprint = None
+                config.approval_nodes = None
                 config.enabled = False
         db.execute(delete(FeishuDepartmentMapping).where(FeishuDepartmentMapping.organization_id == principal.organization_id))
         for item in payload.department_mappings:
@@ -349,6 +382,35 @@ def put_onboarding_config(
         db.commit()
         mappings = list(db.scalars(select(FeishuDepartmentMapping).where(FeishuDepartmentMapping.organization_id == principal.organization_id)))
         return _response(_config_view(config, mappings), etag=config.version)
+
+
+@router.get("/settings/integrations/feishu/onboarding-approval/approver-options")
+def get_onboarding_approver_options(request: Request, approval_code: str = Query(min_length=1, max_length=255)):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
+    if not _config_admin(principal):
+        return problem(request, 403, "forbidden", "The operation is not permitted.")
+    approval_code = approval_code.strip()
+    if not approval_code:
+        return problem(request, 422, "validation_failed", "The approval code is required.")
+    with request.app.state.identity_store.sync_session() as db:
+        base = db.scalar(select(FeishuOrganizationConfig).where(
+            FeishuOrganizationConfig.organization_id == principal.organization_id,
+        ))
+        if base is None or not base.enabled or base.encrypted_app_secret is None:
+            return problem(request, 409, "feishu_onboarding_not_configured", "Feishu must be configured first.")
+        credentials = FeishuCredentials(base.app_id,
+            request.app.state.feishu_secret_cipher.decrypt(base.encrypted_app_secret), base.redirect_uri, base.calendar_id)
+        members = approver_members(db, principal.organization_id)
+    try:
+        definition = request.app.state.feishu_provider.get_approval_definition(credentials, approval_code)
+        nodes = approval_nodes_snapshot(definition)
+    except FeishuProviderError as error:
+        return problem(request, 409, error.safe_code, "The approval nodes could not be loaded.")
+    except OnboardingNotReady as error:
+        return problem(request, 409, error.code, "The approval nodes could not be loaded.")
+    return _response({"nodes": nodes, "members": members})
 
 
 @router.post("/settings/integrations/feishu/onboarding-approval/validate")
@@ -379,12 +441,17 @@ def validate_onboarding_config(request: Request, if_match: str | None = Header(d
         field_mapping = normalize_stored_field_mapping(config.field_mapping)
 
     definition = None
+    nodes = None
     safe_error_code = None
     try:
         definition = request.app.state.feishu_provider.get_approval_definition(credentials, approval_code)
         safe_error_code = validate_definition(field_mapping, definition)
+        if not safe_error_code:
+            nodes = approval_nodes_snapshot(definition)
     except FeishuProviderError as error:
         safe_error_code = error.safe_code
+    except OnboardingNotReady as error:
+        safe_error_code = error.code
 
     now = request.app.state.identity_service.clock.current_time()
     with request.app.state.identity_store.sync_session() as db:
@@ -395,10 +462,16 @@ def validate_onboarding_config(request: Request, if_match: str | None = Header(d
         ).with_for_update())
         if config is None:
             return problem(request, 409, "feishu_config_changed", "Feishu onboarding configuration changed during validation.")
+        if not safe_error_code:
+            try:
+                resolve_node_approvers(db, principal.organization_id, config.node_approvers, nodes)
+            except OnboardingNotReady as error:
+                safe_error_code = error.code
         config.validation_status = "invalid" if safe_error_code else "valid"
         config.validated_at = now
         config.validation_safe_error_code = safe_error_code
         config.definition_fingerprint = definition.fingerprint if definition and not safe_error_code else None
+        config.approval_nodes = nodes if not safe_error_code else None
         config.updated_by = principal.user_id
         if safe_error_code:
             config.enabled = False

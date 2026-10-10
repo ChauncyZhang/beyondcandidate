@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ApiError, createApiClient } from "./apiClient.js";
+import { createSessionController } from "./session.js";
 
 function jsonResponse(body, { status = 200, headers = {} } = {}) {
   return new Response(body === null ? null : JSON.stringify(body), {
@@ -8,6 +9,178 @@ function jsonResponse(body, { status = 200, headers = {} } = {}) {
     headers: { "Content-Type": "application/json", ...headers },
   });
 }
+
+function barrier() {
+  let release;
+  const promise = new Promise((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
+for (const operation of ["request", "download"]) {
+  for (const epochChange of ["before refresh", "during refresh"]) {
+    test(`${operation} does not refresh or replay a stale write after login ${epochChange}`, async () => {
+      const writeResponse = barrier();
+      const refreshStarted = barrier();
+      const refreshResponse = barrier();
+      const calls = [];
+      let meCalls = 0;
+      const oldUser = { id: "old-user", roles: ["recruiter"] };
+      const newUser = { id: "new-user", roles: ["recruiter"] };
+      const client = createApiClient({ fetchImpl: async (path, options) => {
+        calls.push({ path, options });
+        if (path === "/api/v1/auth/login") {
+          return jsonResponse({ data: { authenticated: true } }, { headers: { "X-CSRF-Token": "new-login-csrf" } });
+        }
+        if (path === "/api/v1/me") {
+          meCalls += 1;
+          if (meCalls === 1) {
+            return jsonResponse({ data: oldUser }, { headers: { "X-CSRF-Token": "old-csrf" } });
+          }
+          if (epochChange === "during refresh" && meCalls === 2) {
+            refreshStarted.release();
+            await refreshResponse.promise;
+            return jsonResponse({ data: oldUser }, { headers: { "X-CSRF-Token": "late-old-csrf" } });
+          }
+          return jsonResponse({ data: newUser }, { headers: { "X-CSRF-Token": "new-session-csrf" } });
+        }
+        if (path === "/api/v1/stale-write") {
+          await writeResponse.promise;
+          return jsonResponse({ code: "csrf_validation_failed", title: "Forbidden", detail: "Invalid CSRF token." }, {
+            status: 403, headers: { "Content-Type": "application/problem+json" },
+          });
+        }
+        assert.equal(path, "/api/v1/current-write");
+        return jsonResponse({ data: { ok: true } });
+      } });
+      const session = createSessionController(client);
+      try {
+        await session.bootstrap();
+        const outcome = client[operation]("/api/v1/stale-write", { method: "POST", body: { action: "old-action" } })
+          .then((value) => ({ value }), (error) => ({ error }));
+        if (epochChange === "during refresh") {
+          writeResponse.release();
+          await refreshStarted.promise;
+        }
+
+        await session.login({ email: "new@example.test", password: "test-password" });
+        assert.equal(client.getAuthEpoch(), 1);
+        const authenticated = session.getSnapshot();
+        writeResponse.release();
+        refreshResponse.release();
+
+        const { error } = await outcome;
+        assert.ok(error instanceof ApiError);
+        assert.equal(error.status, 403);
+        assert.equal(error.code, "csrf_validation_failed");
+        assert.equal(error.title, "Forbidden");
+        assert.equal(error.detail, "Invalid CSRF token.");
+        assert.equal(session.getSnapshot(), authenticated);
+        assert.equal(authenticated.user.id, "new-user");
+        assert.equal(calls.filter(({ path }) => path === "/api/v1/stale-write").length, 1);
+        assert.equal(meCalls, epochChange === "before refresh" ? 2 : 3);
+
+        await client.request("/api/v1/current-write", { method: "POST", body: {} });
+        assert.equal(calls.at(-1).options.headers.get("X-CSRF-Token"), "new-session-csrf");
+      } finally {
+        session.dispose();
+      }
+    });
+  }
+}
+
+for (const operation of ["request", "download"]) {
+  for (const heldPhase of ["login", "me"]) {
+    test(`${operation} cannot refresh or replay an old write while new ${heldPhase} is held`, async () => {
+      const writeResponse = barrier();
+      const phaseStarted = barrier();
+      const phaseResponse = barrier();
+      const calls = [];
+      let meCalls = 0;
+      const client = createApiClient({ fetchImpl: async (path, options) => {
+        calls.push({ path, options });
+        if (path === "/api/v1/auth/login") {
+          if (heldPhase === "login") {
+            phaseStarted.release();
+            await phaseResponse.promise;
+          }
+          return jsonResponse({ data: { authenticated: true } }, { headers: { "X-CSRF-Token": "new-login-csrf" } });
+        }
+        if (path === "/api/v1/me") {
+          meCalls += 1;
+          if (meCalls === 1) {
+            return jsonResponse({ data: { id: "old-user", roles: ["recruiter"] } }, { headers: { "X-CSRF-Token": "old-csrf" } });
+          }
+          if (heldPhase === "me" && meCalls === 2) {
+            phaseStarted.release();
+            await phaseResponse.promise;
+          }
+          return jsonResponse({ data: { id: "new-user", roles: ["recruiter"] } }, { headers: { "X-CSRF-Token": "new-session-csrf" } });
+        }
+        if (path === "/api/v1/stale-write") {
+          await writeResponse.promise;
+          return jsonResponse({ code: "csrf_validation_failed", title: "Forbidden", detail: "Invalid CSRF token." }, {
+            status: 403, headers: { "Content-Type": "application/problem+json" },
+          });
+        }
+        assert.equal(path, "/api/v1/current-write");
+        return jsonResponse({ data: { ok: true } });
+      } });
+      const session = createSessionController(client);
+      let loginPromise;
+      try {
+        await session.bootstrap();
+        const outcome = client[operation]("/api/v1/stale-write", { method: "POST", body: { action: "old-action" } })
+          .then((value) => ({ value }), (error) => ({ error }));
+        loginPromise = session.login({ email: "new@example.test", password: "test-password" });
+        await phaseStarted.promise;
+        const submitting = session.getSnapshot();
+        assert.equal(submitting.status, "anonymous");
+        assert.equal(submitting.submitting, true);
+        writeResponse.release();
+
+        const { error } = await outcome;
+        assert.ok(error instanceof ApiError);
+        assert.equal(error.status, 403);
+        assert.equal(error.code, "csrf_validation_failed");
+        assert.equal(error.title, "Forbidden");
+        assert.equal(error.detail, "Invalid CSRF token.");
+        assert.equal(session.getSnapshot(), submitting);
+        assert.equal(client.getAuthEpoch(), 1);
+        assert.equal(calls.filter(({ path }) => path === "/api/v1/stale-write").length, 1);
+        assert.equal(meCalls, heldPhase === "login" ? 1 : 2);
+
+        phaseResponse.release();
+        await loginPromise;
+        assert.equal(session.getSnapshot().user.id, "new-user");
+        assert.equal(session.getSnapshot().status, "authenticated");
+        assert.equal(client.getAuthEpoch(), 1);
+        await client.request("/api/v1/current-write", { method: "POST", body: {} });
+        assert.equal(calls.at(-1).options.headers.get("X-CSRF-Token"), "new-session-csrf");
+      } finally {
+        writeResponse.release();
+        phaseResponse.release();
+        await loginPromise;
+        session.dispose();
+      }
+    });
+  }
+}
+
+test("Feishu approver options encode the draft code in a credentialed read and unwrap nodes and members", async () => {
+  const calls = [];
+  const data = { nodes: [{ node_id: "approval", name: "HR", need_approver: true, allow_multiple: false }], members: [{ user_id: "00000000-0000-4000-8000-000000000001", display_name: "HR", available: false, unavailable_reason: "feishu_approver_unbound" }] };
+  const client = createApiClient({ fetchImpl: async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse({ data });
+  } });
+  assert.deepEqual(await client.getFeishuOnboardingApproverOptions("draft /?&中文"), data);
+  const url = new URL(calls[0].url, "https://example.test");
+  assert.equal(url.pathname, "/api/v1/settings/integrations/feishu/onboarding-approval/approver-options");
+  assert.deepEqual([...url.searchParams], [["approval_code", "draft /?&中文"]]);
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(calls[0].options.credentials, "include");
+  assert.equal(calls[0].options.body, undefined);
+});
 
 test("登录上下文只读取公开的部署组织信息", async () => {
   const calls = [];
@@ -65,6 +238,66 @@ test("GET /me 轮换 CSRF，后续请求支持幂等键与 If-Match", async () =
   assert.equal(headers.get("X-CSRF-Token"), "rotated-csrf");
   assert.equal(headers.get("Idempotency-Key"), "request-1");
   assert.equal(headers.get("If-Match"), '"7"');
+});
+
+test("写请求遇到失效 CSRF 时刷新令牌并以相同幂等键和版本重试一次", async () => {
+  const calls = [];
+  const responses = [
+    jsonResponse({ data: { display_name: "林岚" } }, { headers: { "X-CSRF-Token": "stale-csrf" } }),
+    jsonResponse({ code: "csrf_validation_failed", title: "Forbidden" }, { status: 403, headers: { "Content-Type": "application/problem+json" } }),
+    jsonResponse({ data: { display_name: "林岚" } }, { headers: { "X-CSRF-Token": "fresh-csrf" } }),
+    jsonResponse({ data: { id: "application-1", stage: "interview_pending" } }),
+  ];
+  const client = createApiClient({ fetchImpl: async (url, options) => {
+    calls.push({ url, options });
+    return responses.shift();
+  } });
+
+  await client.getMe();
+  const result = await client.request("/api/v1/applications/application-1/workflow-actions", {
+    method: "POST",
+    body: { action: "review_approved" },
+    idempotencyKey: "review-once",
+    ifMatch: '"3"',
+  });
+
+  assert.equal(result.data.stage, "interview_pending");
+  assert.deepEqual(calls.map((call) => call.url), [
+    "/api/v1/me",
+    "/api/v1/applications/application-1/workflow-actions",
+    "/api/v1/me",
+    "/api/v1/applications/application-1/workflow-actions",
+  ]);
+  assert.equal(calls[1].options.headers.get("X-CSRF-Token"), "stale-csrf");
+  assert.equal(calls[3].options.headers.get("X-CSRF-Token"), "fresh-csrf");
+  assert.equal(calls[3].options.headers.get("Idempotency-Key"), "review-once");
+  assert.equal(calls[3].options.headers.get("If-Match"), '"3"');
+  assert.equal(calls[3].options.body, calls[1].options.body);
+});
+
+test("POST 下载遇到失效 CSRF 时刷新令牌并重试一次", async () => {
+  const calls = [];
+  const responses = [
+    jsonResponse({ data: { display_name: "林岚" } }, { headers: { "X-CSRF-Token": "stale-download-csrf" } }),
+    jsonResponse({ code: "csrf_validation_failed" }, { status: 403, headers: { "Content-Type": "application/problem+json" } }),
+    jsonResponse({ data: { display_name: "林岚" } }, { headers: { "X-CSRF-Token": "fresh-download-csrf" } }),
+    new Response(new Blob(["resume"]), { status: 200, headers: { "Content-Disposition": 'attachment; filename="resume.pdf"' } }),
+  ];
+  const client = createApiClient({ fetchImpl: async (url, options) => {
+    calls.push({ url, options });
+    return responses.shift();
+  } });
+
+  await client.getMe();
+  const result = await client.download("/api/v1/download-tickets/consume", {
+    method: "POST",
+    body: { token: "one-time" },
+  });
+
+  assert.equal(result.filename, "resume.pdf");
+  assert.equal(calls[1].options.headers.get("X-CSRF-Token"), "stale-download-csrf");
+  assert.equal(calls[3].options.headers.get("X-CSRF-Token"), "fresh-download-csrf");
+  assert.equal(calls[3].options.body, calls[1].options.body);
 });
 
 test("markNotificationRead sends the opaque application and event version with CSRF", async () => {

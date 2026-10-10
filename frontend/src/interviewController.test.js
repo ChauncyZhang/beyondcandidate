@@ -121,6 +121,25 @@ test("loads every interview for one application without relying on the global fi
   ]);
 });
 
+test("loads every page inside an exact interview window", async () => {
+  const secondInterview = apiInterview({ id: "11111111-1111-4111-8111-111111111112" });
+  const { client, calls } = queuedClient([
+    { data: [apiInterview()], meta: { next_cursor: "NEXT" } },
+    { data: [secondInterview], meta: { next_cursor: null } },
+  ]);
+
+  const records = await createInterviewController({ client }).listAll({
+    from: "2026-09-02T08:00:00.000Z",
+    to: "2026-09-09T08:00:00.000Z",
+  });
+
+  assert.deepEqual(records.map((item) => item.id), [INTERVIEW_ID, secondInterview.id]);
+  assert.deepEqual(calls.map((call) => call.path), [
+    "/api/v1/interviews?from=2026-09-02T08%3A00%3A00.000Z&to=2026-09-09T08%3A00%3A00.000Z&limit=100",
+    "/api/v1/interviews?from=2026-09-02T08%3A00%3A00.000Z&to=2026-09-09T08%3A00%3A00.000Z&cursor=NEXT&limit=100",
+  ]);
+});
+
 test("normalizes masked candidate email delivery separately from Feishu notification state", async () => {
   const { client } = queuedClient([{ data: [apiInterview({
     notification_status: "failed",

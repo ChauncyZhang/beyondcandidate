@@ -287,23 +287,30 @@ class IdentityService:
     def accept_password_invitation(
         self, token: str, password: str, *, trace_id: str
     ) -> dict[str, str]:
-        now = self.clock.current_time()
         with self.store.sync_session() as db:
+            user_id = db.scalar(
+                select(PasswordInvitation.user_id)
+                .where(PasswordInvitation.token_hash == hash_token(token))
+            )
+            if user_id is None:
+                raise InvitationInvalidOrExpired
+            user = db.scalar(select(User).where(User.id == user_id).with_for_update())
             invitation = db.scalar(
                 select(PasswordInvitation)
-                .options(selectinload(PasswordInvitation.user))
                 .where(PasswordInvitation.token_hash == hash_token(token))
                 .with_for_update(of=PasswordInvitation)
             )
+            now = self.clock.current_time()
             if (
                 invitation is None
                 or invitation.used_at is not None
                 or self._aware(invitation.expires_at) <= now
-                or invitation.user.status != UserStatus.INVITED
+                or user is None
+                or user.status != UserStatus.INVITED
             ):
                 raise InvitationInvalidOrExpired
-            invitation.user.password_hash = self.passwords.hash(password)
-            invitation.user.status = UserStatus.ACTIVE
+            user.password_hash = self.passwords.hash(password)
+            user.status = UserStatus.ACTIVE
             invitation.used_at = now
             db.add(
                 AuditLog(
@@ -318,7 +325,7 @@ class IdentityService:
                     metadata_json={},
                 )
             )
-            email = invitation.user.email
+            email = user.email
             organization_slug = db.scalar(
                 select(Organization.slug).where(Organization.id == invitation.organization_id)
             )

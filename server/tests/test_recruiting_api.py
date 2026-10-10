@@ -1329,6 +1329,7 @@ def test_candidate_list_returns_selected_application_and_latest_screening_result
         **{key: value for key, value in filtered.json()["data"][0].items() if key != "application"},
         "application": {
             "id": ids["matching_application"],
+            "pending_onboarding": False,
             "job_id": ids["matching_job"],
             "job_title": "Platform Engineer",
             "job_status": "draft",

@@ -31,7 +31,10 @@ from server.app.llm.models import LlmScreeningEvaluation
 from server.app.interviews.models import Interview
 from server.app.integrations.feishu.notifications import schedule_feishu_notification
 from server.app.notifications.service import read_versions, workbench_notification_version
-from server.app.offers.models import OfferTemplate
+from server.app.onboarding.models import OnboardingRecord
+from server.app.onboarding.eligibility import pending_candidate_deletion
+from server.app.onboarding.service import onboarding_projection
+from server.app.offers.models import Offer, OfferResponse, OfferTemplate
 from server.app.recruiting.tasks import LLM_TERMINAL_SAFE_ERROR_CODES, normalize_llm_terminal_safe_error_code
 from server.app.screening.rules import RuleSnapshotError,normalize_rule_content
 from server.app.recruiting.security import ContactCipher
@@ -912,7 +915,7 @@ def replace_job_definition(job_id: UUID, payload: JobDefinitionCommand, request:
 
 
 @router.get("/workbench", response_model=WorkbenchResource)
-def get_workbench(request: Request, response: Response):
+def get_workbench(request: Request, response: Response, all_jobs: bool = False):
     principal = _principal(request)
     if isinstance(principal, JSONResponse):
         return principal
@@ -921,7 +924,7 @@ def get_workbench(request: Request, response: Response):
     response.headers["Cache-Control"] = "no-store"
 
     with request.app.state.identity_store.sync_session() as db:
-        job_rows = db.execute(select(
+        job_query = select(
             Job,
             Department.name.label("department_name"),
         ).outerjoin(
@@ -931,12 +934,15 @@ def get_workbench(request: Request, response: Response):
             Job.organization_id == principal.organization_id,
             Job.status == "open",
             AUTH.job_predicate(principal, RecruitingAction.READ, Job),
-        ).order_by(Job.updated_at.desc(), Job.id.desc()).limit(20)).all()
+        ).order_by(Job.updated_at.desc(), Job.id.desc())
+        if not all_jobs:
+            job_query = job_query.limit(20)
+        job_rows = db.execute(job_query).all()
 
         jobs = []
         jobs_by_id = {}
         for job, department_name in job_rows:
-            stages = {stage: {"count": 0, "items": []} for stage in WORKBENCH_STAGES}
+            stages = {stage: {"count": 0, "items": []} for stage in (*WORKBENCH_STAGES, "pending_onboarding")}
             data = {
                 "id": str(job.id),
                 "title": job.title,
@@ -950,6 +956,7 @@ def get_workbench(request: Request, response: Response):
             jobs_by_id[job.id] = data
 
         tasks = {stage: {"count": 0, "items": []} for stage in WORKBENCH_TASK_STAGES}
+        tasks["onboarding"] = {"count": 0, "items": []}
         notification_candidates = {stage: [] for stage in WORKBENCH_TASK_STAGES}
         if jobs_by_id:
             application_rows = db.execute(select(
@@ -1051,6 +1058,114 @@ def get_workbench(request: Request, response: Response):
                 config_warning=not configured_review_jobs.get(row.job_id, False),
             )
             notification_candidates["review"].append(notification_item)
+
+        if AUTH.role_allows(principal, RecruitingAction.MANAGE_CANDIDATE):
+            onboarding_query = select(
+                OfferResponse,
+                Application,
+                Candidate.display_name,
+                Job,
+                Department,
+                OnboardingRecord,
+                func.count().over().label("total_count"),
+            ).join(
+                Offer,
+                and_(
+                    Offer.organization_id == OfferResponse.organization_id,
+                    Offer.id == OfferResponse.offer_id,
+                ),
+            ).join(
+                Application,
+                and_(
+                    Application.organization_id == Offer.organization_id,
+                    Application.id == Offer.application_id,
+                ),
+            ).join(
+                Candidate,
+                and_(
+                    Candidate.organization_id == Application.organization_id,
+                    Candidate.id == Application.candidate_id,
+                ),
+            ).join(
+                Job,
+                and_(
+                    Job.organization_id == Application.organization_id,
+                    Job.id == Application.job_id,
+                ),
+            ).outerjoin(
+                Department,
+                and_(
+                    Department.organization_id == Job.organization_id,
+                    Department.id == Job.department_id,
+                ),
+            ).outerjoin(
+                OnboardingRecord,
+                and_(
+                    OnboardingRecord.organization_id == Application.organization_id,
+                    OnboardingRecord.application_id == Application.id,
+                ),
+            ).where(
+                OfferResponse.organization_id == principal.organization_id,
+                OfferResponse.status == "accepted",
+                Offer.status == "accepted",
+                Application.stage == "hired",
+                ~pending_candidate_deletion(Application.organization_id, Application.candidate_id),
+                or_(OnboardingRecord.id.is_(None), OnboardingRecord.status.in_(("ready", "submitting", "failed"))),
+                Candidate.deleted_at.is_(None),
+                AUTH.job_predicate(principal, RecruitingAction.MANAGE_CANDIDATE, Job),
+            )
+            onboarding_order = (
+                func.coalesce(OnboardingRecord.expected_start_date, OfferResponse.expected_start_date).asc(),
+                func.coalesce(OnboardingRecord.updated_at, OfferResponse.responded_at).desc(),
+                OfferResponse.id.desc(),
+            )
+            onboarding_rows = db.execute(onboarding_query.order_by(*onboarding_order).limit(20)).all()
+            if jobs_by_id:
+                # Rank within each job before capping previews, independently of the global task limit.
+                board_rows = onboarding_query.with_only_columns(
+                    Application.id.label("application_id"), Application.candidate_id, Application.job_id,
+                    Application.source, Application.stage, Candidate.display_name,
+                    Candidate.current_title, Candidate.location,
+                    func.coalesce(OnboardingRecord.updated_at, OfferResponse.responded_at).label("updated_at"),
+                    func.count().over(partition_by=Application.job_id).label("pending_count"),
+                    func.row_number().over(partition_by=Application.job_id, order_by=onboarding_order).label("position"),
+                ).where(Job.id.in_(jobs_by_id)).subquery()
+                for row in db.execute(select(board_rows).where(board_rows.c.position <= 5).order_by(board_rows.c.job_id, board_rows.c.position)):
+                    board_job = jobs_by_id[row.job_id]
+                    group = board_job["stages"]["pending_onboarding"]
+                    if not group["items"]:
+                        group["count"] = row.pending_count
+                        board_job["active_count"] += row.pending_count
+                    group["items"].append(_workbench_candidate_data(row))
+            if onboarding_rows:
+                tasks["onboarding"]["count"] = onboarding_rows[0].total_count
+            projection_time = datetime.now(timezone.utc)
+            for offer_response, application, display_name, job, department, record, _ in onboarding_rows:
+                projection = onboarding_projection(
+                    record,
+                    cipher=request.app.state.onboarding_pii_cipher,
+                    now=projection_time,
+                    application=application,
+                    job=job,
+                    department=department,
+                    expected_start_date=offer_response.expected_start_date,
+                )
+                tasks["onboarding"]["items"].append({
+                    "id": projection["id"],
+                    "application_id": projection["application_id"],
+                    "candidate_id": projection["candidate_id"],
+                    "job_id": projection["job_id"],
+                    "display_name": display_name,
+                    "job_title": projection["job_title"],
+                    "department_name": projection["department_name"] or "部门未设置",
+                    "expected_start_date": projection["expected_start_date"],
+                    "status": projection["status"],
+                    "version": projection["version"],
+                    "complete": projection["complete"],
+                    "can_submit": projection["can_submit"],
+                    "blocking_reason": projection["blocking_reason"],
+                    "updated_at": record.updated_at if record is not None else offer_response.responded_at,
+                })
 
         notification_application_ids = [
             UUID(item["application_id"])
@@ -1480,6 +1595,50 @@ def list_rules(job_id: UUID, request: Request): return _versions(job_id, request
 def create_rules(job_id: UUID, payload: VersionCreate, request: Request): return _versions(job_id, request, ScreeningRuleVersion, payload)
 
 
+def _pending_onboarding_predicate(principal: Principal, application=Application, job=Job):
+    if not AUTH.role_allows(principal, RecruitingAction.MANAGE_CANDIDATE):
+        return literal(False)
+    candidate = aliased(Candidate)
+    accepted_response = exists(select(OfferResponse.id).join(
+        Offer, and_(Offer.organization_id == OfferResponse.organization_id, Offer.id == OfferResponse.offer_id),
+    ).where(
+        Offer.organization_id == application.organization_id,
+        Offer.application_id == application.id,
+        Offer.status == "accepted",
+        OfferResponse.status == "accepted",
+    ).correlate(application))
+    record_conditions = (
+        OnboardingRecord.organization_id == application.organization_id,
+        OnboardingRecord.application_id == application.id,
+    )
+    return and_(
+        application.organization_id == principal.organization_id,
+        application.stage == "hired",
+        ~pending_candidate_deletion(application.organization_id, application.candidate_id),
+        AUTH.job_predicate(principal, RecruitingAction.MANAGE_CANDIDATE, job),
+        exists(select(candidate.id).where(
+            candidate.organization_id == application.organization_id,
+            candidate.id == application.candidate_id,
+            candidate.deleted_at.is_(None),
+        ).correlate(application)),
+        accepted_response,
+        or_(
+            ~exists(select(OnboardingRecord.id).where(*record_conditions).correlate(application)),
+            exists(select(OnboardingRecord.id).where(
+                *record_conditions, OnboardingRecord.status.in_(("ready", "submitting", "failed")),
+            ).correlate(application)),
+        ),
+    )
+
+
+def _pending_onboarding_ids(db, principal: Principal, application_ids):
+    if not application_ids or not AUTH.role_allows(principal, RecruitingAction.MANAGE_CANDIDATE):
+        return set()
+    return set(db.scalars(select(Application.id).join(
+        Job, and_(Job.organization_id == Application.organization_id, Job.id == Application.job_id),
+    ).where(Application.id.in_(application_ids), _pending_onboarding_predicate(principal))).all())
+
+
 @router.get("/jobs/{job_id}/funnel", response_model=FunnelResource)
 def funnel(job_id: UUID, request: Request):
     principal = _principal(request)
@@ -1487,7 +1646,11 @@ def funnel(job_id: UUID, request: Request):
     with request.app.state.identity_store.sync_session() as db:
         if _load_job(db, principal, job_id) is None: return _denied(request)
         counts = Counter(db.scalars(select(Application.stage).where(Application.organization_id == principal.organization_id, Application.job_id == job_id)).all())
-        return {"data": {"job_id": str(job_id), "stages": dict(counts), "total": sum(counts.values())}}
+        total = sum(counts.values())
+        counts["pending_onboarding"] = db.scalar(select(func.count()).select_from(Application).join(
+            Job, and_(Job.organization_id == Application.organization_id, Job.id == Application.job_id),
+        ).where(Application.job_id == job_id, _pending_onboarding_predicate(principal)))
+        return {"data": {"job_id": str(job_id), "stages": dict(counts), "total": total}}
 
 
 @router.get("/candidates", response_model=CandidateCollection)
@@ -1507,7 +1670,10 @@ def list_candidates(request: Request, job_id: UUID | None = None, stage: str | N
                 AUTH.job_predicate(principal, RecruitingAction.READ, job),
             ]
             if job_id: conditions.append(application.job_id == job_id)
-            if stage: conditions.append(application.stage == stage)
+            if stage == "pending_onboarding":
+                conditions.append(_pending_onboarding_predicate(principal, application, job))
+            elif stage:
+                conditions.append(application.stage == stage)
             if include_owner and owner_id: conditions.append(application.owner_id == owner_id)
             if source: conditions.append(application.source == source)
             if min_score is not None: conditions.append(latest_evaluation.c.score >= min_score)
@@ -1594,10 +1760,13 @@ def list_candidates(request: Request, job_id: UUID | None = None, stage: str | N
             last = rows[limit - 1]
             next_cursor = request.app.state.recruiting_cursor.encode(str(principal.organization_id), cursor_sort, last.sort_updated_at.isoformat(), str(last[0].id))
             rows = rows[:limit]
+        pending_ids = _pending_onboarding_ids(db, principal, [row.application_id for row in rows if row.application_id])
         data = []
         for candidate, application_id, _ in rows:
             item = _candidate_data(db, candidate, principal)
             item["application"] = summaries.get(application_id)
+            if item["application"] is not None:
+                item["application"]["pending_onboarding"] = application_id in pending_ids
             data.append(item)
 
         facet_application = aliased(Application)
@@ -2061,6 +2230,7 @@ def applications(candidate_id: UUID, request: Request):
             .order_by(Application.created_at.desc())
         ).all()
         application_ids = [row.Application.id for row in rows]
+        pending_ids = _pending_onboarding_ids(db, principal, application_ids)
         projections=_screening_projections_for_applications(db,principal.organization_id,application_ids)
         next_rounds = _next_interview_rounds(db, principal.organization_id, application_ids)
         empty={"route_result":None,"ai_score":None,"ai_recommendation":None,"llm_status":None,"llm_error_code":None,"llm_evaluation":None}
@@ -2070,6 +2240,7 @@ def applications(candidate_id: UUID, request: Request):
                     **_application_data(row.Application),
                     "job_title": row.job_title,
                     "job_status": row.job_status,
+                    "pending_onboarding": row.Application.id in pending_ids,
                     "next_interview_round": next_rounds.get(row.Application.id),
                     "task_id": str(row.review_task_id) if row.review_task_id else None,
                     "assignee_id": str(row.review_assignee_id) if row.review_assignee_id else None,
@@ -2149,7 +2320,11 @@ def apply_application_workflow_action(application_id: UUID, payload: WorkflowAct
                     ApplicationReviewTask.status == "open",
                 )
             )
-        if review_task_assignee_id is not None and review_task_assignee_id != principal.user_id:
+        if (
+            review_task_assignee_id is not None
+            and review_task_assignee_id != principal.user_id
+            and not AUTH.is_admin(principal)
+        ):
             return _denied(request)
         if _load_application(db, principal, application_id, required_action) is None: return _denied(request)
         try:

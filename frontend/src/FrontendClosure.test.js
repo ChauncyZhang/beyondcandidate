@@ -73,7 +73,7 @@ after(async () => {
   await vite?.close();
 });
 
-async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = false, roles = ["recruiting_admin"], workbench = null, candidates = null, interviews = null, interviewSaveResponse = null, participantOptions = null, availability = null, approvals = null, onRequest } = {}) {
+async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = false, roles = ["recruiting_admin"], workbench = null, candidates = null, interviews = null, interviewRoute = null, interviewSaveResponse = null, participantOptions = null, availability = null, approvals = null, onboardingSubmit = null, onRequest } = {}) {
   const context = await browser.newContext({ viewport });
   let departmentDetail = {
     ...departments[0],
@@ -105,6 +105,10 @@ async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = f
     if (pathname === "/api/v1/settings/workflow-templates") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [standardWorkflowTemplate] }) });
     if (pathname === "/api/v1/jobs") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [], meta: { departments: [], owners: [], status_counts: {}, next_cursor: null } }) });
     if (pathname === "/api/v1/candidates" && candidates) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: candidates, meta: { limit: 50, next_cursor: null, owners: [] } }) });
+    if (pathname === "/api/v1/interviews" && interviewRoute) {
+      const response = await interviewRoute(request);
+      if (response) return route.fulfill(response);
+    }
     if (pathname === "/api/v1/interviews" && interviews) {
       if (request.method() === "POST" && interviewSaveResponse) return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ data: typeof interviewSaveResponse === "function" ? interviewSaveResponse(request) : interviewSaveResponse }) });
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: interviews, meta: { count: interviews.length, next_cursor: null } }) });
@@ -117,6 +121,7 @@ async function openPage({ viewport = { width: 1280, height: 800 }, anonymous = f
     if (pathname === "/api/v1/interview-availability" && availability) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: typeof availability === "function" ? await availability(request.url()) : availability }) });
     if (pathname === "/api/v1/workbench" && workbench) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: workbench }) });
     if (pathname === "/api/v1/offer-approvals/pending" && approvals) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: approvals }) });
+    if (/^\/api\/v1\/onboardings\/[^/]+\/submissions$/.test(pathname) && request.method() === "POST" && onboardingSubmit) return route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ data: { onboarding: onboardingSubmit } }) });
     if (/^\/api\/v1\/notifications\/workbench\/[^/]+\/read$/.test(pathname) && request.method() === "PUT") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { application_id: pathname.split("/")[5], version: request.postDataJSON().version, read_at: "2026-07-22T01:00:00Z" } }) });
     if (pathname === "/api/v1/auth/invitations/accept") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { email: "invitee@example.test" } }) });
     if (pathname === "/api/v1/me/password") return route.fulfill({ status: 204, body: "" });
@@ -171,6 +176,71 @@ test("notification bell opens actionable tasks and candidate navigation", { time
   } finally { await context.close(); }
 });
 
+test("pending onboarding stays visible on the workbench and can be submitted directly", { timeout: 60_000 }, async () => {
+  const workbench = notificationWorkbench();
+  const onboardingId = "60000000-0000-4000-8000-000000000001";
+  workbench.tasks.onboarding = {
+    count: 1,
+    items: [{
+      id: onboardingId,
+      application_id: "20000000-0000-4000-8000-000000000009",
+      candidate_id: "30000000-0000-4000-8000-000000000009",
+      job_id: "70000000-0000-4000-8000-000000000009",
+      display_name: "张斌超",
+      job_title: "AI 工程师",
+      department_name: "嵌入式",
+      expected_start_date: "2026-09-02",
+      status: "ready",
+      version: 2,
+      complete: true,
+      can_submit: true,
+      blocking_reason: null,
+      updated_at: "2026-09-02T03:00:00Z",
+    }],
+  };
+  let submissionRequest;
+  const { context, page } = await openPage({
+    workbench,
+    approvals: [],
+    onboardingSubmit: {
+      id: onboardingId,
+      application_id: workbench.tasks.onboarding.items[0].application_id,
+      candidate_id: workbench.tasks.onboarding.items[0].candidate_id,
+      job_id: workbench.tasks.onboarding.items[0].job_id,
+      status: "submitting",
+      version: 3,
+      complete: true,
+      can_submit: false,
+    },
+    onRequest(pathname, request) {
+      if (/^\/api\/v1\/onboardings\/[^/]+\/submissions$/.test(pathname)) submissionRequest = request;
+    },
+  });
+  try {
+    await page.goto(baseUrl);
+    const panel = page.locator(".workbench-onboarding");
+    await panel.getByRole("heading", { name: "待入职", exact: true }).waitFor();
+    assert.match(await panel.textContent(), /张斌超.*AI 工程师.*嵌入式.*2026\/9\/2.*可办理/s);
+    const bounds = await panel.boundingBox();
+    assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 1280);
+    await panel.getByRole("button", { name: "办理入职", exact: true }).click();
+    await page.getByText("入职申请已提交，正在创建飞书审批", { exact: true }).waitFor();
+    assert.equal(submissionRequest.method(), "POST");
+    assert.equal(submissionRequest.headers()["if-match"], '"2"');
+    assert.ok(submissionRequest.headers()["idempotency-key"]);
+  } finally { await context.close(); }
+
+  const mobile = await openPage({ viewport: { width: 390, height: 844 }, workbench, approvals: [] });
+  try {
+    await mobile.page.goto(baseUrl);
+    const panel = mobile.page.locator(".workbench-onboarding");
+    await panel.getByText("张斌超", { exact: true }).waitFor();
+    assert.equal(await mobile.page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth), true);
+    const bounds = await panel.boundingBox();
+    assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390);
+  } finally { await mobile.context.close(); }
+});
+
 test("workbench board shows the five actionable stages while list and totals keep their behavior", { timeout: 60_000 }, async () => {
   const workbench = notificationWorkbench();
   workbench.jobs[0].stages.new = { count: 1, items: [notificationCandidate("new", 3, "王晨")] };
@@ -202,6 +272,81 @@ test("workbench board shows the five actionable stages while list and totals kee
     assert.equal(await list.getByText("待录用确认", { exact: true }).count(), 1);
     await list.getByRole("button", { name: /陈曦/ }).click();
     await page.waitForURL(/\/candidates\/30000000-0000-4000-8000-000000000001/);
+  } finally { await context.close(); }
+});
+
+test("workbench upcoming interviews excludes historical rows and requests a seven-day range", { timeout: 60_000 }, async () => {
+  const futureStart = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+  const futureEnd = new Date(futureStart.getTime() + 60 * 60 * 1000);
+  const interview = (id, name, startsAt, endsAt) => ({
+    id,
+    application_id: "20000000-0000-4000-8000-000000000001",
+    round_name: "一面",
+    starts_at: startsAt,
+    ends_at: endsAt,
+    timezone: "Asia/Shanghai",
+    method: "video",
+    status: "scheduled",
+    notification_status: "sent",
+    candidate: { id: `candidate-${id}`, display_name: name, current_title: "工程师" },
+    job: { id: notificationJobId, title: "AI 工程师" },
+    participants: [{ user_id: "user-1", display_name: "张斌超", role: "interviewer", required_feedback: true }],
+  });
+  const interviewRequests = [];
+  const { context, page } = await openPage({
+    workbench: notificationWorkbench(),
+    approvals: [],
+    interviews: [
+      interview("past", "历史候选人", "2026-07-25T03:30:00Z", "2026-07-25T04:30:00Z"),
+      interview("future", "未来候选人", futureStart.toISOString(), futureEnd.toISOString()),
+    ],
+    onRequest(pathname, request) {
+      if (pathname === "/api/v1/interviews" && request.method() === "GET") interviewRequests.push(new URL(request.url()));
+    },
+  });
+  try {
+    await page.goto(baseUrl);
+    const calendar = page.locator(".dashboard-calendar");
+    await calendar.getByText("未来候选人", { exact: true }).waitFor();
+    assert.equal(await calendar.getByText("历史候选人", { exact: true }).count(), 0);
+    assert.match(await page.getByLabel("招聘关键指标").textContent(), /未来共 1 场/);
+    const rangedRequest = interviewRequests.find((url) => url.searchParams.has("from") && url.searchParams.has("to"));
+    assert.ok(rangedRequest);
+    const rangeMs = new Date(rangedRequest.searchParams.get("to")).getTime() - new Date(rangedRequest.searchParams.get("from")).getTime();
+    assert.equal(rangeMs, 7 * 24 * 60 * 60 * 1000);
+  } finally { await context.close(); }
+});
+
+test("a failed upcoming request does not block the complete interview list", { timeout: 60_000 }, async () => {
+  const listStart = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const listEnd = new Date(listStart.getTime() + 60 * 60 * 1000);
+  const listInterview = {
+    id: "past-interview",
+    application_id: "20000000-0000-4000-8000-000000000001",
+    round_name: "一面",
+    starts_at: listStart.toISOString(),
+    ends_at: listEnd.toISOString(),
+    timezone: "Asia/Shanghai",
+    method: "video",
+    status: "scheduled",
+    notification_status: "sent",
+    candidate: { id: "candidate-past", display_name: "历史候选人", current_title: "工程师" },
+    job: { id: notificationJobId, title: "AI 工程师" },
+    participants: [{ user_id: "user-1", display_name: "张斌超", role: "interviewer", required_feedback: true }],
+  };
+  const { context, page } = await openPage({
+    approvals: [],
+    interviews: [],
+    interviewRoute(request) {
+      const url = new URL(request.url());
+      if (url.searchParams.has("from")) return { status: 503, contentType: "application/problem+json", body: JSON.stringify({ status: 503 }) };
+      return { status: 200, contentType: "application/json", body: JSON.stringify({ data: [listInterview], meta: { next_cursor: null } }) };
+    },
+  });
+  try {
+    await page.goto(`${baseUrl}interviews`);
+    await page.getByText("历史候选人", { exact: true }).waitFor();
+    assert.equal(await page.getByText("面试暂时无法加载", { exact: true }).count(), 0);
   } finally { await context.close(); }
 });
 

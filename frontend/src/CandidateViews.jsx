@@ -75,10 +75,14 @@ const llmDimensionLabels = {
   explicit_constraints: "明确约束",
 };
 
-export function candidateWorkflowActions(stage, role) {
+export function candidateWorkflowActions(stage, role, { currentUserId = "", reviewTask = null, serverBacked = false } = {}) {
   return (stageWorkflowActions[stage] || [])
     .map((id) => ({ id, ...workflowActions[id] }))
-    .filter((item) => canPerformAction(role, item.capability));
+    .filter((item) => {
+      if (!canPerformAction(role, item.capability)) return false;
+      if (!serverBacked || !item.id.startsWith("review_")) return true;
+      return role === "招聘管理员" || Boolean(currentUserId && reviewTask?.assigneeId === currentUserId);
+    });
 }
 
 export function candidateNextStep(stage, jobStatus = "open") {
@@ -691,7 +695,13 @@ function CandidateDetail({ candidate, role, currentUserId, onBack, backLabel, on
     }
   }
 
-  const availableWorkflowActions = candidate.application || !candidate.serverBacked ? candidateWorkflowActions(candidate.stage, role) : [];
+  const availableWorkflowActions = candidate.application || !candidate.serverBacked
+    ? candidateWorkflowActions(candidate.stage, role, {
+        currentUserId,
+        reviewTask: candidate.reviewTask,
+        serverBacked: candidate.serverBacked,
+      })
+    : [];
   const nextStep = candidateNextStep(candidate.stage, candidate.jobStatus);
   const canScheduleCurrent = canScheduleCandidateInterview(candidate.stage, role, onScheduleInterview, candidate.jobStatus);
   const canReassignReview = candidate.serverBacked && candidate.stage === "待复核" && candidate.reviewTask && canPerformAction(role, "推进候选人");

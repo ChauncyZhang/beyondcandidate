@@ -62,6 +62,53 @@ test("登录按 login 再 /me 的顺序执行并只保存 /me 用户", async () 
   assert.equal(controller.getSnapshot().user, user);
 });
 
+for (const failure of [null, "login", "me"]) {
+  test(`login invalidates the old epoch before replacing credentials with ${failure || "no"} failure`, async () => {
+    let epoch = 0;
+    let releaseLogin;
+    let notifyUnauthorized;
+    const loginBarrier = new Promise((resolve) => { releaseLogin = resolve; });
+    const expectedError = new ApiError({ status: 401 });
+    const controller = createSessionController({
+      getAuthEpoch: () => epoch,
+      advanceAuthEpoch: () => { epoch += 1; return epoch; },
+      setUnauthorizedHandler: (handler) => { notifyUnauthorized = handler; },
+      login: async () => {
+        assert.equal(epoch, 1);
+        await loginBarrier;
+        if (failure === "login") throw expectedError;
+      },
+      getMe: async () => {
+        assert.equal(epoch, 1);
+        if (failure === "me") throw expectedError;
+        return user;
+      },
+    });
+    const outcome = controller.login({}).then((value) => ({ value }), (error) => ({ error }));
+    try {
+      assert.equal(epoch, 1);
+      assert.equal(controller.getSnapshot().status, "anonymous");
+      assert.equal(controller.getSnapshot().submitting, true);
+    } finally {
+      releaseLogin();
+    }
+    const result = await outcome;
+    assert.equal(epoch, 1);
+    if (failure) {
+      assert.equal(result.error, expectedError);
+      assert.equal(controller.getSnapshot().error, "authentication");
+      assert.equal(controller.getSnapshot().submitting, false);
+    } else {
+      assert.equal(result.value, user);
+      assert.equal(controller.getSnapshot().status, "authenticated");
+    }
+    const snapshot = controller.getSnapshot();
+    notifyUnauthorized(0);
+    assert.equal(controller.getSnapshot(), snapshot);
+    controller.dispose();
+  });
+}
+
 test("登录失败区分通用认证失败与服务不可用", async () => {
   const auth = createSessionController({ login: async () => { throw new ApiError({ status: 401 }); } });
   const unavailable = createSessionController({ login: async () => { throw new ApiError({ kind: "unavailable" }); } });

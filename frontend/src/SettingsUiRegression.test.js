@@ -3,6 +3,7 @@ import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { createServer } from "vite";
+import { FEISHU_ONBOARDING_FIELDS } from "./feishuIntegration.js";
 
 let browser;
 let vite;
@@ -12,6 +13,7 @@ const prototypeRoot = fileURLToPath(new URL("../", import.meta.url));
 before(async () => {
   vite = await createServer({
     root: prototypeRoot,
+    cacheDir: fileURLToPath(new URL(`../.tmp/vite-settings-regression-${process.pid}/`, import.meta.url)),
     logLevel: "silent",
     server: { host: "127.0.0.1", port: 0 },
   });
@@ -25,7 +27,24 @@ async function openAuthenticatedPage(viewport, {
   initialDepartments = [{ id: "dep-1", name: "技术部", parent_id: null, member_count: 1, job_count: 1, status: "active" }],
   onboardingConfig = { enabled: false, approval_code: "", field_mapping: {}, department_mappings: [], validation_status: "unvalidated", version: 1 },
   departmentCreateError = null,
+  feishuDepartments = [
+    { open_department_id: "od-existing", name: "技术部" },
+    { open_department_id: "od-product", name: "产品部" },
+  ],
+  feishuDepartmentError = null,
+  feishuDepartmentDelayMs = 0,
+  approvalRequests = [],
+  approvalSaveError = null,
+  approvalValidationError = null,
+  approvalSaveDelayMs = 0,
+  approvalLoadDelayMs = 0,
+  approvalRefreshError = false,
+  approverOptions = { nodes: [], members: [] },
+  approverOptionsHandler = null,
 } = {}) {
+  if (onboardingConfig.validation_status === "valid" && onboardingConfig.approval_nodes === undefined) {
+    onboardingConfig = { ...onboardingConfig, approval_nodes: [] };
+  }
   const context = await browser.newContext({ viewport });
   let departments = [...initialDepartments];
   let users = [
@@ -94,7 +113,52 @@ async function openAuthenticatedPage(viewport, {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { enabled: false, configured: false, app_id: "", redirect_uri: "", calendar_id: "" } }) });
       return;
     }
+    if (pathname === "/api/v1/settings/integrations/feishu/departments") {
+      if (feishuDepartmentDelayMs) await new Promise((resolve) => setTimeout(resolve, feishuDepartmentDelayMs));
+      if (feishuDepartmentError) {
+        await route.fulfill({
+          status: feishuDepartmentError.status,
+          contentType: "application/problem+json",
+          body: JSON.stringify(feishuDepartmentError),
+        });
+        return;
+      }
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: feishuDepartments }) });
+      return;
+    }
+    if (pathname === "/api/v1/settings/integrations/feishu/onboarding-approval/approver-options") {
+      if (approverOptionsHandler) return approverOptionsHandler(route);
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: approverOptions }) });
+      return;
+    }
     if (pathname === "/api/v1/settings/integrations/feishu/onboarding-approval" && route.request().method() === "GET") {
+      if (approvalLoadDelayMs) await new Promise((resolve) => setTimeout(resolve, approvalLoadDelayMs));
+      if (approvalRefreshError && approvalRequests.some((item) => item.action === "validate")) {
+        await route.fulfill({ status: 503, contentType: "application/problem+json", body: JSON.stringify({ status: 503 }) });
+        return;
+      }
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: onboardingConfig }) });
+      return;
+    }
+    if (pathname === "/api/v1/settings/integrations/feishu/onboarding-approval/validate" && route.request().method() === "POST") {
+      approvalRequests.push({ action: "validate", version: route.request().headers()["if-match"] });
+      if (approvalValidationError) {
+        onboardingConfig = { ...onboardingConfig, enabled: false, validation_status: "invalid", version: onboardingConfig.version + 1 };
+        await route.fulfill({ status: 422, contentType: "application/problem+json", body: JSON.stringify({ status: 422, code: approvalValidationError }) });
+        return;
+      }
+      onboardingConfig = { ...onboardingConfig, validation_status: "valid", approval_nodes: approverOptions.nodes, version: onboardingConfig.version + 1 };
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: onboardingConfig }) });
+      return;
+    }
+    if (pathname === "/api/v1/settings/integrations/feishu/onboarding-approval" && route.request().method() === "PUT") {
+      approvalRequests.push({ action: "save", version: route.request().headers()["if-match"], body: route.request().postDataJSON() });
+      if (approvalSaveDelayMs) await new Promise((resolve) => setTimeout(resolve, approvalSaveDelayMs));
+      if (approvalSaveError) {
+        await route.fulfill({ status: 503, contentType: "application/problem+json", body: JSON.stringify({ status: 503, code: approvalSaveError }) });
+        return;
+      }
+      onboardingConfig = { ...onboardingConfig, ...route.request().postDataJSON(), version: onboardingConfig.version + 1 };
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: onboardingConfig }) });
       return;
     }
@@ -334,6 +398,383 @@ test("invite member opens a usable server-backed invitation drawer", { timeout: 
   }
 });
 
+function completeApprovalConfig(overrides = {}) {
+  return {
+    enabled: false, approval_code: "approval-saved", version: 3, validation_status: "unvalidated",
+    field_mapping: Object.fromEntries(FEISHU_ONBOARDING_FIELDS.map((field) => [field.key, {
+      control_id: `${field.key}-control`, type: field.defaultType,
+      ...(field.key === "gender" ? { options: { male: "male-option", female: "female-option" } } : {}),
+    }])),
+    department_mappings: [{ department_id: "dep-1", feishu_department_id: "od-existing" }],
+    ...overrides,
+  };
+}
+
+async function openApprovalForm(page) {
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: "飞书集成", exact: true }).click();
+  const form = page.locator(".feishu-onboarding-form");
+  await form.waitFor();
+  await form.getByText(/完成同名自动匹配检查/).waitFor();
+  if ((await form.locator(".feishu-approval-code input").inputValue()).trim()) {
+    await form.locator(".feishu-fixed-approvers").waitFor();
+  }
+  return form;
+}
+
+const approverIds = ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000003"];
+const approvalNodeId = "b3a3a075c6399c41e83e922d46af58c8";
+function fixedApproverOptions() {
+  return {
+    nodes: [
+      { node_id: "start", name: "开始", need_approver: false, allow_multiple: true },
+      { node_id: approvalNodeId, name: "审批", need_approver: true, allow_multiple: true },
+      { node_id: "single", name: "复核", need_approver: true, allow_multiple: false },
+      { node_id: "end", name: "结束", need_approver: false, allow_multiple: true },
+    ],
+    members: [
+      { user_id: approverIds[0], display_name: "林岚", available: true, unavailable_reason: null },
+      { user_id: approverIds[1], display_name: "周宁", available: true, unavailable_reason: null },
+      { user_id: approverIds[2], display_name: "未绑定成员", available: false, unavailable_reason: "feishu_approver_unbound" },
+    ],
+  };
+}
+
+test("legacy validated config without node metadata requires revalidation and permits only disabling", { timeout: 60_000 }, async () => {
+  for (const enabled of [false, true]) {
+    const requests = [];
+    const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+      onboardingConfig: completeApprovalConfig({ enabled, validation_status: "valid", approval_nodes: null }),
+      approvalRequests: requests,
+    });
+    try {
+      const form = await openApprovalForm(page);
+      assert.equal(await form.locator(".feishu-validation-status").innerText(), "待重新校验");
+      await form.getByRole("status").filter({ hasText: /尚未校验审批节点.*重新校验/ }).waitFor();
+      const toggle = form.getByLabel("启用飞书入职审批");
+      assert.equal(await toggle.isChecked(), enabled);
+      if (enabled) {
+        assert.equal(await toggle.isEnabled(), true, "legacy enabled configuration must remain switchable off");
+        await toggle.uncheck();
+        assert.equal(await toggle.isDisabled(), true);
+        await form.getByRole("button", { name: "保存入职审批配置", exact: true }).click();
+        await form.getByText("配置已保存并通过校验，但尚未启用入职审批。", { exact: true }).waitFor();
+        assert.equal(requests[0].body.enabled, false);
+      }
+      assert.equal(await toggle.isDisabled(), true, "reading options alone must not authorize enablement");
+      await form.getByRole("button", { name: "校验审批模板", exact: true }).click();
+      await form.getByText("审批模板校验通过，但入职审批尚未启用。", { exact: true }).waitFor();
+      assert.equal(await form.locator(".feishu-validation-status").innerText(), "已校验 · 未启用");
+      assert.equal(await toggle.isEnabled(), true);
+      assert.equal(await toggle.isChecked(), false);
+      assert.equal(requests.at(-1).action, "validate");
+    } finally { await context.close(); }
+  }
+});
+
+test("fixed approvers block incomplete validation, save draft, serialize multi and single choices and require revalidation", { timeout: 60_000 }, async () => {
+  const requests = [];
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: completeApprovalConfig({ approval_nodes: null, node_approvers: [] }),
+    approverOptions: fixedApproverOptions(), approvalRequests: requests,
+  });
+  try {
+    const form = await openApprovalForm(page);
+    const multi = form.getByRole("group", { name: "审批（可多选）", exact: true });
+    const single = form.getByRole("group", { name: "复核（单选）", exact: true });
+    const validate = () => form.getByRole("button", { name: /^(保存并)?校验审批模板$/ });
+    assert.equal(await form.getByRole("group").count(), 2);
+    assert.equal(await validate().isDisabled(), true);
+    assert.match(await form.locator("#feishu-validation-action-reason").innerText(), /审批.*选择固定审批人/);
+    assert.equal(await multi.getByRole("checkbox", { name: /未绑定成员/ }).isDisabled(), true);
+    assert.match(await multi.innerText(), /未绑定飞书账号/);
+    await multi.getByRole("checkbox", { name: "林岚", exact: true }).focus();
+    await page.keyboard.press("Space");
+    assert.equal(await multi.getByRole("checkbox", { name: "林岚", exact: true }).isChecked(), true);
+    await multi.getByRole("checkbox", { name: "周宁", exact: true }).check();
+    assert.equal(await validate().isDisabled(), true);
+    await form.getByRole("button", { name: "保存入职审批配置", exact: true }).click();
+    await form.getByText("入职审批配置已保存，尚未校验、未启用。", { exact: true }).waitFor();
+    assert.deepEqual(requests.map((item) => item.action), ["save"]);
+    assert.deepEqual(requests[0].body.node_approvers, [{ node_id: approvalNodeId, user_ids: approverIds.slice(0, 2) }]);
+    await single.getByRole("radio", { name: "林岚", exact: true }).check();
+    await single.getByRole("radio", { name: "周宁", exact: true }).check();
+    assert.equal(await single.getByRole("radio", { name: "林岚", exact: true }).isChecked(), false);
+    assert.equal(await form.getByLabel("启用飞书入职审批").isDisabled(), true);
+    await validate().click();
+    await form.getByText("审批模板校验通过，但入职审批尚未启用。", { exact: true }).waitFor();
+    assert.deepEqual(requests.map((item) => item.action), ["save", "save", "validate"]);
+    assert.deepEqual(requests[1].body.node_approvers, [{ node_id: approvalNodeId, user_ids: approverIds.slice(0, 2) }, { node_id: "single", user_ids: [approverIds[1]] }]);
+    assert.equal(requests[1].body.enabled, false);
+    assert.equal(await form.getByLabel("启用飞书入职审批").isEnabled(), true);
+    await form.getByLabel("启用飞书入职审批").check();
+    await multi.getByRole("checkbox", { name: "林岚", exact: true }).uncheck();
+    assert.equal(await form.getByLabel("启用飞书入职审批").isChecked(), false);
+    assert.equal(await form.getByLabel("启用飞书入职审批").isDisabled(), true);
+  } finally { await context.close(); }
+});
+
+test("fixed approvers allow removal of stale nodes, missing members and selected unbound members", { timeout: 60_000 }, async () => {
+  const requests = [];
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: completeApprovalConfig({ node_approvers: [
+      { node_id: "obsolete", user_ids: [approverIds[0]] },
+      { node_id: approvalNodeId, user_ids: ["00000000-0000-4000-8000-000000000099", approverIds[2]] },
+      { node_id: "single", user_ids: [approverIds[0]] },
+    ] }), approverOptions: fixedApproverOptions(), approvalRequests: requests,
+  });
+  try {
+    const form = await openApprovalForm(page);
+    assert.match(await form.locator("#feishu-validation-action-reason").innerText(), /节点已变更/);
+    await form.getByRole("button", { name: "清除失效节点" }).click();
+    await form.getByRole("button", { name: "移除不可用成员" }).click();
+    await form.getByRole("button", { name: "移除未绑定成员", exact: true }).click();
+    const multi = form.getByRole("group", { name: "审批（可多选）", exact: true });
+    assert.equal(await multi.getByRole("checkbox", { name: /未绑定成员/ }).isChecked(), false);
+    await multi.getByRole("checkbox", { name: "林岚", exact: true }).check();
+    await form.getByRole("button", { name: "保存入职审批配置", exact: true }).click();
+    await form.getByText("入职审批配置已保存，尚未校验、未启用。", { exact: true }).waitFor();
+    assert.deepEqual(requests[0].body.node_approvers, [{ node_id: approvalNodeId, user_ids: [approverIds[0]] }, { node_id: "single", user_ids: [approverIds[0]] }]);
+  } finally { await context.close(); }
+});
+
+test("fixed approver options ignore a late old-code response and manual refresh uses the latest draft", { timeout: 60_000 }, async () => {
+  const codes = [];
+  let releaseOld;
+  const oldGate = new Promise((resolve) => { releaseOld = resolve; });
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: completeApprovalConfig(),
+    approverOptionsHandler: async (route) => {
+      const code = new URL(route.request().url()).searchParams.get("approval_code");
+      codes.push(code);
+      if (code === "old-code") await oldGate;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { nodes: [{ node_id: code, name: code, need_approver: true, allow_multiple: true }], members: fixedApproverOptions().members } }) });
+    },
+  });
+  try {
+    const form = await openApprovalForm(page);
+    const input = form.locator(".feishu-approval-code input");
+    await page.evaluate(() => {
+      const readJson = Response.prototype.json;
+      Response.prototype.json = async function (...args) {
+        const data = await readJson.apply(this, args);
+        if (new URL(this.url).searchParams.get("approval_code") === "old-code") {
+          window.oldApproverBodyConsumed = true;
+        }
+        return data;
+      };
+    });
+    const oldRequest = page.waitForRequest((request) => request.url().includes("approval_code=old-code"));
+    await input.fill("old-code");
+    await oldRequest;
+    assert.equal(await form.getByRole("button", { name: /^(保存并)?校验审批模板$/ }).isDisabled(), true);
+    await input.fill("latest-code");
+    await form.getByRole("group", { name: "latest-code（可多选）", exact: true }).waitFor();
+    const oldResponse = page.waitForResponse((response) => response.url().includes("approval_code=old-code"));
+    releaseOld();
+    const completedOldResponse = await oldResponse;
+    await completedOldResponse.finished();
+    await page.waitForFunction(() => window.oldApproverBodyConsumed === true);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await form.getByRole("group", { name: "old-code（可多选）", exact: true }).count(), 0);
+    assert.equal(await form.getByRole("group", { name: "latest-code（可多选）", exact: true }).count(), 1);
+    const refreshResponse = page.waitForResponse((response) => response.url().includes("approval_code=latest-code"));
+    await form.getByRole("button", { name: "读取审批节点和成员", exact: true }).click();
+    await refreshResponse;
+    await form.getByRole("group", { name: "latest-code（可多选）", exact: true }).waitFor();
+    assert.deepEqual(codes, ["approval-saved", "old-code", "latest-code", "latest-code"]);
+  } finally { releaseOld(); await context.close(); }
+});
+
+test("fixed approvers fit desktop and mobile with long labels and produce a screenshot", { timeout: 60_000 }, async () => {
+  const options = fixedApproverOptions();
+  options.members[0].display_name = "跨区域人力资源审批负责人".repeat(5);
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, { onboardingConfig: completeApprovalConfig(), approverOptions: options });
+  try {
+    const form = await openApprovalForm(page);
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await assertNoHorizontalOverflow(page, `${width}px fixed approvers`);
+      const boxes = await form.locator(".feishu-approver-node, .feishu-approver-members label").evaluateAll((elements) => elements.map((element) => {
+        const box = element.getBoundingClientRect();
+        return { left: box.left, right: box.right, width: box.width, overflow: element.scrollWidth - element.clientWidth };
+      }));
+      assert.ok(boxes.every((box) => box.width > 0 && box.left >= 0 && box.right <= width && box.overflow <= 1), JSON.stringify(boxes));
+    }
+    const screenshot = await form.getByRole("region", { name: "固定审批人", exact: true }).screenshot({ path: fileURLToPath(new URL("../.tmp/fixed-approvers-mobile.png", import.meta.url)) });
+    assert.ok(screenshot.length > 1000);
+  } finally { await context.close(); }
+});
+
+test("Feishu save-and-validate persists auto and manual mappings before validating the returned version without enabling", { timeout: 60_000 }, async () => {
+  for (const manual of [false, true]) {
+    const requests = [];
+    const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+      onboardingConfig: completeApprovalConfig({ department_mappings: [] }), approvalRequests: requests, approvalSaveDelayMs: 500,
+    });
+    try {
+      const form = await openApprovalForm(page);
+      if (manual) {
+        await form.getByLabel("姓名控件 ID", { exact: true }).fill("manual-control");
+        await form.getByLabel("技术部对应飞书部门").selectOption("od-product");
+      }
+      const action = form.getByRole("button", { name: "保存并校验审批模板", exact: true });
+      assert.equal(await action.isEnabled(), true);
+      await action.focus();
+      await page.keyboard.press("Enter");
+      await form.getByText("正在保存入职审批配置，请稍候。", { exact: true }).waitFor();
+      assert.equal(await action.isDisabled(), true);
+      await form.getByText("审批模板校验通过，但入职审批尚未启用。", { exact: true }).waitFor();
+      assert.deepEqual(requests.map(({ action, version }) => ({ action, version })), [{ action: "save", version: '"3"' }, { action: "validate", version: '"4"' }]);
+      assert.equal(requests[0].body.enabled, false);
+      assert.equal(requests[0].body.department_mappings[0].feishu_department_id, manual ? "od-product" : "od-existing");
+      if (manual) assert.equal(requests[0].body.field_mapping.candidate_name.control_id, "manual-control");
+      assert.equal(await form.getByLabel("启用飞书入职审批").isChecked(), false);
+      await form.getByText(/如需启用入职审批，请打开/).waitFor();
+      await form.getByLabel("启用飞书入职审批").check();
+      await form.getByRole("button", { name: "保存并校验审批模板" }).click();
+      await form.getByText("审批模板校验通过，但入职审批尚未启用。", { exact: true }).waitFor();
+      assert.equal(requests[2].body.enabled, false, "validation action must not save a pending enable toggle");
+      assert.equal(await form.getByLabel("启用飞书入职审批").isChecked(), false);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await assertNoHorizontalOverflow(page, "390px save-and-validate");
+    } finally { await context.close(); }
+  }
+});
+
+test("Feishu save failure preserves dirty draft and never validates", { timeout: 60_000 }, async () => {
+  const requests = [];
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: completeApprovalConfig(), approvalRequests: requests, approvalSaveError: "unavailable",
+  });
+  try {
+    const form = await openApprovalForm(page);
+    await form.getByLabel("姓名控件 ID", { exact: true }).fill("unsaved-control");
+    await form.getByRole("button", { name: "保存并校验审批模板" }).click();
+    await form.locator(".settings-error").waitFor();
+    assert.deepEqual(requests.map((item) => item.action), ["save"]);
+    assert.equal(await form.getByLabel("姓名控件 ID", { exact: true }).inputValue(), "unsaved-control");
+    assert.equal(await form.getByRole("button", { name: "保存并校验审批模板" }).isEnabled(), true);
+  } finally { await context.close(); }
+});
+
+test("Feishu validation failure refreshes the version for retry and preserves inputs", { timeout: 60_000 }, async () => {
+  const requests = [];
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: completeApprovalConfig(), approvalRequests: requests, approvalValidationError: "feishu_approval_definition_invalid",
+  });
+  try {
+    const form = await openApprovalForm(page);
+    await form.getByLabel("姓名控件 ID", { exact: true }).fill("edited-control");
+    await form.getByRole("button", { name: "保存并校验审批模板" }).click();
+    await form.getByText(/Approval Code 或控件映射与飞书审批模板不一致/).waitFor();
+    const retryResponse = page.waitForResponse((response) => response.url().endsWith("/onboarding-approval/validate"));
+    await form.getByRole("button", { name: "校验审批模板", exact: true }).click();
+    await retryResponse;
+    assert.deepEqual(requests.map((item) => item.version), ['"3"', '"4"', '"5"']);
+    assert.equal(await form.getByLabel("姓名控件 ID", { exact: true }).inputValue(), "edited-control");
+    assert.equal(await form.getByLabel("启用飞书入职审批").isChecked(), false);
+  } finally { await context.close(); }
+});
+
+test("Feishu failed revalidation reflects server disablement without losing mappings", { timeout: 60_000 }, async () => {
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: completeApprovalConfig({ enabled: true, validation_status: "valid" }), approvalValidationError: "feishu_approval_definition_invalid",
+  });
+  try {
+    const form = await openApprovalForm(page);
+    await form.getByRole("button", { name: "校验审批模板", exact: true }).click();
+    await form.getByText("校验未通过", { exact: true }).waitFor();
+    assert.equal(await form.getByLabel("启用飞书入职审批").isChecked(), false);
+    assert.equal(await form.getByLabel("姓名控件 ID", { exact: true }).inputValue(), "candidate_name-control");
+  } finally { await context.close(); }
+});
+
+test("Feishu validation refresh failure blocks stale writes and offers an explicit refresh", { timeout: 60_000 }, async () => {
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: completeApprovalConfig(), approvalValidationError: "feishu_approval_definition_invalid", approvalRefreshError: true,
+  });
+  try {
+    const form = await openApprovalForm(page);
+    await form.getByRole("button", { name: "校验审批模板", exact: true }).click();
+    await form.getByRole("button", { name: "重试刷新配置版本" }).waitFor();
+    await form.getByLabel("姓名控件 ID", { exact: true }).fill("preserved-after-failure");
+    assert.equal(await form.getByRole("button", { name: "保存并校验审批模板" }).isDisabled(), true);
+    assert.equal(await form.getByRole("button", { name: "保存入职审批配置" }).isDisabled(), true);
+    assert.match(await form.locator("#feishu-validation-action-reason").innerText(), /当前输入已保留/);
+    await page.route("**/onboarding-approval", async (route) => {
+      assert.equal(route.request().method(), "GET");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: completeApprovalConfig({ version: 10, validation_status: "invalid" }) }) });
+    });
+    await form.getByRole("button", { name: "重试刷新配置版本" }).click();
+    await form.getByText("正在刷新配置版本，请稍候。", { exact: true }).waitFor();
+    await form.getByRole("button", { name: "重试刷新配置版本" }).waitFor({ state: "detached" });
+    assert.equal(await form.getByLabel("姓名控件 ID", { exact: true }).inputValue(), "preserved-after-failure");
+    assert.equal(await form.getByRole("button", { name: "保存并校验审批模板" }).isEnabled(), true);
+  } finally { await context.close(); }
+});
+
+test("Feishu validation exposes loading and precise missing-field reasons", { timeout: 60_000 }, async () => {
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: completeApprovalConfig(), approvalLoadDelayMs: 500, feishuDepartmentDelayMs: 500,
+  });
+  try {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "飞书集成", exact: true }).click();
+    await page.getByText("正在加载入职审批配置…", { exact: true }).waitFor();
+    const form = page.locator(".feishu-onboarding-form");
+    await form.getByText("正在读取并匹配飞书部门，请稍候。", { exact: true }).waitFor();
+    await form.getByText(/完成同名自动匹配检查/).waitFor();
+    const reason = form.locator("#feishu-validation-action-reason");
+    await form.locator(".feishu-approval-code input").fill("  ");
+    assert.equal(await reason.innerText(), "请先填写 Approval Code。");
+    assert.equal(await form.getByRole("button", { name: "保存并校验审批模板" }).isDisabled(), true);
+    await form.locator(".feishu-approval-code input").fill("approval-saved");
+    await form.getByLabel("姓名控件 ID", { exact: true }).fill("");
+    assert.equal(await reason.innerText(), "请填写以下字段的控件 ID：姓名。");
+    await form.getByLabel("姓名控件 ID", { exact: true }).fill("name");
+    await form.getByLabel("性别选项男", { exact: true }).fill(" ");
+    assert.equal(await reason.innerText(), "请填写性别选项男、女对应的值。");
+    await form.getByLabel("性别选项男", { exact: true }).fill("female-option");
+    assert.equal(await reason.innerText(), "男、女必须填写不同的性别选项值。");
+  } finally { await context.close(); }
+});
+
+test("Feishu onboarding distinguishes saved, validated and enabled configuration", { timeout: 60_000 }, async () => {
+  const fields = ["candidate_name", "gender", "department", "job_title", "phone", "email", "home_address"];
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: {
+      enabled: false,
+      approval_code: "approval-saved",
+      field_mapping: Object.fromEntries(fields.map((key) => [key, {
+        control_id: `${key}-control`, type: key === "gender" ? "radio" : key === "department" ? "department" : key === "phone" ? "telephone" : key === "home_address" ? "textarea" : "input",
+        ...(key === "gender" ? { options: { male: "male-option", female: "female-option" } } : {}),
+      }])),
+      department_mappings: [{ department_id: "dep-1", feishu_department_id: "od-existing" }],
+      validation_status: "unvalidated", version: 3,
+    },
+  });
+  try {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "飞书集成", exact: true }).click();
+    const form = page.locator(".feishu-onboarding-form");
+    await form.waitFor();
+    assert.equal(await form.locator(".feishu-validation-status").innerText(), "已保存 · 待校验");
+    assert.equal(await page.getByLabel("启用飞书入职审批", { exact: true }).isDisabled(), true);
+    await form.getByRole("button", { name: "校验审批模板", exact: true }).click();
+    await form.getByText("审批模板校验通过，但入职审批尚未启用。", { exact: true }).waitFor();
+    assert.equal(await form.locator(".feishu-validation-status").innerText(), "已校验 · 未启用");
+    assert.equal(await page.getByLabel("启用飞书入职审批", { exact: true }).isChecked(), false);
+    await page.getByLabel("启用飞书入职审批", { exact: true }).check();
+    await form.getByRole("button", { name: "保存入职审批配置", exact: true }).click();
+    await form.getByText("入职审批已启用。", { exact: true }).waitFor();
+    assert.equal(await form.locator(".feishu-validation-status").innerText(), "已启用");
+  } finally {
+    await context.close();
+  }
+});
+
 test("Feishu onboarding mapping can create a department without leaving the current draft", { timeout: 60_000 }, async () => {
   const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
     onboardingConfig: {
@@ -349,16 +790,16 @@ test("Feishu onboarding mapping can create a department without leaving the curr
     await page.getByRole("button", { name: "设置", exact: true }).click();
     await page.getByRole("button", { name: "飞书集成", exact: true }).click();
     await page.getByRole("heading", { name: "入职审批", exact: true }).waitFor();
-    await page.getByRole("button", { name: "新增部门", exact: true }).click();
+    await page.getByRole("button", { name: "新增本地部门", exact: true }).click();
     await page.getByLabel("新增部门名称", { exact: true }).fill("产品部");
     await page.getByRole("button", { name: "确认新增", exact: true }).click();
-    await page.getByLabel("产品部飞书部门 ID", { exact: true }).waitFor();
+    await page.getByLabel("产品部对应飞书部门", { exact: true }).waitFor();
     assert.equal(await page.getByLabel("启用飞书入职审批", { exact: true }).isChecked(), false);
     assert.equal(await page.getByLabel("姓名控件 ID", { exact: true }).inputValue(), "candidate-control");
-    assert.equal(await page.getByLabel("技术部飞书部门 ID", { exact: true }).inputValue(), "od-existing");
-    assert.equal(await page.getByLabel("产品部飞书部门 ID", { exact: true }).inputValue(), "");
+    assert.equal(await page.getByLabel("技术部对应飞书部门", { exact: true }).inputValue(), "od-existing");
+    assert.equal(await page.getByLabel("产品部对应飞书部门", { exact: true }).inputValue(), "od-product");
     assert.equal(await page.locator(".feishu-approval-code input").inputValue(), "approval-original");
-    assert.match(await page.locator(".feishu-onboarding-form").innerText(), /部门已创建，请继续填写对应的飞书部门 ID/);
+    assert.match(await page.locator(".feishu-onboarding-form").innerText(), /部门已创建，并已匹配同名飞书部门/);
     await page.setViewportSize({ width: 390, height: 844 });
     await assertNoHorizontalOverflow(page, "390px Feishu department quick create");
   } finally {
@@ -373,8 +814,56 @@ test("Feishu onboarding mapping explains inline creation when no department exis
     await page.getByRole("button", { name: "飞书集成", exact: true }).click();
     const emptyState = page.locator(".feishu-mapping-empty");
     await emptyState.waitFor();
-    assert.match(await emptyState.innerText(), /点击“新增部门”直接创建/);
-    assert.equal(await page.getByRole("button", { name: "新增部门", exact: true }).isEnabled(), true);
+    assert.match(await emptyState.innerText(), /点击“新增本地部门”直接创建/);
+    assert.equal(await page.getByRole("button", { name: "新增本地部门", exact: true }).isEnabled(), true);
+  } finally {
+    await context.close();
+  }
+});
+
+test("Feishu directory failure preserves the saved onboarding draft", { timeout: 60_000 }, async () => {
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: {
+      enabled: true,
+      approval_code: "approval-existing",
+      field_mapping: { candidate_name: { control_id: "candidate-control", type: "input" } },
+      department_mappings: [{ department_id: "dep-1", feishu_department_id: "od-existing" }],
+      validation_status: "valid",
+      version: 3,
+    },
+    feishuDepartmentError: { status: 502, code: "feishu_department_directory_unavailable" },
+  });
+  try {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "飞书集成", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: /无法读取飞书通讯录部门/ }).waitFor();
+    assert.equal(await page.locator(".feishu-approval-code input").inputValue(), "approval-existing");
+    assert.equal(await page.getByLabel("姓名控件 ID", { exact: true }).inputValue(), "candidate-control");
+    assert.equal(await page.getByLabel("技术部对应飞书部门", { exact: true }).inputValue(), "od-existing");
+  } finally {
+    await context.close();
+  }
+});
+
+test("late Feishu directory matching merges into the latest edited onboarding draft", { timeout: 60_000 }, async () => {
+  const { context, page } = await openAuthenticatedPage({ width: 1280, height: 800 }, {
+    onboardingConfig: {
+      enabled: false,
+      approval_code: "approval-original",
+      field_mapping: {},
+      department_mappings: [],
+      validation_status: "unvalidated",
+      version: 1,
+    },
+    feishuDepartmentDelayMs: 2_000,
+  });
+  try {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "飞书集成", exact: true }).click();
+    await page.locator(".feishu-approval-code input").fill("approval-edited-before-directory-returned");
+    await page.getByRole("status").filter({ hasText: /完成同名自动匹配检查/ }).waitFor();
+    assert.equal(await page.locator(".feishu-approval-code input").inputValue(), "approval-edited-before-directory-returned");
+    assert.equal(await page.getByLabel("技术部对应飞书部门", { exact: true }).inputValue(), "od-existing");
   } finally {
     await context.close();
   }
@@ -391,7 +880,7 @@ test("Feishu onboarding department creation keeps input and explains server fail
     try {
       await page.getByRole("button", { name: "设置", exact: true }).click();
       await page.getByRole("button", { name: "飞书集成", exact: true }).click();
-      await page.getByRole("button", { name: "新增部门", exact: true }).click();
+      await page.getByRole("button", { name: "新增本地部门", exact: true }).click();
       await page.getByLabel("新增部门名称", { exact: true }).fill("产品部");
       await page.getByRole("button", { name: "确认新增", exact: true }).click();
       await page.getByRole("status").filter({ hasText: expectedMessage }).waitFor();

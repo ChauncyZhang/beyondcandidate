@@ -4,7 +4,7 @@ import { canEditAiSettings, canEditOrganizationSettings, canEditRetentionSetting
 import { createLlmSettingsController, getTestDisabledReason, releaseLlmSettingsSubscription } from "./llmSettings.js";
 import { createOcrSettingsController, getOcrTestDisabledReason, releaseOcrSettingsSubscription } from "./ocrSettings.js";
 import { createGovernanceSettingsController, releaseGovernanceSettingsSubscription } from "./governanceSettings.js";
-import { getInviteRoleOptions, getRecruitingScopeLabel, isRecruitingScopeValid, organizationSettingsController, roleUsesRecruitingScope } from "./organizationSettings.js";
+import { canReinviteUser, getInviteRoleOptions, getRecruitingScopeLabel, isRecruitingScopeValid, organizationSettingsController, roleUsesRecruitingScope } from "./organizationSettings.js";
 import { FeishuIntegrationSettings } from "./FeishuIntegrationSettings.jsx";
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { workflowTemplateController } from "./workflowTemplateController.js";
@@ -179,6 +179,7 @@ function OrganizationSettings({
   const [scopeForm, setScopeForm] = useState({ role: "", recruitingScopeType: "jobs", recruitingDepartmentIds: [] });
   const [departmentName, setDepartmentName] = useState("");
   const [copied, setCopied] = useState(false);
+  const [reinviteMember, setReinviteMember] = useState(null);
   const inviteRoles = getInviteRoleOptions(role);
   const activeDepartments = state.departments.filter((department) => department.status === "active");
   const busy = state.actionStatus === "saving";
@@ -214,6 +215,7 @@ function OrganizationSettings({
     setDrawer(null);
     setCopied(false);
     setScopeMember(null);
+    setReinviteMember(null);
     controller.dismissInvitation();
     controller.clearDepartment();
   };
@@ -222,6 +224,22 @@ function OrganizationSettings({
     try {
       await controller.inviteMember(invite);
       onNotify("邀请已发送，链接仅显示一次");
+    } catch {
+      /* safe controller message is rendered */
+    }
+  }
+  function openReinvite(user) {
+    if (busy || !canReinviteUser(role, user)) return;
+    controller.dismissInvitation();
+    setCopied(false);
+    setReinviteMember(user);
+    setDrawer("reinvite");
+  }
+  async function submitReinvite() {
+    if (busy || !reinviteMember) return;
+    try {
+      await controller.reinviteMember(reinviteMember.id, role);
+      onNotify("新邀请已创建，请安全发送最新链接");
     } catch {
       /* safe controller message is rendered */
     }
@@ -407,6 +425,7 @@ function OrganizationSettings({
                   {user.status}
                 </span>
                 <span className="member-row-action">
+                  {canReinviteUser(role, user) && <button className="text-button" type="button" disabled={busy} onClick={() => openReinvite(user)}><RefreshCw size={14} aria-hidden="true" />重新邀请</button>}
                   {editable && (user.roleValues.some(roleUsesRecruitingScope) || (role === "系统管理员" && !user.roleValues.includes("system_admin"))) && <button className="text-button" type="button" onClick={() => openRecruitingScope(user)}>{role === "系统管理员" ? "配置成员" : "配置负责范围"}</button>}
                 </span>
               </div>
@@ -432,9 +451,10 @@ function OrganizationSettings({
           )}
         </div>
       )}
-      {drawer === "invite" && (
+      {(drawer === "invite" || drawer === "reinvite") && (
         <OrganizationDrawer
-          title="邀请成员"
+          title={drawer === "reinvite" ? "重新邀请成员" : "邀请成员"}
+          description={drawer === "reinvite" ? `${reinviteMember.name}（${reinviteMember.email}）：新邀请有效期为 48 小时，生成后旧邀请链接将失效。` : undefined}
           busy={busy}
           onClose={closeDrawer}
           footer={
@@ -451,10 +471,10 @@ function OrganizationSettings({
                 <button
                   className="button primary"
                   type="button"
-                  disabled={!validInvite || busy}
-                  onClick={submitInvite}
+                  disabled={(drawer === "invite" && !validInvite) || busy}
+                  onClick={drawer === "reinvite" ? submitReinvite : submitInvite}
                 >
-                  {busy ? "正在发送…" : "发送邀请"}
+                  {busy ? "正在生成…" : drawer === "reinvite" ? "生成新邀请" : "发送邀请"}
                 </button>
               )}
             </>
@@ -473,6 +493,7 @@ function OrganizationSettings({
               <p>
                 该链接仅显示一次，请立即安全发送给成员。邀请在 48 小时后失效。
               </p>
+              <p>链接过期后，可在成员列表中为待激活成员重新邀请。请使用最新链接，旧链接会在重新邀请后失效。</p>
               <label>
                 邀请链接
                 <div>
@@ -501,6 +522,8 @@ function OrganizationSettings({
                   : "48 小时后"}
               </small>
             </div>
+          ) : drawer === "reinvite" ? (
+            <p>请确认重新邀请 {reinviteMember.email}。成员角色和负责范围保持不变。</p>
           ) : (
             <>
               <label>

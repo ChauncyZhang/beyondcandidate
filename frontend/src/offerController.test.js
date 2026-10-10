@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ApiError } from "./apiClient.js";
-import offerController, { createOfferController, createOnboardingDataPayload, createProxyResponsePayload, filterEligibleSpecialApprovers, normalizeOnboarding } from "./offerController.js";
+import offerController, { applyOfferTemplate, createOfferController, createOnboardingDataPayload, createProxyResponsePayload, filterEligibleSpecialApprovers, normalizeOnboarding, offerDraftFieldIssue, offerTemplateSyntaxIssue, renderOfferTemplateText } from "./offerController.js";
 
 const APPLICATION_ID = "11111111-1111-4111-8111-111111111111";
 const OFFER_ID = "22222222-2222-4222-8222-222222222222";
@@ -51,11 +51,64 @@ function queuedClient(responses) {
   };
 }
 
+test("Offer templates replace known candidate variables and preserve unresolved fields for HR", () => {
+  const context = { candidateName: "陈曦", jobTitle: "AI 工程师", workLocation: "上海" };
+  assert.equal(renderOfferTemplateText("{{candidate_name}} / {{ job_title }} / {{department_name}}", context), "陈曦 / AI 工程师 / {{department_name}}");
+
+  const applied = applyOfferTemplate(
+    { templateId: "", title: "", body: "", compensation: "", benefits: "" },
+    { id: TEMPLATE_ID, content: { title: "{{job_title}}录用通知", body: "{{candidate_name}}，工作地点：{{work_location}}", compensation: "{{salary}}", benefits: "五险一金" } },
+    context,
+    { overwrite: true },
+  );
+  assert.deepEqual(applied, {
+    templateId: TEMPLATE_ID,
+    title: "AI 工程师录用通知",
+    body: "陈曦，工作地点：上海",
+    compensation: "{{salary}}",
+    benefits: "五险一金",
+  });
+  assert.deepEqual(offerDraftFieldIssue("compensation", applied.compensation), { tone: "required", label: "需补充：salary" });
+  assert.deepEqual(offerDraftFieldIssue("compensation", ""), { tone: "required", label: "需填写" });
+  assert.deepEqual(offerDraftFieldIssue("benefits", ""), { tone: "optional", label: "可补充" });
+  for (const malformed of ["{{candidate-name}}", "{{ candidate.name }}", "{{salary", "{{{candidate_name}}}", "{{candidate_name}}}", "{{{candidate_name}}" ]) {
+    assert.equal(offerTemplateSyntaxIssue(malformed), "模板变量格式有误");
+    assert.deepEqual(offerDraftFieldIssue("body", malformed), { tone: "required", label: "模板变量格式有误" });
+  }
+  assert.equal(offerDraftFieldIssue("title", applied.title), null);
+});
+
+test("initial Offer template application only fills blanks while explicit selection overwrites generated fields", () => {
+  const draft = { templateId: TEMPLATE_ID, title: "HR 已修改标题", body: "", compensation: "面议", benefits: "" };
+  const template = { id: TEMPLATE_ID, content: { title: "模板标题", body: "模板正文", compensation: "30K", benefits: "年度体检" } };
+  assert.deepEqual(applyOfferTemplate(draft, template, {}, { overwrite: false }), {
+    templateId: TEMPLATE_ID,
+    title: "HR 已修改标题",
+    body: "模板正文",
+    compensation: "面议",
+    benefits: "年度体检",
+  });
+  assert.equal(applyOfferTemplate(draft, template, {}, { overwrite: true }).title, "模板标题");
+  assert.deepEqual(applyOfferTemplate(draft, undefined, { candidateName: "陈曦", jobTitle: "AI 工程师" }, { overwrite: true }), {
+    templateId: TEMPLATE_ID,
+    title: "AI 工程师正式录用通知",
+    body: "陈曦，您好：\n\n很高兴通知您，您已通过“AI 工程师”职位的招聘流程。具体录用条件请查看下方信息。",
+    compensation: "",
+    benefits: "",
+  });
+});
+
+test("job Offer defaults expose only the configured template id", async () => {
+  const { client, calls } = queuedClient([{ data: { job: { offer_template_id: TEMPLATE_ID, title: "不应透传" } } }]);
+  assert.deepEqual(await createOfferController({ client }).getJobOfferDefaults("66666666-6666-4666-8666-666666666666"), { templateId: TEMPLATE_ID });
+  assert.equal(calls[0].path, "/api/v1/job-definitions/66666666-6666-4666-8666-666666666666");
+});
+
 test("exports the stable Offer controller interface and singleton", () => {
   for (const name of [
     "getApplicationOffer", "listOffers", "getOffer", "createOffer", "updateDraft", "submitApproval", "approve",
     "requestChanges", "send", "withdraw", "listHistory", "listPendingApprovals", "listTemplates", "createTemplate",
-    "updateTemplate", "getSpecialApprovers", "updateSpecialApprovers", "proxyResponse", "getOnboarding",
+    "updateTemplate", "getJobOfferDefaults", "getSpecialApprovers", "updateSpecialApprovers", "proxyResponse", "getOnboarding",
     "updateOnboarding", "submitOnboarding",
   ]) {
     assert.equal(typeof offerController[name], "function", name);

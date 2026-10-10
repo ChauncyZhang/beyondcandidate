@@ -87,6 +87,38 @@ def test_hiring_manager_review_action_advances_directly_to_interview_queue(tmp_p
         ]
 
 
+def test_recruiting_admin_can_complete_review_assigned_to_hiring_manager(tmp_path):
+    app = make_app(tmp_path)
+    admin_id = seed_user(app, "recruiting_admin", "admin-override@example.test")
+    manager_id = seed_user(app, "hiring_manager", "manager-override@example.test")
+    application_id = seed_workflow_application(app, admin_id, manager_id, "review")
+    with app.state.identity_store.sync_session() as db:
+        application = db.get(Application, UUID(application_id))
+        task = ApplicationReviewTask(
+            organization_id=application.organization_id,
+            application_id=application.id,
+            assignee_id=manager_id,
+            status="open",
+            ai_status="succeeded",
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    with TestClient(app) as client:
+        headers = login(client, "admin-override@example.test")
+        response = client.post(
+            f"/api/v1/applications/{application_id}/workflow-actions",
+            json={"action": "review_approved"},
+            headers={**headers, "If-Match": '"1"', "Idempotency-Key": "admin-review-override"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["stage"] == "interview_pending"
+    with app.state.identity_store.sync_session() as db:
+        assert db.get(ApplicationReviewTask, task_id).status == "closed"
+
+
 def test_hr_reassigns_open_review_task_with_assignee_etag_and_only_new_assignee_can_complete(tmp_path):
     app = make_app(tmp_path)
     admin_id = seed_user(app, "recruiting_admin", "admin-reassign@example.test")

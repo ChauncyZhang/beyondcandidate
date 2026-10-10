@@ -56,3 +56,26 @@ export function weekLabel(reference) {
   if (first.getMonth() !== last.getMonth()) return `${first.getFullYear()}年${first.getMonth() + 1}月 - ${last.getMonth() + 1}月`;
   return `${first.getFullYear()}年${first.getMonth() + 1}月`;
 }
+
+export function upcomingInterviewWindow(reference = new Date(), days = 7) {
+  const start = reference instanceof Date ? new Date(reference) : new Date(reference);
+  if (Number.isNaN(start.getTime())) return null;
+  const end = new Date(start.getTime() + days * 24 * 60 * 60 * 1000);
+  return { from: start.toISOString(), to: end.toISOString(), start, end };
+}
+
+export function selectUpcomingInterviews(records, reference = new Date(), days = 7) {
+  const window = upcomingInterviewWindow(reference, days);
+  if (!window || !Array.isArray(records)) return [];
+  const inactiveStatuses = new Set(["已完成", "已取消", "未到场"]);
+  return records
+    .filter((record) => {
+      if (inactiveStatuses.has(record?.status)) return false;
+      const startsAt = new Date(record?.startsAt).getTime();
+      const endsAt = new Date(record?.endsAt).getTime();
+      if (!Number.isFinite(startsAt)) return false;
+      const effectiveEnd = Number.isFinite(endsAt) ? endsAt : startsAt;
+      return effectiveEnd > window.start.getTime() && startsAt < window.end.getTime();
+    })
+    .sort((left, right) => new Date(left.startsAt).getTime() - new Date(right.startsAt).getTime());
+}

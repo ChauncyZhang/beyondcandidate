@@ -1,4 +1,5 @@
 import { apiClient } from "./apiClient.js";
+import { reinvitationErrorMessage } from "./invitationErrors.js";
 
 const ROLE_LABELS = new Map([
   ["system_admin", "系统管理员"],
@@ -93,11 +94,18 @@ function normalizeUser(value) {
     recruitingScopeType,
     recruitingDepartmentIds,
     status,
+    rawStatus: safeString(value?.status),
   };
 }
 
 export function getInviteRoleOptions(currentRole) {
   return currentRole === "系统管理员" ? ALL_INVITE_ROLES.map((item) => ({ ...item })) : RECRUITING_ADMIN_INVITE_ROLES.map((item) => ({ ...item }));
+}
+
+export function canReinviteUser(currentRole, user) {
+  if (!["系统管理员", "招聘管理员"].includes(currentRole) || user?.rawStatus !== "invited" || !user?.id) return false;
+  const allowed = new Set(getInviteRoleOptions(currentRole).map(({ value }) => value));
+  return user.roleValues.length > 0 && user.roleValues.every((role) => allowed.has(role));
 }
 
 export function createOrganizationSettingsController({ client = apiClient, createIdempotencyKey = () => globalThis.crypto.randomUUID() } = {}) {
@@ -148,7 +156,27 @@ export function createOrganizationSettingsController({ client = apiClient, creat
         patchState({ actionStatus: "success", users: [normalizeUser(result?.user), ...state.users.filter((user) => user.id !== result?.user?.id)], invitation });
         return invitation;
       } catch (error) {
-        patchState({ actionStatus: "error", actionError: error?.code === "RECRUITING_DEPARTMENT_REQUIRED" ? error.message : error?.kind === "unavailable" ? "邀请暂时无法发送，请稍后重试。" : "邀请发送失败，请核对信息后重试。" });
+        patchState({ actionStatus: "error", actionError: error?.code === "user_email_already_exists" ? "该邮箱已有成员，请关闭邀请窗口并在成员列表中搜索该邮箱。若成员仍待激活，请使用该成员行的重新邀请操作。" : error?.code === "RECRUITING_DEPARTMENT_REQUIRED" ? error.message : error?.kind === "unavailable" ? "邀请暂时无法发送，请稍后重试。" : "邀请发送失败，请核对信息后重试。" });
+        throw error;
+      }
+    },
+    async reinviteMember(userId, currentRole) {
+      if (state.actionStatus === "saving") return null;
+      patchState({ actionStatus: "saving", actionError: "", invitation: null });
+      try {
+        const user = state.users.find((item) => item.id === userId);
+        if (!canReinviteUser(currentRole, user)) {
+          const error = new Error("Reinvitation not allowed");
+          error.code = user?.rawStatus !== "invited" ? "user_not_invited" : "role_assignment_forbidden";
+          throw error;
+        }
+        const result = await client.reinviteUser(userId);
+        const invitation = { token: safeString(result?.invitation?.token), expiresAt: safeString(result?.invitation?.expires_at) };
+        if (!invitation.token || !invitation.expiresAt) throw new Error("Invalid invitation response");
+        patchState({ actionStatus: "success", invitation });
+        return invitation;
+      } catch (error) {
+        patchState({ actionStatus: "error", actionError: reinvitationErrorMessage(error) });
         throw error;
       }
     },

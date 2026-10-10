@@ -8,9 +8,13 @@ import httpx
 import pytest
 
 from server.app.integrations.feishu.provider import (
+    ApprovalDefinition,
+    ApprovalInstanceRequest,
+    ApprovalNode,
     CalendarEvent,
     CalendarEventRequest,
     FakeFeishuProvider,
+    FeishuDepartment,
     FeishuCredentials,
     FeishuProviderError,
     FreeBusyRequest,
@@ -19,6 +23,183 @@ from server.app.integrations.feishu.provider import (
     chunk_freebusy_requests,
 )
 from server.app.integrations.feishu.service import public_config, stable_identity_key
+
+
+def _approval_node(**changes):
+    return {
+        "node_id": "b3a3a075c6399c41e83e922d46af58c8",
+        "name": "Recruiting approval",
+        "need_approver": True,
+        "node_type": "AND",
+        "approver_chosen_multi": True,
+        "approver_chosen_range": [],
+        **changes,
+    }
+
+
+def _read_approval_definition(data):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant"})
+        assert request.method == "GET"
+        assert request.url.path.endswith("/approval/v4/approvals/approval")
+        assert dict(request.url.params) == {
+            "locale": "zh-CN", "with_admin_id": "false", "user_id_type": "open_id",
+        }
+        return httpx.Response(200, json={"code": 0, "data": data})
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    return provider.get_approval_definition(
+        FeishuCredentials("cli", "secret", "https://example.test/callback"), "approval",
+    )
+
+
+def test_approval_dataclasses_preserve_legacy_construction():
+    assert ApprovalDefinition("code", None, None, (), "fingerprint").nodes == ()
+    assert ApprovalInstanceRequest("code", "ou_initiator", None, ()).node_approvers == ()
+
+
+def test_http_provider_reads_real_shaped_approval_nodes_and_form():
+    definition = _read_approval_definition({
+        "approval_name": "Onboarding", "status": "ACTIVE",
+        "form": json.dumps([{"id": "field", "type": "input", "custom_id": "candidate"}]),
+        "node_list": [_approval_node(), {"node_id": "automatic", "need_approver": False}],
+    })
+    assert definition.name == "Onboarding"
+    assert definition.status == "ACTIVE"
+    assert definition.nodes == (
+        ApprovalNode("b3a3a075c6399c41e83e922d46af58c8", "Recruiting approval", True, True),
+        ApprovalNode("automatic", None, False, False),
+    )
+    assert [(c.control_id, c.custom_id, c.control_type) for c in definition.controls] == [
+        ("field", "candidate", "input"),
+    ]
+
+
+@pytest.mark.parametrize("nodes", [
+    None, {}, "[]", [None], [[]],
+    [_approval_node(node_id="")], [_approval_node(node_id=" ")],
+    [_approval_node(node_id=12)], [_approval_node(node_id=" padded ")],
+    [_approval_node(name={})], [_approval_node(need_approver=None)],
+    [_approval_node(need_approver="false")], [_approval_node(need_approver=1)],
+    [_approval_node(approver_chosen_multi="true")],
+    [_approval_node(approver_chosen_multi=1)],
+    [_approval_node(), _approval_node()],
+    [{"node_id": "missing-required-flag"}],
+    [{"node_id": "missing-cardinality", "need_approver": True}],
+])
+def test_http_provider_refuses_malformed_approval_nodes(nodes):
+    with pytest.raises(FeishuProviderError) as raised:
+        _read_approval_definition({"form": "[]", "node_list": nodes})
+    assert raised.value.safe_code == "feishu_response_invalid"
+    assert raised.value.retryable is False
+
+
+def test_http_provider_refuses_missing_node_list():
+    with pytest.raises(FeishuProviderError, match="^feishu_response_invalid$"):
+        _read_approval_definition({"form": "[]"})
+
+
+def test_approval_fingerprint_tracks_required_schema_and_preserves_form_sensitivity():
+    def fingerprint(nodes, form="[]"):
+        return _read_approval_definition({"form": form, "node_list": nodes}).fingerprint
+
+    original = fingerprint([_approval_node()])
+    assert original != fingerprint([])
+    assert original != fingerprint([_approval_node(node_id="replacement")])
+    assert original != fingerprint([_approval_node(approver_chosen_multi=False)])
+    assert original != fingerprint([_approval_node(need_approver=False)])
+    assert original != fingerprint([_approval_node()], '[{"id":"new","type":"input"}]')
+    assert original == fingerprint([_approval_node(name="Renamed")])
+    assert original == fingerprint([
+        _approval_node(), {"node_id": "automatic", "need_approver": False},
+    ])
+    assert fingerprint([_approval_node(), _approval_node(node_id="second")]) == fingerprint([
+        _approval_node(node_id="second"), _approval_node(),
+    ])
+    assert fingerprint([], '[{"id":"field","type":"input"}]') == fingerprint(
+        [], '[ { "type": "input", "id": "field" } ]',
+    )
+
+
+@pytest.mark.parametrize("node_approvers", [
+    (), ({"key": "node-one", "value": ["ou_one", "ou_two"]},),
+    ({"key": "node-one", "value": ["ou_one"]}, {"key": "node-two", "value": ["ou_one"]}),
+])
+@pytest.mark.parametrize("department_id", [None, "department"])
+def test_http_approval_create_exact_body(node_approvers, department_id):
+    writes = []
+
+    def handler(request):
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant"})
+        assert request.method == "POST"
+        assert request.url.path.endswith("/approval/v4/instances")
+        assert dict(request.url.params) == {"user_id_type": "open_id"}
+        writes.append(json.loads(request.content))
+        return httpx.Response(200, json={"code": 0, "data": {"instance_code": "instance"}})
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    form = ({"id": "field", "type": "input", "value": "candidate"},)
+    result = provider.create_approval_instance(
+        FeishuCredentials("cli", "secret", "https://example.test/callback"),
+        ApprovalInstanceRequest("approval", "ou_initiator", department_id, form, node_approvers),
+        idempotency_key="a" * 80,
+    )
+    expected = {
+        "approval_code": "approval", "open_id": "ou_initiator",
+        "form": '[{"id":"field","type":"input","value":"candidate"}]', "uuid": "a" * 64,
+    }
+    if department_id:
+        expected["department_id"] = department_id
+    if node_approvers:
+        expected["node_approver_open_id_list"] = list(node_approvers)
+    assert writes == [expected]
+    assert result.instance_code == "instance"
+
+
+@pytest.mark.parametrize("value", [
+    None, [], {}, (None,), ({},),
+    ({"key": "node", "value": []},),
+    ({"key": "node", "value": "secret"},),
+    ({"key": "node", "value": ("ou_one",)},),
+    ({"key": "node", "value": [None]},),
+    ({"key": "node", "value": [{}]},),
+    ({"key": "node", "value": [""]},),
+    ({"key": "node", "value": [" "]},),
+    ({"key": "node", "value": [" ou_one"]},),
+    ({"key": "node", "value": ["ou_one", "ou_one"]},),
+    ({"key": "", "value": ["ou_one"]},),
+    ({"key": [], "value": ["ou_one"]},),
+    ({"key": " node", "value": ["ou_one"]},),
+    ({"key": "node", "value": ["ou_one"], "secret": "secret"},),
+    ({"key": "node", "value": ["ou_one"]}, {"key": "node", "value": ["ou_two"]}),
+])
+@pytest.mark.parametrize("use_fake", [False, True])
+def test_invalid_node_approvers_fail_before_any_http_without_sensitive_errors(value, use_fake, caplog):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        raise AssertionError("invalid payload must not request even a tenant token")
+
+    provider = FakeFeishuProvider() if use_fake else HttpFeishuProvider(
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(FeishuProviderError) as raised:
+        provider.create_approval_instance(
+            FeishuCredentials("cli", "secret", "https://example.test/callback"),
+            ApprovalInstanceRequest("approval", "ou_initiator", None, (), value),
+            idempotency_key="idempotency",
+        )
+    assert raised.value.safe_code == "feishu_approval_approvers_invalid"
+    assert str(raised.value) == "feishu_approval_approvers_invalid"
+    assert raised.value.retryable is False
+    assert "secret" not in caplog.text
+    assert requests == []
 
 
 def test_public_config_never_serializes_secret_material() -> None:
@@ -52,6 +233,69 @@ def test_public_config_never_serializes_secret_material() -> None:
     }
     assert "secret" not in repr(view).lower().replace("app_secret_configured", "")
     assert b"encrypted" not in repr(view).encode()
+
+
+def test_http_provider_lists_all_feishu_departments_with_cached_tenant_token() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token"})
+        assert request.method == "GET"
+        assert request.url.path.endswith("/contact/v3/departments/0/children")
+        assert request.url.params["fetch_child"] == "true"
+        assert request.url.params["page_size"] == "50"
+        assert request.url.params["department_id_type"] == "open_department_id"
+        if request.url.params.get("page_token") is None:
+            return httpx.Response(200, json={
+                "code": 0,
+                "data": {
+                    "items": [{"department_id": "od-engineering", "name": "研发部"}],
+                    "has_more": True,
+                    "page_token": "next-page",
+                },
+            })
+        assert request.url.params["page_token"] == "next-page"
+        return httpx.Response(200, json={
+            "code": 0,
+            "data": {
+                "items": [{"open_department_id": "od-hr", "name": "人事"}],
+                "has_more": False,
+            },
+        })
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    result = provider.list_departments(
+        FeishuCredentials("cli", "secret", "https://example.test/callback")
+    )
+
+    assert result == (
+        FeishuDepartment("od-hr", "人事"),
+        FeishuDepartment("od-engineering", "研发部"),
+    )
+    assert sum(request.url.path.endswith("/tenant_access_token/internal") for request in requests) == 1
+
+
+def test_http_provider_rejects_cyclic_department_page_tokens() -> None:
+    page_tokens = iter(("page-a", "page-b", "page-a"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token"})
+        return httpx.Response(200, json={
+            "code": 0,
+            "data": {"items": [], "has_more": True, "page_token": next(page_tokens)},
+        })
+
+    provider = HttpFeishuProvider(httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(FeishuProviderError) as raised:
+        provider.list_departments(
+            FeishuCredentials("cli", "secret", "https://example.test/callback")
+        )
+
+    assert raised.value.safe_code == "feishu_response_invalid"
+    assert raised.value.retryable is False
 
 
 def test_stable_identity_prefers_union_id_and_requires_provider_id() -> None:

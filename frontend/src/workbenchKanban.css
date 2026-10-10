@@ -1,0 +1,77 @@
+.kanban.workbench-kanban {
+  grid-template-columns: repeat(var(--workbench-stage-count), minmax(160px, 1fr));
+  overflow-x: auto;
+}
+
+.kanban.workbench-kanban > .stage:nth-child(6) {
+  border-top: 3px solid #08979c;
+}
+
+.job-tabs .workbench-job-select {
+  width: 240px;
+  max-width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--border, #d9dde5);
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px 10px;
+  color: inherit;
+}
+
+.dashboard-body .job-switcher {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.dashboard-body .job-tabs {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+.dashboard-body .job-tab {
+  height: auto;
+  min-height: 42px;
+  max-width: 100%;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.dashboard-body .job-tab strong {
+  overflow-wrap: anywhere;
+}
+
+.dashboard-body .pipeline-header {
+  height: auto;
+  min-height: 64px;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.dashboard-body .pipeline-header > div:first-child {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.dashboard-body .pipeline-header h2 {
+  overflow-wrap: anywhere;
+}
+
+.dashboard-body .pipeline-tools {
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+@media (max-width: 900px) {
+  .kanban.workbench-kanban {
+    grid-template-columns: repeat(var(--workbench-stage-count), minmax(200px, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .kanban.workbench-kanban {
+    grid-template-columns: repeat(var(--workbench-stage-count), clamp(260px, 78vw, 300px));
+  }
+}

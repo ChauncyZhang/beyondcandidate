@@ -409,6 +409,17 @@ export function createInterviewController({ client = apiClient, idempotencyKey =
     };
   }
 
+  async function listAll(filters = {}, { signal } = {}) {
+    const records = [];
+    let cursor = safeString(filters.cursor);
+    do {
+      const page = await list({ ...filters, cursor: cursor || undefined, limit: 100 }, { signal });
+      records.push(...page.records);
+      cursor = page.nextCursor || "";
+    } while (cursor);
+    return records;
+  }
+
   async function listForApplication(applicationId, { signal } = {}) {
     const id = requireId(applicationId, "APPLICATION_ID_REQUIRED");
     const records = [];
@@ -609,7 +620,7 @@ export function createInterviewController({ client = apiClient, idempotencyKey =
     return normalizeMaterials(response?.data);
   }
 
-  return { list, listForApplication, listRange, availability, get, save, checkConflicts, transition, resendEmail, downloadCalendar, getResumeFile, downloadResumeFile, getMyFeedback, saveMyFeedback, submitMyFeedback, amendFeedback, listMyTasks, listParticipantOptions, listFeedbacks, getMaterials };
+  return { list, listAll, listForApplication, listRange, availability, get, save, checkConflicts, transition, resendEmail, downloadCalendar, getResumeFile, downloadResumeFile, getMyFeedback, saveMyFeedback, submitMyFeedback, amendFeedback, listMyTasks, listParticipantOptions, listFeedbacks, getMaterials };
 }
 
 export const interviewController = createInterviewController();

@@ -81,6 +81,15 @@ function queuedClient(responses) {
   };
 }
 
+test("job detail preserves the server pending onboarding count without deriving it from hired", async () => {
+  const { client } = queuedClient([definitionResource(), { data: { total: 8, stages: { hired: 5, pending_onboarding: 2 } } }]);
+  const job = await createJobController({ client }).loadDefinition(JOB_ID);
+  assert.deepEqual(job.funnel, { hired: 5, pending_onboarding: 2 });
+  assert.equal(job.candidates, 8);
+  const missing = queuedClient([definitionResource(), { data: { total: 5, stages: { hired: 5 } } }]);
+  assert.equal((await createJobController({ client: missing.client }).loadDefinition(JOB_ID)).funnel.pending_onboarding, undefined);
+});
+
 test("exports the job controller factory and default controller", () => {
   assert.equal(typeof createJobController, "function");
   assert.equal(typeof jobController.listJobs, "function");

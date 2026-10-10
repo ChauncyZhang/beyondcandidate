@@ -2,12 +2,38 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import workbenchController, { createWorkbenchController } from "./workbenchController.js";
+import workbenchController, { aggregateWorkbenchJobs, createWorkbenchController } from "./workbenchController.js";
 
 const JOB_ID = "11111111-1111-4111-8111-111111111111";
+
+test("all jobs aggregates exact stage counts and limits previews without losing application context", () => {
+  const jobs = Array.from({ length: 25 }, (_, index) => ({
+    id: `job-${index}`, activeCount: 3,
+    stages: { "已录用": { count: 3, items: [{ applicationId: `app-${index}`, jobId: `job-${index}`, stage: "已录用" }] } },
+  }));
+  const result = aggregateWorkbenchJobs(jobs);
+  assert.equal(result.activeCount, 75);
+  assert.equal(result.stages["已录用"].count, 75);
+  assert.equal(result.stages["已录用"].items.length, 5);
+  assert.deepEqual(result.stages["已录用"].items[4], jobs[4].stages["已录用"].items[0]);
+  assert.equal(result.stages["待复核"].count, 0);
+  assert.equal(aggregateWorkbenchJobs([]).activeCount, 0);
+});
+
+test("load accepts more than twenty scoped jobs for the all-jobs board", async () => {
+  const payload = response();
+  const empty = { count: 0, items: [] };
+  for (let index = 1; index <= 24; index++) payload.data.jobs.push({
+    ...payload.data.jobs[0], id: `extra-job-${index}`, active_count: 0,
+    stages: Object.fromEntries(Object.keys(payload.data.jobs[0].stages).map((key) => [key, empty])),
+  });
+  const result = await createWorkbenchController({ client: { async request() { return payload; } } }).load();
+  assert.equal(result.jobs.length, 25);
+});
 const CANDIDATE_ID = "22222222-2222-4222-8222-222222222222";
 const APPLICATION_ID = "33333333-3333-4333-8333-333333333333";
 const TASK_ID = "66666666-6666-4666-8666-666666666666";
+const ONBOARDING_ID = "77777777-7777-4777-8777-777777777777";
 
 function item(changes = {}) {
   return {
@@ -40,6 +66,26 @@ function notification(candidate) {
   return { ...candidate, notification_version: "a".repeat(64) };
 }
 
+function onboardingTask(changes = {}) {
+  return {
+    id: ONBOARDING_ID,
+    application_id: APPLICATION_ID,
+    candidate_id: CANDIDATE_ID,
+    job_id: JOB_ID,
+    display_name: "李嘉明",
+    job_title: "AI 工程师",
+    department_name: "技术部",
+    expected_start_date: "2026-07-13",
+    status: "ready",
+    version: 2,
+    complete: true,
+    can_submit: true,
+    blocking_reason: null,
+    updated_at: "2026-07-13T03:05:00Z",
+    ...changes,
+  };
+}
+
 function response(changes = {}) {
   return {
     data: {
@@ -66,6 +112,7 @@ function response(changes = {}) {
         interview_pending: { count: 7, items: [item({ stage: "interview_pending", application_id: "44444444-4444-4444-8444-444444444444", next_interview_round: "二面" })] },
         decision: { count: 0, items: [] },
         passed: { count: 1, items: [item({ stage: "passed", application_id: "55555555-5555-4555-8555-555555555555" })] },
+        onboarding: { count: 1, items: [onboardingTask()] },
       },
       notifications: {
         review: { count: 1, items: [notification(reviewTask())] },
@@ -91,7 +138,7 @@ test("load requests the scoped workbench once and maps stages and candidate navi
 
   const result = await createWorkbenchController({ client }).load({ signal });
 
-  assert.deepEqual(calls, [{ path: "/api/v1/workbench", options: { signal } }]);
+  assert.deepEqual(calls, [{ path: "/api/v1/workbench?all_jobs=true", options: { signal } }]);
   assert.equal(result.generatedAt, "2026-07-13T04:00:00Z");
   assert.equal(result.jobs[0].name, "AI 工程师");
   assert.equal(result.jobs[0].department, "技术部");
@@ -126,6 +173,28 @@ test("load requests the scoped workbench once and maps stages and candidate navi
     candidateLink: `/candidates/${CANDIDATE_ID}?tab=evidence&application=${APPLICATION_ID}&job=${JOB_ID}`,
   });
   assert.equal(result.tasks.passed.count, 1);
+  assert.deepEqual(result.tasks.onboarding, {
+    count: 1,
+    items: [{
+      id: ONBOARDING_ID,
+      onboardingId: ONBOARDING_ID,
+      applicationId: APPLICATION_ID,
+      candidateId: CANDIDATE_ID,
+      jobId: JOB_ID,
+      serverBacked: true,
+      name: "李嘉明",
+      position: "AI 工程师",
+      department: "技术部",
+      expectedStartDate: "2026-07-13",
+      status: "ready",
+      version: 2,
+      complete: true,
+      canSubmit: true,
+      blockingReason: "",
+      lastActivity: new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date("2026-07-13T03:05:00Z")),
+      evidence: {},
+    }],
+  });
   assert.equal(result.tasks.interviewPending.items[0].position, "AI 工程师");
   assert.equal(result.tasks.interviewPending.items[0].nextRound, "二面");
   assert.equal(result.notifications.review.items[0].notificationVersion, "a".repeat(64));
@@ -164,6 +233,62 @@ test("refresh restores server read state without removing the business task", as
   assert.equal(result.tasks.passed.count, 1);
 });
 
+test("load remains compatible with a backend that has not published onboarding tasks yet", async () => {
+  const oldResponse = response();
+  delete oldResponse.data.tasks.onboarding;
+  const client = { async request() { return oldResponse; } };
+
+  const result = await createWorkbenchController({ client }).load();
+
+  assert.deepEqual(result.tasks.onboarding, { count: 0, items: [] });
+});
+
+test("load includes pending onboarding candidates in the job board and validates their scoped counts", async () => {
+  const payload = response();
+  const job = payload.data.jobs[0];
+  job.stages.pending_onboarding = { count: 6, items: [item({ stage: "hired" })] };
+  job.active_count += 6;
+  const controller = createWorkbenchController({ client: { async request() { return payload; } } });
+  const result = await controller.load();
+  assert.equal(result.jobs[0].activeCount, 15);
+  assert.equal(result.jobs[0].stages["已录用"].count, 6);
+  assert.equal(result.jobs[0].stages["已录用"].items[0].candidateId, CANDIDATE_ID);
+  assert.equal(result.jobs[0].stages["已录用"].items[0].stage, "已录用");
+  job.active_count = 9;
+  await assert.rejects(controller.load(), { code: "WORKBENCH_INVALID_RESPONSE" });
+  job.active_count = 15;
+  job.stages.pending_onboarding.items[0].job_id = "other-job";
+  await assert.rejects(controller.load(), { code: "WORKBENCH_INVALID_RESPONSE" });
+  job.stages.pending_onboarding.items[0].job_id = JOB_ID;
+  job.stages.pending_onboarding.items[0].stage = "passed";
+  await assert.rejects(controller.load(), { code: "WORKBENCH_INVALID_RESPONSE" });
+});
+
+test("load keeps accepted candidates with missing onboarding data visible", async () => {
+  const client = { async request() {
+    return response({
+      tasks: {
+        ...response().data.tasks,
+        onboarding: { count: 1, items: [onboardingTask({
+          id: APPLICATION_ID,
+          expected_start_date: null,
+          status: "incomplete",
+          version: 0,
+          complete: false,
+          can_submit: false,
+          blocking_reason: "onboarding_data_missing",
+        })] },
+      },
+    });
+  } };
+
+  const result = await createWorkbenchController({ client }).load();
+
+  assert.equal(result.tasks.onboarding.items[0].status, "incomplete");
+  assert.equal(result.tasks.onboarding.items[0].expectedStartDate, "");
+  assert.equal(result.tasks.onboarding.items[0].blockingReason, "onboarding_data_missing");
+});
+
 test("load applies safe display fallbacks to valid nullable workbench fields", async () => {
   const client = { async request() {
     return response({
@@ -191,6 +316,7 @@ test("load applies safe display fallbacks to valid nullable workbench fields", a
         interview_pending: { count: 0, items: [] },
         decision: { count: 0, items: [] },
         passed: { count: 0, items: [] },
+        onboarding: { count: 0, items: [] },
       },
       interviews: { available: false, upcoming: [], pending_feedback: [] },
     });
@@ -214,6 +340,7 @@ test("load applies safe display fallbacks to valid nullable workbench fields", a
     interviewPending: { count: 0, items: [] },
     decision: { count: 0, items: [] },
     passed: { count: 0, items: [] },
+    onboarding: { count: 0, items: [] },
   });
   assert.deepEqual(result.interviews, { available: false, upcoming: [], pendingFeedback: [] });
 });
@@ -240,6 +367,7 @@ test("review tasks keep their persisted contract independently of visible jobs a
         interview_pending: response().data.tasks.interview_pending,
         decision: response().data.tasks.decision,
         passed: response().data.tasks.passed,
+        onboarding: response().data.tasks.onboarding,
       },
     });
   } };
@@ -299,8 +427,9 @@ test("load rejects a malformed successful response instead of presenting it as a
     response({ jobs: [{ id: JOB_ID, title: "AI 工程师", status: "draft", updated_at: "2026-07-13T03:30:00Z", active_count: 4, stages: {} }] }),
     response({ jobs: [{ id: JOB_ID, title: "AI 工程师", status: "open", updated_at: "invalid", active_count: 4, stages: {} }] }),
     response({ tasks: null }),
-    response({ tasks: { review: {}, interview_pending: {}, decision: null, passed: {} } }),
-    response({ tasks: { review: { count: 1, items: null }, interview_pending: { count: 0, items: [] }, decision: { count: 0, items: [] }, passed: { count: 0, items: [] } } }),
+    response({ tasks: { review: {}, interview_pending: {}, decision: null, passed: {}, onboarding: {} } }),
+    response({ tasks: { review: { count: 1, items: null }, interview_pending: { count: 0, items: [] }, decision: { count: 0, items: [] }, passed: { count: 0, items: [] }, onboarding: { count: 0, items: [] } } }),
+    response({ tasks: { ...response().data.tasks, onboarding: { count: 1, items: [onboardingTask({ can_submit: "yes" })] } } }),
     response({ jobs: [{ ...response().data.jobs[0], active_count: 1, stages: { ...response().data.jobs[0].stages, review: { count: 0, items: [item()] } } }] }),
     response({ jobs: [{ ...response().data.jobs[0], stages: { ...response().data.jobs[0].stages, review: { count: 1, items: [item({ job_id: "99999999-9999-4999-8999-999999999999" })] } } }] }),
     response({ interviews: null }),
@@ -343,9 +472,12 @@ test("workbench shell keeps real tasks accessible across loading and narrow layo
   assert.match(appSource, /stages\.flat\(\)\.slice\(0, 10\)\.map\(\(candidate\) =>/);
   assert.match(appSource, /const workbenchCandidateCount = visibleStageMeta\.reduce/);
   assert.match(appSource, /aria-pressed=\{activeWorkbenchJob\.id === job\.id\}/);
-  assert.match(appSource, /navigate\(candidateListPath\(\{ jobId: activeWorkbenchJob\.id, stage: name \}\)\)/);
+  assert.match(appSource, /navigate\(candidateListPath\(\{ jobId: activeWorkbenchJob\.id === "all" \? undefined : activeWorkbenchJob\.id, stage: name \}\)\)/);
   assert.match(appSource, /candidateOrigin\?\.activeNav === "工作台" \? "返回工作台"/);
   assert.match(appSource, /candidateDetailPath\(candidate, "筛选证据", "\/workbench"\)/);
+  assert.match(appSource, /candidateDetailPath\(task, "Offer", onboardingWorkflowOpen \? "\/workbench\?view=onboarding" : "\/workbench"\)/);
+  assert.match(appSource, /offerController\.submitOnboarding\(task\)/);
+  assert.match(appSource, /<h2 id="workbench-onboarding-title">待入职<\/h2>/);
   assert.match(appSource, /candidate\.configWarning && <small>岗位未配置用人经理<\/small>/);
   assert.match(appSource, /onReferralComplete=\{\(\) => void loadWorkbench\(\)\}/);
   assert.match(appSource, /role="alert"/);

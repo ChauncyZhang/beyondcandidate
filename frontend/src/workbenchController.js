@@ -8,6 +8,7 @@ const STAGES = {
   interviewing: "面试中",
   decision: "待决策",
   passed: "已通过",
+  pending_onboarding: "已录用",
 };
 
 function safeString(value, fallback = "") {
@@ -44,6 +45,14 @@ function isDateTime(value) {
   return typeof value === "string" && !Number.isNaN(new Date(value).getTime());
 }
 
+function isDate(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function isNullableDate(value) {
+  return value === null || isDate(value);
+}
+
 function isCount(value) {
   return Number.isInteger(value) && value >= 0;
 }
@@ -69,7 +78,7 @@ function isStageGroup(group, stage, allowedJobIds) {
     && Array.isArray(group.items)
     && group.items.length <= 5
     && group.items.length <= group.count
-    && group.items.every((item) => isCandidate(item, stage) && allowedJobIds.has(item.job_id));
+    && group.items.every((item) => isCandidate(item, stage === "pending_onboarding" ? "hired" : stage) && allowedJobIds.has(item.job_id));
 }
 
 function reviewCandidateLink(item) {
@@ -91,6 +100,35 @@ function isReviewTaskGroup(group) {
     && group.items.length <= 5
     && group.items.length <= group.count
     && group.items.every(isReviewTask);
+}
+
+function isOnboardingTask(item) {
+  return isObject(item)
+    && isNonEmptyString(item.id)
+    && isNonEmptyString(item.application_id)
+    && isNonEmptyString(item.candidate_id)
+    && isNonEmptyString(item.job_id)
+    && isNonEmptyString(item.display_name)
+    && isNonEmptyString(item.job_title)
+    && isNonEmptyString(item.department_name)
+    && isNullableDate(item.expected_start_date)
+    && ["incomplete", "ready", "submitting", "failed"].includes(item.status)
+    && Number.isInteger(item.version)
+    && item.version >= 0
+    && typeof item.complete === "boolean"
+    && typeof item.can_submit === "boolean"
+    && Object.hasOwn(item, "blocking_reason")
+    && isNullableString(item.blocking_reason)
+    && isDateTime(item.updated_at);
+}
+
+function isOnboardingTaskGroup(group) {
+  return isObject(group)
+    && isCount(group.count)
+    && Array.isArray(group.items)
+    && group.items.length <= 20
+    && group.items.length <= group.count
+    && group.items.every(isOnboardingTask);
 }
 
 function isNotification(item, expectedStage, review = false) {
@@ -121,8 +159,9 @@ function isJob(job) {
     || !isObject(job.stages)
   ) return false;
   const jobScope = new Set([job.id]);
-  if (!Object.keys(STAGES).every((stage) => isStageGroup(job.stages[stage], stage, jobScope))) return false;
-  return Object.keys(STAGES).reduce((total, stage) => total + job.stages[stage].count, 0) === job.active_count;
+  if (!Object.keys(STAGES).every((stage) => stage === "pending_onboarding" && !Object.hasOwn(job.stages, stage)
+    || isStageGroup(job.stages[stage], stage, jobScope))) return false;
+  return Object.keys(STAGES).reduce((total, stage) => total + (job.stages[stage]?.count ?? 0), 0) === job.active_count;
 }
 
 function validateEnvelope(response) {
@@ -134,7 +173,6 @@ function validateEnvelope(response) {
     !isObject(payload)
     || !isDateTime(payload.generated_at)
     || !Array.isArray(payload.jobs)
-    || payload.jobs.length > 20
     || !payload.jobs.every(isJob)
     || !isObject(taskGroups)
     || !isObject(notifications)
@@ -149,6 +187,7 @@ function validateEnvelope(response) {
   const taskStages = ["interview_pending", "decision", "passed"];
   if (
     !isReviewTaskGroup(taskGroups.review)
+    || !isOnboardingTaskGroup(taskGroups.onboarding ?? { count: 0, items: [] })
     || !taskStages.every((stage) => (
     isStageGroup(taskGroups[stage], stage, jobIds)
     && taskGroups[stage].count === payload.jobs.reduce((total, job) => total + job.stages[stage].count, 0)
@@ -175,11 +214,24 @@ function displayDateTime(value) {
   }).format(date);
 }
 
+export function aggregateWorkbenchJobs(jobs) {
+  return {
+    id: "all",
+    name: "全部职位",
+    department: `${jobs.length} 个在招职位`,
+    activeCount: jobs.reduce((total, job) => total + job.activeCount, 0),
+    stages: Object.fromEntries(Object.values(STAGES).map((stage) => [stage, {
+      count: jobs.reduce((total, job) => total + (job.stages[stage]?.count || 0), 0),
+      items: jobs.flatMap((job) => job.stages[stage]?.items || []).slice(0, 5),
+    }])),
+  };
+}
+
 function normalizeItem(item, jobNames, { allowUnknownJob = false } = {}) {
   const applicationId = safeString(item?.application_id);
   const candidateId = safeString(item?.candidate_id);
   const jobId = safeString(item?.job_id);
-  const stage = safeString(item?.stage);
+  const stage = item?.stage === "hired" ? "pending_onboarding" : safeString(item?.stage);
   if (!applicationId || !candidateId || !jobId || !STAGES[stage] || (!allowUnknownJob && !jobNames.has(jobId))) return null;
   return {
     id: applicationId,
@@ -234,6 +286,31 @@ function normalizeReviewTaskGroup(group, jobNames) {
   };
 }
 
+function normalizeOnboardingTaskGroup(group) {
+  return {
+    count: safeCount(group?.count),
+    items: safeArray(group?.items).map((item) => ({
+      id: safeString(item?.id),
+      onboardingId: safeString(item?.id),
+      applicationId: safeString(item?.application_id),
+      candidateId: safeString(item?.candidate_id),
+      jobId: safeString(item?.job_id),
+      serverBacked: true,
+      name: safeString(item?.display_name, "未命名候选人"),
+      position: safeString(item?.job_title, "职位信息不可用"),
+      department: safeString(item?.department_name, "部门未设置"),
+      expectedStartDate: safeString(item?.expected_start_date),
+      status: safeString(item?.status),
+      version: item?.version,
+      complete: item?.complete === true,
+      canSubmit: item?.can_submit === true,
+      blockingReason: safeString(item?.blocking_reason),
+      lastActivity: displayDateTime(item?.updated_at),
+      evidence: {},
+    })),
+  };
+}
+
 function withNotificationVersion(candidate, item) {
   return candidate ? { ...candidate, notificationVersion: item.notification_version } : null;
 }
@@ -284,6 +361,7 @@ function normalizeWorkbench(payload) {
       interviewPending: normalizeTaskGroup(tasks.interview_pending, "interview_pending", jobNames),
       decision: normalizeTaskGroup(tasks.decision, "decision", jobNames),
       passed: normalizeTaskGroup(tasks.passed, "passed", jobNames),
+      onboarding: normalizeOnboardingTaskGroup(tasks.onboarding),
     },
     notifications: {
       review: normalizeReviewNotificationGroup(notifications.review, jobNames),
@@ -302,7 +380,7 @@ function normalizeWorkbench(payload) {
 export function createWorkbenchController({ client = apiClient } = {}) {
   return {
     async load({ signal } = {}) {
-      const response = await client.request("/api/v1/workbench", signal ? { signal } : {});
+      const response = await client.request("/api/v1/workbench?all_jobs=true", signal ? { signal } : {});
       return normalizeWorkbench(validateEnvelope(response));
     },
     async markNotificationRead(candidate) {

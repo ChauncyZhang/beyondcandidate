@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -183,6 +183,7 @@ class CandidateOut(ApiModel):
 
 
 class CandidateApplicationSummaryOut(ApiModel):
+    pending_onboarding: bool
     id: str
     job_id: str
     job_title: str
@@ -225,6 +226,7 @@ class ApplicationOut(ApiModel):
 
 
 class ApplicationHistoryOut(ApplicationOut):
+    pending_onboarding: bool
     job_title: str
     job_status: str
     next_interview_round: str | None = None
@@ -316,6 +318,15 @@ class WorkbenchStageOut(ApiModel):
     items: list[WorkbenchCandidateOut] = Field(max_length=5)
 
 
+class WorkbenchPendingOnboardingCandidateOut(WorkbenchCandidateOut):
+    stage: Literal["hired"]
+
+
+class WorkbenchPendingOnboardingStageOut(ApiModel):
+    count: int = Field(ge=0)
+    items: list[WorkbenchPendingOnboardingCandidateOut] = Field(max_length=5)
+
+
 class WorkbenchReviewTaskOut(WorkbenchCandidateOut):
     task_id: str
     ai_status: Literal["succeeded", "failed"]
@@ -326,6 +337,28 @@ class WorkbenchReviewTaskOut(WorkbenchCandidateOut):
 class WorkbenchReviewStageOut(ApiModel):
     count: int = Field(ge=0)
     items: list[WorkbenchReviewTaskOut] = Field(max_length=5)
+
+
+class WorkbenchOnboardingTaskOut(ApiModel):
+    id: str
+    application_id: str
+    candidate_id: str
+    job_id: str
+    display_name: str
+    job_title: str
+    department_name: str
+    expected_start_date: date | None
+    status: Literal["incomplete", "ready", "submitting", "failed"]
+    version: int = Field(ge=0)
+    complete: bool
+    can_submit: bool
+    blocking_reason: str | None = None
+    updated_at: datetime
+
+
+class WorkbenchOnboardingStageOut(ApiModel):
+    count: int = Field(ge=0)
+    items: list[WorkbenchOnboardingTaskOut] = Field(max_length=20)
 
 
 class WorkbenchNotificationOut(WorkbenchCandidateOut):
@@ -361,6 +394,7 @@ class WorkbenchStagesOut(ApiModel):
     interviewing: WorkbenchStageOut
     decision: WorkbenchStageOut
     passed: WorkbenchStageOut
+    pending_onboarding: WorkbenchPendingOnboardingStageOut
 
 
 class WorkbenchJobOut(ApiModel):
@@ -378,6 +412,7 @@ class WorkbenchTasksOut(ApiModel):
     interview_pending: WorkbenchStageOut
     decision: WorkbenchStageOut
     passed: WorkbenchStageOut
+    onboarding: WorkbenchOnboardingStageOut
 
 
 class WorkbenchInterviewsOut(ApiModel):
@@ -388,7 +423,7 @@ class WorkbenchInterviewsOut(ApiModel):
 
 class WorkbenchOut(ApiModel):
     generated_at: datetime
-    jobs: list[WorkbenchJobOut] = Field(max_length=20)
+    jobs: list[WorkbenchJobOut]
     tasks: WorkbenchTasksOut
     notifications: WorkbenchNotificationsOut
     interviews: WorkbenchInterviewsOut

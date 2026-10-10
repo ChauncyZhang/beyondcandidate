@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -826,6 +826,64 @@ def invite_user(
             },
             status_code=201,
         )
+
+
+@router.post("/users/{user_id}/invitation")
+def reissue_user_invitation(user_id: UUID, request: Request):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
+    service = request.app.state.identity_service
+    with request.app.state.identity_store.sync_session() as db:
+        user = db.scalar(
+            select(User)
+            .options(selectinload(User.roles))
+            .where(User.organization_id == principal.organization_id, User.id == user_id)
+            .with_for_update(of=User)
+        )
+        if user is None:
+            return problem(request, 404, "user_not_found", "The user was not found.")
+        if "system_admin" not in principal.roles and any(
+            role.role not in RECRUITING_ADMIN_INVITABLE_ROLES for role in user.roles
+        ):
+            return problem(request, 403, "role_assignment_forbidden", "The role cannot be assigned.")
+        if user.status != UserStatus.INVITED:
+            return problem(request, 409, "user_not_invited", "Only invited users can be invited again.")
+        now = service.clock.current_time()
+        expires_at = now + timedelta(hours=48)
+        raw_token = service.tokens.new_token()
+        # Acceptance and reissue serialize on the user before touching invitations.
+        db.execute(
+            update(PasswordInvitation)
+            .where(
+                PasswordInvitation.organization_id == principal.organization_id,
+                PasswordInvitation.user_id == user_id,
+                PasswordInvitation.used_at.is_(None),
+                PasswordInvitation.expires_at > now,
+            )
+            .values(expires_at=now)
+        )
+        db.add(PasswordInvitation(
+            organization_id=principal.organization_id,
+            user_id=user_id,
+            token_hash=hash_token(raw_token),
+            expires_at=expires_at,
+        ))
+        db.add(AuditLog(
+            organization_id=principal.organization_id,
+            actor_user_id=principal.user_id,
+            category="system",
+            event_type="identity.user_reinvited",
+            outcome="success",
+            resource_type="user",
+            resource_id=user_id,
+            trace_id=request.state.trace_id,
+            metadata_json={},
+        ))
+        db.commit()
+        return {"data": {"invitation": {
+            "token": raw_token, "expires_at": expires_at.isoformat(),
+        }}}
 
 
 @router.patch("/users/{user_id}/recruiting-scope")

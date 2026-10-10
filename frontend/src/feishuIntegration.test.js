@@ -3,11 +3,49 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { createApiClient } from "./apiClient.js";
-import { buildFeishuConfigPayload, buildFeishuOnboardingApprovalPayload, FEISHU_APPROVAL_CONTROL_TYPES, FEISHU_ONBOARDING_FIELDS, getFeishuCallbackErrorCode, getFeishuConfigErrorMessage, getFeishuConnectionTestErrorMessage, getFeishuLoginErrorMessage, getFeishuOnboardingApprovalErrorMessage, normalizeFeishuConfig, normalizeFeishuOnboardingApprovalConfig, normalizeFeishuBinding, startFeishuAuthorization } from "./feishuIntegration.js";
+import { getFeishuApprovalValidationDisabledReason, getFeishuApproverSelectionError } from "./feishuIntegration.js";
+import { autoMatchFeishuDepartmentMappings, buildFeishuConfigPayload, buildFeishuOnboardingApprovalPayload, FEISHU_APPROVAL_CONTROL_TYPES, FEISHU_ONBOARDING_FIELDS, getFeishuCallbackErrorCode, getFeishuConfigErrorMessage, getFeishuConnectionTestErrorMessage, getFeishuLoginErrorMessage, getFeishuOnboardingApprovalErrorMessage, normalizeFeishuConfig, normalizeFeishuDepartmentDirectory, normalizeFeishuOnboardingApprovalConfig, normalizeFeishuBinding, startFeishuAuthorization } from "./feishuIntegration.js";
 
 function response(body, status = 200, headers = {}) {
   return new Response(body == null ? null : JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
 }
+
+test("fixed approvers preserve local UUIDs and unknown validation metadata through draft serialization", () => {
+  const ids = ["00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000001"];
+  const input = { approval_nodes: null, node_approvers: [{ node_id: "node", user_ids: ids }] };
+  const draft = normalizeFeishuOnboardingApprovalConfig(input);
+  assert.equal(draft.approvalNodes, null);
+  assert.deepEqual(draft.nodeApprovers, [{ nodeId: "node", userIds: ids }]);
+  const payload = buildFeishuOnboardingApprovalPayload(draft);
+  assert.deepEqual(payload.node_approvers, [{ node_id: "node", user_ids: [...ids].sort() }]);
+  assert.deepEqual(input.node_approvers[0].user_ids, ids);
+  assert.equal(Object.hasOwn(payload, "approval_nodes"), false);
+  assert.deepEqual(buildFeishuOnboardingApprovalPayload({ nodeApprovers: [{ nodeId: "node", userIds: [] }] }).node_approvers, []);
+});
+
+test("fixed approver validation distinguishes missing, single, unavailable, removed and valid selections", () => {
+  const options = { nodes: [{ node_id: "node", name: "人事", need_approver: true, allow_multiple: false }], members: [{ user_id: "one", available: true }, { user_id: "two", available: true }, { user_id: "unbound", available: false }] };
+  const draft = (ids, nodeId = "node") => ({ nodeApprovers: [{ nodeId, userIds: ids }] });
+  assert.match(getFeishuApproverSelectionError(draft([]), options), /人事.*选择固定审批人/);
+  assert.match(getFeishuApproverSelectionError(draft(["one", "two"]), options), /只能选择一名/);
+  for (const id of ["unbound", "removed"]) assert.match(getFeishuApproverSelectionError(draft([id]), options), /不可用/);
+  assert.match(getFeishuApproverSelectionError(draft(["one"], "obsolete"), options), /节点已变更/);
+  assert.equal(getFeishuApproverSelectionError(draft(["one"]), options), "");
+  assert.equal(getFeishuApproverSelectionError(draft(["one", "two"]), { ...options, nodes: [{ ...options.nodes[0], allow_multiple: true }] }), "");
+  assert.equal(getFeishuApproverSelectionError(draft([]), { ...options, nodes: [{ ...options.nodes[0], need_approver: false }] }), "");
+});
+
+test("approval validation reasons cover pending states and trimmed required values", () => {
+  const draft = normalizeFeishuOnboardingApprovalConfig({ approval_code: "code", field_mapping: Object.fromEntries(FEISHU_ONBOARDING_FIELDS.map((field) => [field.key, { control_id: field.key }])) });
+  assert.equal(getFeishuApprovalValidationDisabledReason(draft, "ready", "ready"), "");
+  for (const [status, expected] of [["loading", "加载"], ["saving", "保存"], ["validating", "校验"], ["refreshing", "刷新"], ["creating_department", "创建部门"]]) {
+    assert.match(getFeishuApprovalValidationDisabledReason(draft, status, "ready"), new RegExp(expected));
+  }
+  assert.match(getFeishuApprovalValidationDisabledReason(draft, "ready", "loading"), /读取并匹配/);
+  assert.match(getFeishuApprovalValidationDisabledReason({ ...draft, approvalCode: " " }, "ready", "ready"), /Approval Code/);
+  draft.fieldMapping.email.controlId = " ";
+  assert.match(getFeishuApprovalValidationDisabledReason(draft, "ready", "ready"), /邮箱/);
+});
 
 test("Feishu API methods follow the organization login and binding contracts", async () => {
   const calls = [];
@@ -21,6 +59,7 @@ test("Feishu API methods follow the organization login and binding contracts", a
   await client.getFeishuConfig();
   await client.saveFeishuConfig({ app_id: "cli", enabled: false });
   await client.testFeishuConnection();
+  await client.listFeishuDepartments();
   await client.getFeishuOnboardingApprovalConfig();
   await client.saveFeishuOnboardingApprovalConfig({ enabled: true }, { version: 2 });
   await client.validateFeishuOnboardingApprovalConfig({ version: 3 });
@@ -33,6 +72,7 @@ test("Feishu API methods follow the organization login and binding contracts", a
     ["/api/v1/settings/integrations/feishu", "GET"],
     ["/api/v1/settings/integrations/feishu", "PUT"],
     ["/api/v1/settings/integrations/feishu/test", "POST"],
+    ["/api/v1/settings/integrations/feishu/departments", "GET"],
     ["/api/v1/settings/integrations/feishu/onboarding-approval", "GET"],
     ["/api/v1/settings/integrations/feishu/onboarding-approval", "PUT"],
     ["/api/v1/settings/integrations/feishu/onboarding-approval/validate", "POST"],
@@ -40,6 +80,36 @@ test("Feishu API methods follow the organization login and binding contracts", a
     ["/api/v1/me/integrations/feishu/authorize", "POST"],
     ["/api/v1/me/integrations/feishu", "GET"],
     ["/api/v1/me/integrations/feishu", "DELETE"],
+  ]);
+});
+
+test("Feishu department directory normalizes safe fields and uniquely auto-matches names", () => {
+  const directory = normalizeFeishuDepartmentDirectory([
+    { open_department_id: "od-engineering", name: " 研发部 ", members: ["private"] },
+    { open_department_id: "od-product-a", name: "产品部" },
+    { open_department_id: "od-product-b", name: "产品部" },
+    { open_department_id: "invalid", name: "无效" },
+  ]);
+  assert.deepEqual(directory, [
+    { openDepartmentId: "od-product-a", name: "产品部" },
+    { openDepartmentId: "od-product-b", name: "产品部" },
+    { openDepartmentId: "od-engineering", name: "研发部" },
+  ]);
+
+  const result = autoMatchFeishuDepartmentMappings([
+    { departmentId: "local-1", departmentName: "研发部", feishuDepartmentId: "" },
+    { departmentId: "local-2", departmentName: "产品部", feishuDepartmentId: "" },
+    { departmentId: "local-3", departmentName: "其他", feishuDepartmentId: "od-existing" },
+  ], directory);
+  assert.equal(result.matchedCount, 1);
+  assert.equal(result.mappings[0].feishuDepartmentId, "od-engineering");
+  assert.equal(result.mappings[1].feishuDepartmentId, "");
+  assert.equal(result.mappings[2].feishuDepartmentId, "od-existing");
+  assert.deepEqual(buildFeishuOnboardingApprovalPayload({
+    departmentMappings: result.mappings,
+  }).department_mappings, [
+    { department_id: "local-1", feishu_department_id: "od-engineering" },
+    { department_id: "local-3", feishu_department_id: "od-existing" },
   ]);
 });
 
@@ -187,7 +257,9 @@ test("Feishu settings expose onboarding approval mapping and validation without 
   assert.match(settings, /Approval Code/);
   assert.match(settings, /FEISHU_ONBOARDING_FIELDS\.map/);
   assert.match(settings, /部门映射/);
-  assert.match(settings, /新增部门/);
+  assert.match(settings, /新增本地部门/);
+  assert.match(settings, /刷新飞书部门/);
+  assert.match(settings, /listFeishuDepartments/);
   assert.match(settings, /client\.createDepartment\(\{ name, parent_id: null \}\)/);
   assert.match(settings, /部门已创建并加入飞书映射/);
   assert.match(settings, /校验审批模板/);

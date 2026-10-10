@@ -96,7 +96,7 @@ function candidateEmail(version = 2) {
   };
 }
 
-async function openCandidate({ role = "recruiter", conflictOnce = false, conflictCode = "resource_version_conflict", holdPut = false, viewport = { width: 1280, height: 800 }, stage = "contact", offer = null, offerHistory = null, offerPatchConflictToPending = false, offerSubmitConflictToPending = false, offerSubmitErrorCode = "", offerApproverConflictToPending = false, offerSendPollsUntilSent = null, offerSendErrorCode = "" } = {}) {
+async function openCandidate({ role = "recruiter", conflictOnce = false, conflictCode = "resource_version_conflict", holdPut = false, viewport = { width: 1280, height: 800 }, stage = "contact", offer = null, offerHistory = null, offerTemplates = [], defaultOfferTemplateId = null, offerPatchConflictToPending = false, offerSubmitConflictToPending = false, offerSubmitErrorCode = "", offerApproverConflictToPending = false, offerSendPollsUntilSent = null, offerSendErrorCode = "" } = {}) {
   const context = await browser.newContext({ viewport, timezoneId: "Asia/Shanghai" });
   const requests = { emailGet: 0, emailPut: [], governanceGet: 0, offerGetAfterSend: 0, offerPatch: 0, offerPatchBodies: [], offerSubmit: 0, offerSend: 0, approverOptions: 0, approverPut: [] };
   let releasePut;
@@ -231,7 +231,8 @@ async function openCandidate({ role = "recruiter", conflictOnce = false, conflic
       return json({ offer_id: currentOffer.id, job_id: jobId, approver_id: request.postDataJSON().approver_id, version: currentOffer.version });
     }
     if (currentOffer && pathname === `/api/v1/offers/${currentOffer.id}/history`) return json(offerHistory || { versions: [], approvals: [], events: [], responses: [] });
-    if (pathname === "/api/v1/offer-templates") return json([]);
+    if (pathname === "/api/v1/offer-templates") return json(offerTemplates);
+    if (pathname === `/api/v1/job-definitions/${jobId}`) return json({ job: { id: jobId, offer_template_id: defaultOfferTemplateId } });
     if (pathname === "/api/v1/jobs") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [], meta: { next_cursor: null } }) });
     return route.fulfill({ status: 503, contentType: "application/problem+json", body: JSON.stringify({ status: 503, code: "service_unavailable" }) });
   });
@@ -286,6 +287,36 @@ test("passed candidate exposes the Offer workflow and pending approval layout on
       assert.ok(iconBounds && contentBounds && contentBounds.x > iconBounds.x + iconBounds.width, "notice icon and content must be aligned in separate columns");
     } finally { await context.close(); }
   }
+});
+
+test("selecting an Offer template auto-fills known data, flags unresolved values, and keeps fields editable", { timeout: 60_000 }, async () => {
+  const offerTemplates = [{
+    id: "template-1",
+    name: "Aurora 标准录用通知",
+    status: "active",
+    version: 1,
+    content: {
+      title: "{{job_title}}正式录用通知",
+      body: "{{candidate_name}}，您好。工作地点：{{work_location}}。",
+      compensation: "{{salary}}",
+      benefits: "五险一金",
+    },
+  }];
+  const { context, page } = await openCandidate({ role: "recruiting_admin", stage: "passed", offerTemplates, defaultOfferTemplateId: "template-1", viewport: { width: 390, height: 844 } });
+  try {
+    await page.getByRole("button", { name: "办理 Offer", exact: true }).click();
+    assert.equal(await page.getByLabel("Offer 模板").inputValue(), "");
+    assert.equal(await page.getByLabel("Offer 标题").inputValue(), "AI 工程师正式录用通知");
+    await page.getByLabel("Offer 模板").selectOption("template-1");
+    assert.equal(await page.getByLabel("Offer 标题").inputValue(), "AI 工程师正式录用通知");
+    assert.equal(await page.getByLabel("Offer 正文").inputValue(), "陈曦，您好。工作地点：上海。");
+    assert.equal(await page.getByLabel("薪酬方案").inputValue(), "{{salary}}");
+    await page.getByText("需补充：salary", { exact: true }).waitFor();
+    await page.getByLabel("薪酬方案").fill("税前月薪 30K");
+    assert.equal(await page.getByText("需补充：salary", { exact: true }).count(), 0);
+    await page.getByText("模板内容已自动填写", { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth), true);
+  } finally { await context.close(); }
 });
 
 test("queued Offer automatically changes to sent after background delivery completes", { timeout: 60_000 }, async () => {

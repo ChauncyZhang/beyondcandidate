@@ -117,6 +117,41 @@ def get_config(request: Request):
         return _config_response(config)
 
 
+@router.get("/settings/integrations/feishu/departments")
+def list_feishu_departments(request: Request):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
+    if not _can_manage(principal):
+        return problem(request, 403, "forbidden", "The operation is not permitted.")
+    with request.app.state.identity_store.sync_session() as db:
+        config = db.scalar(select(FeishuOrganizationConfig).where(
+            FeishuOrganizationConfig.organization_id == principal.organization_id,
+        ))
+        if config is None or config.encrypted_app_secret is None:
+            return problem(request, 409, "feishu_not_configured", "Feishu is not configured.")
+        credentials = _credentials(request, config)
+
+    try:
+        departments = request.app.state.feishu_provider.list_departments(credentials)
+    except FeishuProviderError:
+        return problem(
+            request,
+            502,
+            "feishu_department_directory_unavailable",
+            "The Feishu department directory could not be read.",
+        )
+    response = JSONResponse({"data": [
+        {
+            "open_department_id": item.open_department_id,
+            "name": item.name,
+        }
+        for item in departments
+    ]})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @router.put("/settings/integrations/feishu")
 def put_config(payload: FeishuConfigWrite, request: Request):
     principal = _principal(request)

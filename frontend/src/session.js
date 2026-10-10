@@ -107,12 +107,13 @@ export function createSessionController(client) {
       return bootstrapPromise;
     },
     async login(credentials) {
+      // Invalidate old requests before login can replace the session cookies.
+      const nextEpoch = client.advanceAuthEpoch?.();
+      sessionEpoch = Number.isInteger(nextEpoch) ? nextEpoch : sessionEpoch + 1;
       setState(anonymousState(null, true));
       try {
         await client.login(credentials);
         const user = await client.getMe();
-        const nextEpoch = client.advanceAuthEpoch?.();
-        sessionEpoch = Number.isInteger(nextEpoch) ? nextEpoch : sessionEpoch + 1;
         setState(authenticatedState(user));
         return user;
       } catch (error) {

@@ -63,6 +63,12 @@ class ConnectionResult:
 
 
 @dataclass(frozen=True)
+class FeishuDepartment:
+    open_department_id: str
+    name: str
+
+
+@dataclass(frozen=True)
 class FreeBusyRequest:
     user_ids: tuple[str, ...]
     time_min: datetime
@@ -109,12 +115,21 @@ class ApprovalControl:
 
 
 @dataclass(frozen=True)
+class ApprovalNode:
+    node_id: str
+    name: str | None
+    need_approver: bool
+    allow_multiple: bool
+
+
+@dataclass(frozen=True)
 class ApprovalDefinition:
     approval_code: str
     name: str | None
     status: str | None
     controls: tuple[ApprovalControl, ...]
     fingerprint: str
+    nodes: tuple[ApprovalNode, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -123,11 +138,36 @@ class ApprovalInstanceRequest:
     initiator_open_id: str
     department_id: str | None
     form: tuple[dict, ...]
+    node_approvers: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
 class ApprovalInstance:
     instance_code: str
+
+
+def _validate_node_approvers(value: object) -> list[dict]:
+    if not isinstance(value, tuple):
+        raise FeishuProviderError("feishu_approval_approvers_invalid", retryable=False)
+    result: list[dict] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"key", "value"}:
+            raise FeishuProviderError("feishu_approval_approvers_invalid", retryable=False)
+        key, open_ids = item["key"], item["value"]
+        if (
+            not isinstance(key, str) or not key.strip() or key != key.strip()
+            or key in seen
+            or not isinstance(open_ids, list) or not open_ids
+            or any(not isinstance(open_id, str) or not open_id.strip()
+                   or open_id != open_id.strip() for open_id in open_ids)
+        ):
+            raise FeishuProviderError("feishu_approval_approvers_invalid", retryable=False)
+        if len(set(open_ids)) != len(open_ids):
+            raise FeishuProviderError("feishu_approval_approvers_invalid", retryable=False)
+        seen.add(key)
+        result.append({"key": key, "value": list(open_ids)})
+    return result
 
 
 def chunk_freebusy_requests(
@@ -150,6 +190,7 @@ def chunk_freebusy_requests(
 class FeishuProvider(Protocol):
     def authorization_url(self, credentials: FeishuCredentials, state: str) -> str: ...
     def test_connection(self, credentials: FeishuCredentials) -> ConnectionResult: ...
+    def list_departments(self, credentials: FeishuCredentials) -> tuple[FeishuDepartment, ...]: ...
     def exchange_code(self, credentials: FeishuCredentials, code: str) -> OAuthIdentity: ...
     def batch_freebusy(self, credentials: FeishuCredentials, request: FreeBusyRequest) -> tuple[BusyWindow, ...]: ...
     def create_event(self, credentials: FeishuCredentials, request: CalendarEventRequest, *, idempotency_key: str) -> CalendarEvent: ...
@@ -173,6 +214,7 @@ class FakeFeishuProvider:
         self.messages: list[tuple[str, str, str]] = []
         self.cards: list[tuple[str, dict, str]] = []
         self.failure: FeishuProviderError | None = None
+        self.departments: tuple[FeishuDepartment, ...] = ()
         self.approval_definition = ApprovalDefinition(
             "approval_fake",
             "Onboarding",
@@ -192,6 +234,10 @@ class FakeFeishuProvider:
     def test_connection(self, credentials: FeishuCredentials) -> ConnectionResult:
         self._check()
         return ConnectionResult(True, 1)
+
+    def list_departments(self, credentials: FeishuCredentials) -> tuple[FeishuDepartment, ...]:
+        self._check()
+        return self.departments
 
     def exchange_code(self, credentials: FeishuCredentials, code: str) -> OAuthIdentity:
         self._check()
@@ -272,6 +318,7 @@ class FakeFeishuProvider:
 
     def create_approval_instance(self, credentials: FeishuCredentials, request: ApprovalInstanceRequest, *, idempotency_key: str) -> ApprovalInstance:
         self._check()
+        _validate_node_approvers(request.node_approvers)
         if idempotency_key in self._idempotency:
             return self._idempotency[idempotency_key]  # type: ignore[return-value]
         instance = ApprovalInstance(f"approval_{uuid4().hex}")
@@ -318,6 +365,8 @@ class HttpFeishuProvider:
             return "oauth_token"
         if path.endswith("/user_info"):
             return "user_info"
+        if "/contact/v3/departments/" in path and path.endswith("/children"):
+            return "department_directory"
         if "/calendar/v4/" in path:
             return "calendar"
         if "/im/v1/messages" in path:
@@ -478,6 +527,71 @@ class HttpFeishuProvider:
 
     def _headers(self, credentials: FeishuCredentials) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._tenant_token(credentials)}", "Content-Type": "application/json; charset=utf-8"}
+
+    def list_departments(self, credentials: FeishuCredentials) -> tuple[FeishuDepartment, ...]:
+        departments: dict[str, FeishuDepartment] = {}
+        page_token: str | None = None
+        seen_page_tokens: set[str] = set()
+        for _page_number in range(200):
+            params: dict[str, str | int | bool] = {
+                "fetch_child": True,
+                "page_size": 50,
+                "department_id_type": "open_department_id",
+            }
+            if page_token is not None:
+                params["page_token"] = page_token
+            payload = self._json(
+                "GET",
+                f"{OPEN_API_BASE}/contact/v3/departments/0/children",
+                params=params,
+                headers=self._headers(credentials),
+            )
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            items = data.get("items", [])
+            if not isinstance(items, list):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            for item in items:
+                if not isinstance(item, dict):
+                    raise FeishuProviderError("feishu_response_invalid", retryable=False)
+                department_id = item.get("open_department_id") or item.get("department_id")
+                name = item.get("name")
+                if (
+                    not isinstance(department_id, str)
+                    or not department_id.startswith("od-")
+                    or len(department_id) > 128
+                    or not isinstance(name, str)
+                    or not name.strip()
+                    or len(name) > 200
+                ):
+                    raise FeishuProviderError("feishu_response_invalid", retryable=False)
+                departments[department_id] = FeishuDepartment(
+                    department_id,
+                    name.strip(),
+                )
+                if len(departments) > 10_000:
+                    raise FeishuProviderError("feishu_response_invalid", retryable=False)
+
+            has_more = data.get("has_more", False)
+            if not isinstance(has_more, bool):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            if not has_more:
+                return tuple(sorted(
+                    departments.values(),
+                    key=lambda item: (item.name.casefold(), item.open_department_id),
+                ))
+            next_page_token = data.get("page_token")
+            if (
+                not isinstance(next_page_token, str)
+                or not next_page_token
+                or len(next_page_token) > 2048
+                or next_page_token in seen_page_tokens
+            ):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            seen_page_tokens.add(next_page_token)
+            page_token = next_page_token
+        raise FeishuProviderError("feishu_response_invalid", retryable=False)
 
     @staticmethod
     def _event_body(
@@ -871,6 +985,32 @@ class HttpFeishuProvider:
         }
         return tuple(deduplicated.values())
 
+    @staticmethod
+    def _approval_nodes(value: object) -> tuple[ApprovalNode, ...]:
+        if not isinstance(value, list):
+            raise FeishuProviderError("feishu_response_invalid", retryable=False)
+        nodes: list[ApprovalNode] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            node_id = item.get("node_id")
+            name = item.get("name")
+            need_approver = item.get("need_approver")
+            # Only non-selectable nodes may omit the selection cardinality.
+            allow_multiple = item.get("approver_chosen_multi", False if need_approver is False else None)
+            if (
+                not isinstance(node_id, str) or not node_id.strip()
+                or node_id != node_id.strip() or node_id in seen
+                or (name is not None and not isinstance(name, str))
+                or not isinstance(need_approver, bool)
+                or not isinstance(allow_multiple, bool)
+            ):
+                raise FeishuProviderError("feishu_response_invalid", retryable=False)
+            seen.add(node_id)
+            nodes.append(ApprovalNode(node_id, name, need_approver, allow_multiple))
+        return tuple(nodes)
+
     def get_approval_definition(self, credentials: FeishuCredentials, approval_code: str) -> ApprovalDefinition:
         payload = self._json(
             "GET",
@@ -888,16 +1028,26 @@ class HttpFeishuProvider:
             except (TypeError, ValueError):
                 raise FeishuProviderError("feishu_response_invalid", retryable=False) from None
         controls = self._approval_controls(form)
-        canonical = json.dumps(form, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        nodes = self._approval_nodes(data.get("node_list"))
+        required_nodes = [
+            {"node_id": node.node_id, "need_approver": True, "allow_multiple": node.allow_multiple}
+            for node in sorted(nodes, key=lambda node: node.node_id) if node.need_approver
+        ]
+        canonical = json.dumps(
+            {"form": form, "nodes": required_nodes},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
         return ApprovalDefinition(
             approval_code=approval_code,
             name=data.get("approval_name") if isinstance(data.get("approval_name"), str) else None,
             status=data.get("status") if isinstance(data.get("status"), str) else None,
             controls=controls,
             fingerprint=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            nodes=nodes,
         )
 
     def create_approval_instance(self, credentials: FeishuCredentials, request: ApprovalInstanceRequest, *, idempotency_key: str) -> ApprovalInstance:
+        node_approvers = _validate_node_approvers(request.node_approvers)
         body = {
             "approval_code": request.approval_code,
             "open_id": request.initiator_open_id,
@@ -906,6 +1056,8 @@ class HttpFeishuProvider:
         }
         if request.department_id:
             body["department_id"] = request.department_id
+        if node_approvers:
+            body["node_approver_open_id_list"] = node_approvers
         payload = self._json(
             "POST",
             f"{OPEN_API_BASE}/approval/v4/instances",

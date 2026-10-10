@@ -87,6 +87,7 @@ test("candidate list safely encodes supported filters and normalizes server rows
     company: "",
     position: "平台 & AI",
     stage: "AI 初筛暂缓",
+    pendingOnboarding: false,
     nextRound: "技术二面",
     score: 76,
     recommendation: "暂缓",
@@ -98,6 +99,25 @@ test("candidate list safely encodes supported filters and normalizes server rows
     lastActivity: "07/13 18:00",
     historicalRule: { score: 81, recommendation: "可沟通" },
   });
+});
+
+test("pending onboarding is an explicit server projection, not every hired application", async () => {
+  const calls = [];
+  const client = { async request(path) {
+    calls.push(path);
+    return { data: [true, false, undefined, "true"].map((pending, index) => ({
+      id: `candidate-${index}`, application: { id: `application-${index}`, stage: "hired", pending_onboarding: pending },
+    })) };
+  } };
+  const page = await createCandidateController({ client }).listCandidates({ jobId, stage: "待入职", q: "姓名", cursor: "next", limit: 20 });
+  const url = new URL(calls[0], "http://localhost");
+  assert.equal(url.pathname, "/api/v1/candidates");
+  assert.equal(url.searchParams.get("stage"), "pending_onboarding");
+  assert.equal(url.searchParams.get("job_id"), jobId);
+  assert.equal(url.searchParams.get("cursor"), "next");
+  assert.equal(url.searchParams.get("q"), "姓名");
+  assert.deepEqual(page.records.map((item) => item.pendingOnboarding), [true, false, false, false]);
+  assert.deepEqual(page.records.map((item) => item.stage), Array(4).fill("已录用"));
 });
 
 test("candidate list omits empty and all-selector filters and preserves null evidence", async () => {

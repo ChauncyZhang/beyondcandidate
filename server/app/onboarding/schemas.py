@@ -136,12 +136,44 @@ REQUIRED_ONBOARDING_SEMANTICS = {
 }
 
 
+class FeishuNodeApprovers(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str = Field(min_length=1, max_length=255)
+    user_ids: list[UUID] = Field(default_factory=list, max_length=100)
+
+    @field_validator("node_id")
+    @classmethod
+    def validate_node_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("node_id must not be blank")
+        return value
+
+    @field_validator("user_ids")
+    @classmethod
+    def unique_users(cls, value: list[UUID]) -> list[UUID]:
+        if len(set(value)) != len(value):
+            raise ValueError("approver user IDs must be unique")
+        return value
+
+
+class FeishuApprovalNode(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    node_id: str = Field(min_length=1, max_length=255)
+    name: str
+    need_approver: bool
+    allow_multiple: bool
+
+
 class FeishuOnboardingConfigWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     approval_code: str = Field(min_length=1, max_length=255)
     field_mapping: dict[str, FeishuFieldMapping]
     department_mappings: list[FeishuDepartmentMappingWrite] = Field(default_factory=list, max_length=500)
+    node_approvers: list[FeishuNodeApprovers] = Field(default_factory=list, max_length=100)
     enabled: bool = False
 
     @field_validator("approval_code")
@@ -151,6 +183,9 @@ class FeishuOnboardingConfigWrite(BaseModel):
 
     @model_validator(mode="after")
     def validate_mapping(self):
+        node_ids = [item.node_id for item in self.node_approvers]
+        if len(set(node_ids)) != len(node_ids):
+            raise ValueError("approver node IDs must be unique")
         if set(self.field_mapping) != REQUIRED_ONBOARDING_SEMANTICS:
             raise ValueError("field_mapping must contain every required onboarding semantic")
         control_ids = [item.control_id for item in self.field_mapping.values()]

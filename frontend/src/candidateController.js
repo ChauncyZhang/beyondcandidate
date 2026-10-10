@@ -14,7 +14,7 @@ const API_TO_UI_STAGE = {
   withdrawn: "已撤回",
 };
 
-const UI_TO_API_STAGE = Object.fromEntries(Object.entries(API_TO_UI_STAGE).map(([api, ui]) => [ui, api]));
+const UI_TO_API_STAGE = { ...Object.fromEntries(Object.entries(API_TO_UI_STAGE).map(([api, ui]) => [ui, api])), "待入职": "pending_onboarding" };
 const CONCLUSIONS = new Set(["建议推进", "需要补充", "暂不合适"]);
 const DIMENSION_LABELS = {
   core_capability: "核心能力匹配",
@@ -179,6 +179,7 @@ function normalizeCandidateListItem(candidate) {
     company: "",
     position: safeString(application?.job_title, "无当前申请"),
     stage: application ? (API_TO_UI_STAGE[application.stage] || "未知阶段") : "无当前申请",
+    pendingOnboarding: application?.pending_onboarding === true,
     nextRound: safeString(application?.next_interview_round),
     score: score ?? "-",
     recommendation,

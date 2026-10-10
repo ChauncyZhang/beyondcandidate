@@ -1,12 +1,75 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { createServer } from "vite";
 
 const source = readFileSync(new URL("./OfferViews.jsx", import.meta.url), "utf8");
 const candidateSource = readFileSync(new URL("./CandidateViews.jsx", import.meta.url), "utf8");
 const appSource = readFileSync(new URL("./App.jsx", import.meta.url), "utf8");
 const jobSource = readFileSync(new URL("./JobViews.jsx", import.meta.url), "utf8");
 const settingsSource = readFileSync(new URL("./SettingsViews.jsx", import.meta.url), "utf8");
+
+test("onboarding renders fixed-approver and deletion blockers with disabled submission", async () => {
+  const vite = await createServer({
+    root: fileURLToPath(new URL("../", import.meta.url)),
+    cacheDir: fileURLToPath(new URL(`../.tmp/vite-offer-render-${process.pid}/`, import.meta.url)),
+    logLevel: "silent",
+    server: { middlewareMode: true },
+    plugins: [{
+      name: "test-onboarding-render-export",
+      enforce: "pre",
+      transform(code, id) {
+        if (id.replaceAll("\\", "/").endsWith("/src/OfferViews.jsx")) {
+          return `${code}\nexport { OnboardingSection as TestOnboardingSection };`;
+        }
+      },
+    }],
+  });
+  try {
+    const { TestOnboardingSection } = await vite.ssrLoadModule("/src/OfferViews.jsx");
+    const cases = [
+      ["candidate_deletion_pending", /等待数据删除处理/],
+      ["feishu_approver_required", /尚未配置固定审批人/],
+      ["feishu_approver_unavailable", /固定审批人已停用/],
+      ["feishu_approver_unbound", /固定审批人尚未绑定飞书账号/],
+      ["feishu_approver_node_invalid", /审批节点已变更/],
+      ["feishu_approver_selection_invalid", /固定审批人配置无效/],
+      ["feishu_approver_multiple_not_allowed", /只允许一名审批人/],
+      ["feishu_approval_node_metadata_missing", /尚未读取飞书审批节点/],
+      ["feishu_approval_node_metadata_invalid", /飞书审批节点信息无效/],
+    ];
+    for (const [blockingReason, expected] of cases) {
+      const html = renderToStaticMarkup(createElement(TestOnboardingSection, {
+        onboarding: { status: "ready", complete: false, canSubmit: false, canUpdate: false, blockingReason, expectedStartDate: "2026-01-01" },
+        controller: {}, onChanged() {}, onNotify() {},
+      }));
+      const message = html.match(/class="onboarding-message[^>]*>[\s\S]*?<span>(.*?)<\/span>/)?.[1];
+      assert.match(message || "", expected, blockingReason);
+      assert.match(html, /<button[^>]*disabled=""[^>]*>[\s\S]*?办理入职<\/button>/, blockingReason);
+      assert.doesNotMatch(message, /预计到岗日.*到达后/);
+    }
+    const ready = renderToStaticMarkup(createElement(TestOnboardingSection, {
+      onboarding: { status: "ready", complete: true, canSubmit: true, canUpdate: false }, controller: {}, onChanged() {}, onNotify() {},
+    }));
+    assert.doesNotMatch(ready, /<button[^>]*disabled/);
+  } finally { await vite.close(); }
+});
+
+test("onboarding config errors distinguish saved states from missing configuration", () => {
+  const mappingSource = source.match(/const ONBOARDING_ERROR_MESSAGES = Object\.freeze\((\{[\s\S]*?\})\);/)[1];
+  const messages = Function(`return (${mappingSource});`)();
+  assert.match(messages.feishu_onboarding_not_configured, /尚未配置/);
+  assert.match(messages.feishu_onboarding_validation_required, /已保存但尚未校验/);
+  assert.match(messages.feishu_onboarding_validation_required, /通过后再启用/);
+  assert.match(messages.feishu_onboarding_config_invalid, /未通过校验/);
+  assert.match(messages.feishu_onboarding_disabled, /已通过校验但尚未启用/);
+  for (const code of ["validation_required", "config_invalid", "disabled"]) {
+    assert.doesNotMatch(messages[`feishu_onboarding_${code}`], /尚未配置/);
+  }
+});
 
 test("candidate detail exposes a routed Offer tab backed by the dedicated controller", () => {
   assert.match(candidateSource, /"Offer"/);
@@ -37,6 +100,18 @@ test("Offer form and history use stable aligned structures", () => {
   assert.doesNotMatch(source, /className="offer-version-list"/);
   assert.doesNotMatch(source, /className="offer-summary"/);
   assert.doesNotMatch(source, /候选人页面/);
+});
+
+test("Offer template selection fills editable fields and exposes unresolved information", () => {
+  assert.match(source, /applyOfferTemplate/);
+  assert.match(source, /onChange=\{\(event\) => selectTemplate\(event\.target\.value\)\}/);
+  assert.match(source, /offerDraftFieldIssue/);
+  assert.match(source, /offerTemplateSyntaxIssue/);
+  assert.match(source, /controller\.getJobOfferDefaults\(selectedJobId\)/);
+  assert.match(source, /还有 \$\{requiredIssueCount\} 项需要 HR 补充/);
+  assert.match(source, /发送前可直接修改，保存时以当前表单内容为准/);
+  for (const field of ["模板标题", "模板正文", "薪酬方案", "福利与补充说明"]) assert.match(source, new RegExp(field));
+  for (const variable of ["candidate_name", "job_title", "department_name", "recruiter_name", "work_location"]) assert.match(source, new RegExp(variable));
 });
 
 test("approved Offer remains explicitly unsent until HR acts", () => {

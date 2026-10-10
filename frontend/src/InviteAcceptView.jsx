@@ -2,6 +2,7 @@ import { useState } from "react";
 import { CheckCircle2, LoaderCircle, LockKeyhole } from "lucide-react";
 import { apiClient } from "./apiClient.js";
 import { startFeishuAuthorization } from "./feishuIntegration.js";
+import { invitationAcceptErrorMessage } from "./invitationErrors.js";
 import "./product-theme-admin.css";
 
 export function InviteAcceptView({ token, onAccepted, client = apiClient }) {
@@ -28,7 +29,7 @@ export function InviteAcceptView({ token, onAccepted, client = apiClient }) {
       }
     } catch (requestError) {
       setStatus("error");
-      setError(requestError?.kind === "unavailable" ? "服务暂时不可用，请稍后重试。" : "邀请无效或已过期，请联系管理员重新邀请。");
+      setError(invitationAcceptErrorMessage(requestError));
     }
   }
 

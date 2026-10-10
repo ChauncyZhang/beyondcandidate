@@ -34,6 +34,7 @@ async function parseResponse(response) {
 
 export function createApiClient({ fetchImpl = globalThis.fetch } = {}) {
   let csrfToken = null;
+  let csrfRefreshPromise = null;
   let unauthorizedHandler = null;
   let authEpoch = 0;
 
@@ -82,7 +83,7 @@ export function createApiClient({ fetchImpl = globalThis.fetch } = {}) {
       throw new ApiError({ kind: "unavailable", code: "service_unavailable" });
     }
 
-    if (refreshesCsrf && response.ok) {
+    if (refreshesCsrf && response.ok && requestEpoch === authEpoch) {
       const responseCsrf = response.headers.get("X-CSRF-Token");
       if (responseCsrf) csrfToken = responseCsrf;
     } else if (response.status === 401 && requestEpoch === authEpoch) {
@@ -92,9 +93,33 @@ export function createApiClient({ fetchImpl = globalThis.fetch } = {}) {
     return { response, requestEpoch, notifySession: response.status === 401 && !refreshesCsrf };
   }
 
+  function shouldRefreshCsrf(response, payload, options) {
+    return (
+      options.retryCsrf !== false
+      && STATE_CHANGING_METHODS.has((options.method || "GET").toUpperCase())
+      && response.status === 403
+      && payload?.code === "csrf_validation_failed"
+    );
+  }
+
+  async function refreshCsrf() {
+    if (!csrfRefreshPromise) {
+      csrfRefreshPromise = request("/api/v1/me", { retryCsrf: false })
+        .finally(() => { csrfRefreshPromise = null; });
+    }
+    await csrfRefreshPromise;
+  }
+
   async function request(path, options = {}) {
-    const { response, requestEpoch, notifySession } = await fetchResponse(path, options);
-    const payload = await parsePayload(response, requestEpoch, notifySession);
+    let { response, requestEpoch, notifySession } = await fetchResponse(path, options);
+    let payload = await parsePayload(response, requestEpoch, notifySession);
+    if (shouldRefreshCsrf(response, payload, options) && requestEpoch === authEpoch) {
+      await refreshCsrf();
+      if (requestEpoch === authEpoch) {
+        ({ response, requestEpoch, notifySession } = await fetchResponse(path, { ...options, retryCsrf: false }));
+        payload = await parsePayload(response, requestEpoch, notifySession);
+      }
+    }
     if (!response.ok) {
       const isProblem = (response.headers.get("Content-Type") || "").toLowerCase().includes("application/problem+json");
       const error = new ApiError({
@@ -112,9 +137,19 @@ export function createApiClient({ fetchImpl = globalThis.fetch } = {}) {
   }
 
   async function download(path, options = {}) {
-    const { response, requestEpoch, notifySession } = await fetchResponse(path, options);
+    let { response, requestEpoch, notifySession } = await fetchResponse(path, options);
+    let payload = null;
     if (!response.ok) {
-      const payload = await parsePayload(response, requestEpoch, notifySession);
+      payload = await parsePayload(response, requestEpoch, notifySession);
+      if (shouldRefreshCsrf(response, payload, options) && requestEpoch === authEpoch) {
+        await refreshCsrf();
+        if (requestEpoch === authEpoch) {
+          ({ response, requestEpoch, notifySession } = await fetchResponse(path, { ...options, retryCsrf: false }));
+          payload = response.ok ? null : await parsePayload(response, requestEpoch, notifySession);
+        }
+      }
+    }
+    if (!response.ok) {
       const isProblem = (response.headers.get("Content-Type") || "").toLowerCase().includes("application/problem+json");
       const error = new ApiError({
         status: response.status,
@@ -185,6 +220,10 @@ export function createApiClient({ fetchImpl = globalThis.fetch } = {}) {
       const response = await request(`/api/v1/settings/users/${encodeURIComponent(id)}/recruiting-scope`, { method: "PATCH", body });
       return response?.data ?? null;
     },
+    async reinviteUser(id) {
+      const response = await request(`/api/v1/settings/users/${encodeURIComponent(id)}/invitation`, { method: "POST" });
+      return response?.data ?? null;
+    },
     async acceptInvitation(body) {
       const response = await request("/api/v1/auth/invitations/accept", { method: "POST", body });
       return response?.data ?? null;
@@ -202,7 +241,12 @@ export function createApiClient({ fetchImpl = globalThis.fetch } = {}) {
     async getFeishuConfig() { const response = await request("/api/v1/settings/integrations/feishu"); return response?.data ?? null; },
     async saveFeishuConfig(body) { const response = await request("/api/v1/settings/integrations/feishu", { method: "PUT", body }); return response?.data ?? null; },
     async testFeishuConnection() { const response = await request("/api/v1/settings/integrations/feishu/test", { method: "POST" }); return response?.data ?? null; },
+    async listFeishuDepartments() { const response = await request("/api/v1/settings/integrations/feishu/departments"); return Array.isArray(response?.data) ? response.data : []; },
     async getFeishuOnboardingApprovalConfig() { const response = await request("/api/v1/settings/integrations/feishu/onboarding-approval"); return response?.data ?? null; },
+    async getFeishuOnboardingApproverOptions(approvalCode) {
+      const response = await request(`/api/v1/settings/integrations/feishu/onboarding-approval/approver-options?approval_code=${encodeURIComponent(approvalCode)}`);
+      return response?.data ?? null;
+    },
     async saveFeishuOnboardingApprovalConfig(body, { version } = {}) {
       const response = await request("/api/v1/settings/integrations/feishu/onboarding-approval", {
         method: "PUT",

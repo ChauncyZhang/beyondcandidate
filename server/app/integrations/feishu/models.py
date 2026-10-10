@@ -79,6 +79,8 @@ class FeishuOnboardingConfig(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, unique=True)
     approval_code: Mapped[str] = mapped_column(String(255), nullable=False)
     field_mapping: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    node_approvers: Mapped[list] = mapped_column(JSON, default=list, server_default="[]", nullable=False)
+    approval_nodes: Mapped[list | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     validation_status: Mapped[str] = mapped_column(String(16), default="unvalidated", nullable=False)
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

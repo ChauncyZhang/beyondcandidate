@@ -15,7 +15,13 @@ from server.app.identity.models import AuditLog, Organization, User, UserRole, U
 from server.app.identity.security import PasswordService
 from server.app.identity.service import Clock, TokenSource
 from server.app.integrations.feishu.models import FeishuIdentityBinding, FeishuOrganizationConfig
-from server.app.integrations.feishu.provider import ConnectionResult, FakeFeishuProvider, OAuthIdentity
+from server.app.integrations.feishu.provider import (
+    ConnectionResult,
+    FakeFeishuProvider,
+    FeishuDepartment,
+    FeishuProviderError,
+    OAuthIdentity,
+)
 from server.app.main import create_app
 
 
@@ -58,7 +64,13 @@ def feishu_app(tmp_path):
         yield app, client
 
 
-def seed_user(app, *, email="admin@example.test", status=UserStatus.ACTIVE):
+def seed_user(
+    app,
+    *,
+    email="admin@example.test",
+    status=UserStatus.ACTIVE,
+    role="recruiting_admin",
+):
     with app.state.identity_store.sync_session() as db:
         organization = db.scalar(select(Organization).where(Organization.slug == "acme"))
         if organization is None:
@@ -73,7 +85,7 @@ def seed_user(app, *, email="admin@example.test", status=UserStatus.ACTIVE):
             password_hash=PasswordService().hash("correct horse"),
             status=status,
         )
-        user.roles.append(UserRole(role="recruiting_admin"))
+        user.roles.append(UserRole(role=role))
         db.add(user)
         db.commit()
         return user.id
@@ -218,6 +230,62 @@ def test_connection_test_requires_the_current_admin_to_bind_feishu(feishu_app) -
     assert tested.status_code == 409
     assert tested.json()["code"] == "feishu_test_user_unbound"
     assert app.state.feishu_provider.messages == []
+
+
+def test_department_directory_requires_config_and_returns_only_safe_fields(feishu_app) -> None:
+    app, client = feishu_app
+    seed_user(app)
+    csrf = login(client)
+
+    missing = client.get("/api/v1/settings/integrations/feishu/departments")
+    assert missing.status_code == 409
+    assert missing.json()["code"] == "feishu_not_configured"
+
+    configured = client.put(
+        "/api/v1/settings/integrations/feishu",
+        json=config_payload(),
+        headers=write_headers(csrf),
+    )
+    assert configured.status_code == 200
+    app.state.feishu_provider.departments = (
+        FeishuDepartment("od-engineering", "研发部"),
+        FeishuDepartment("od-hr", "人事"),
+    )
+    response = client.get("/api/v1/settings/integrations/feishu/departments")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json() == {"data": [
+        {"open_department_id": "od-engineering", "name": "研发部"},
+        {"open_department_id": "od-hr", "name": "人事"},
+    ]}
+    assert "secret" not in response.text.casefold()
+
+
+def test_department_directory_requires_an_authenticated_integration_admin(feishu_app) -> None:
+    app, client = feishu_app
+    anonymous = client.get("/api/v1/settings/integrations/feishu/departments")
+    assert anonymous.status_code == 401
+
+    seed_user(app, role="recruiter")
+    login(client)
+    forbidden = client.get("/api/v1/settings/integrations/feishu/departments")
+    assert forbidden.status_code == 403
+    assert forbidden.json()["code"] == "forbidden"
+
+
+def test_department_directory_maps_provider_failures_to_a_safe_error(feishu_app) -> None:
+    app, client = feishu_app
+    configure_feishu(feishu_app)
+    app.state.feishu_provider.failure = FeishuProviderError(
+        "provider_permission_detail", retryable=False
+    )
+
+    response = client.get("/api/v1/settings/integrations/feishu/departments")
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "feishu_department_directory_unavailable"
+    assert "provider_permission_detail" not in response.text
 
 
 def test_login_authorization_is_disabled_safely_until_configured(feishu_app) -> None:
