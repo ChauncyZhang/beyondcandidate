@@ -241,7 +241,7 @@ test("pending onboarding stays visible on the workbench and can be submitted dir
   } finally { await mobile.context.close(); }
 });
 
-test("workbench board shows the five actionable stages while list and totals keep their behavior", { timeout: 60_000 }, async () => {
+test("workbench board shows six actionable stages including pending onboarding while list and totals keep their behavior", { timeout: 60_000 }, async () => {
   const workbench = notificationWorkbench();
   workbench.jobs[0].stages.new = { count: 1, items: [notificationCandidate("new", 3, "王晨")] };
   workbench.jobs[0].stages.contact = { count: 1, items: [notificationCandidate("contact", 4, "赵敏")] };
@@ -257,7 +257,11 @@ test("workbench board shows the five actionable stages while list and totals kee
       "面试流程中",
       "待用人经理录用决策",
       "待录用确认",
+      "待入职",
     ]);
+    const onboardingStage = board.locator(".stage").filter({ has: page.getByText("待入职", { exact: true }) });
+    assert.equal(await onboardingStage.locator("header > span").textContent(), "0");
+    assert.equal(await onboardingStage.locator(".candidate-card").count(), 0);
     assert.equal(await board.getByText("新简历", { exact: true }).count(), 0);
     assert.equal(await board.getByText("待确认候选人意向", { exact: true }).count(), 0);
     assert.equal(await board.locator(".candidate-card").count(), 2);
