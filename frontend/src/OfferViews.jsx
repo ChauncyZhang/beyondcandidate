@@ -14,11 +14,13 @@ import {
   LoaderCircle,
   Plus,
   Pencil,
+  Paperclip,
   RefreshCw,
   Send,
   ShieldCheck,
   Trash2,
   Undo2,
+  Upload,
   UserCheck,
   XCircle,
 } from "lucide-react";
@@ -66,6 +68,21 @@ export function canRenderOfferAction(role, offer, action) {
 }
 
 export function offerErrorMessage(error, action = "操作") {
+  const attachmentErrors = {
+    offer_attachment_invalid: "请选择有效的 PDF 文件。",
+    offer_attachment_invalid_type: "请选择有效的 PDF 文件。",
+    offer_attachment_invalid_pdf: "PDF 文件无效，请更换文件。",
+    offer_attachment_file_required: "请选择要上传的 PDF 文件。",
+    offer_attachment_invalid_upload: "附件上传无效，请重新选择 PDF 文件。",
+    offer_attachment_too_large: "PDF 文件不能超过 10MB。",
+    offer_attachment_scan_unavailable: "附件安全扫描暂不可用，请稍后重试。",
+    offer_attachment_scanner_unavailable: "附件安全扫描暂不可用，请稍后重试。",
+    offer_attachment_unsafe: "附件未通过安全检查，请更换文件。",
+    offer_attachment_malware_detected: "附件未通过安全检查，请更换文件。",
+    offer_attachment_locked: "当前 Offer 不可修改附件，请刷新并核对发送状态。",
+    offer_attachment_busy: "附件或 Offer 正在处理中，请稍后重试。",
+  };
+  if (attachmentErrors[error?.code]) return attachmentErrors[error.code];
   if (error?.code === "resource_version_conflict") return "Offer 已被其他成员更新。当前填写内容已保留，请刷新最新版本后核对。";
   if (error?.code === "candidate_email_unconfirmed") return "候选人邮箱尚未确认，请先确认邮箱后再发送。";
   if (error?.code === "offer_response_deadline_expired") return "候选人回复截止时间已过，请更新截止时间并重新提交审批。";
@@ -662,10 +679,28 @@ function OnboardingSection({ onboarding, loadingError, controller, onChanged, on
   </section>;
 }
 
+function OfferAttachment({ offer, manageable, action, onUpload, onRemove }) {
+  const inputRef = useRef(null);
+  const attachment = offer.attachment;
+  const busy = action === "uploadAttachment" || action === "removeAttachment";
+  const size = attachment?.sizeBytes ?? attachment?.size_bytes;
+  return <section className="offer-attachment" aria-labelledby="offer-attachment-title" aria-busy={busy}>
+    <div className="offer-attachment-heading"><h4 id="offer-attachment-title"><Paperclip size={17} aria-hidden="true" />正式 Offer 附件 <small>（可选）</small></h4><span id="offer-attachment-hint">PDF，最大10MB</span></div>
+    {attachment ? <div className="offer-attachment-file"><Paperclip size={16} aria-hidden="true" /><span><strong>{attachment.filename}</strong><small>{Number.isFinite(size) ? size < 1024 * 1024 ? `${Math.max(0.1, size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(2)} MB` : ""}</small></span></div> : <p>未上传附件</p>}
+    {manageable && <div className="offer-attachment-actions">
+      <input ref={inputRef} className="offer-attachment-input" type="file" accept=".pdf,application/pdf" aria-label="上传正式 Offer 附件" aria-describedby="offer-attachment-hint" disabled={Boolean(action)} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) onUpload(file); }} />
+      <button className="button secondary" type="button" disabled={Boolean(action)} onClick={() => inputRef.current?.click()}><Upload size={16} aria-hidden="true" />{action === "uploadAttachment" ? "上传中…" : attachment ? "替换附件" : "上传附件"}</button>
+      {attachment && <button className="icon-button" type="button" title="移除正式 Offer 附件" aria-label="移除正式 Offer 附件" disabled={Boolean(action)} onClick={onRemove}><Trash2 size={16} aria-hidden="true" /></button>}
+    </div>}
+    {busy && <p role="status" aria-live="polite">{action === "uploadAttachment" ? "正在上传并检查附件" : "正在移除附件"}</p>}
+  </section>;
+}
+
 export function CandidateOfferView({ candidate, offerId, role, controller, approvalId, onNotify = () => {} }) {
   const applicationId = candidate?.application?.id || candidate?.applicationId;
   const [state, setState] = useState({ status: "loading", offer: null, templates: [], defaultTemplateId: "", history: null, onboarding: null, onboardingError: "", error: "" });
   const [action, setAction] = useState("");
+  const actionRef = useRef("");
   const [proxyOpen, setProxyOpen] = useState(false);
   const proxyButtonRef = useRef(null);
   const trackedOfferId = state.offer?.id;
@@ -750,10 +785,12 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
   }, [applicationId, controller, onNotify, state.offer?.applicationId, state.onboarding?.status]);
 
   async function run(name, command, message, errorAction = message) {
+    if (actionRef.current) return;
+    actionRef.current = name;
     setAction(name);
-    try { const offer = await command(); setState((current) => ({ ...current, offer })); onNotify(message); await load(); }
-    catch (error) { setState((current) => ({ ...current, error: offerErrorMessage(error, errorAction) })); }
-    finally { setAction(""); }
+    try { const offer = await command(); setState((current) => ({ ...current, offer, error: "" })); onNotify(message); if (!["uploadAttachment", "removeAttachment"].includes(name)) await load(); }
+    catch (error) { setState((current) => ({ ...current, offer: error?.latestOffer || current.offer, error: offerErrorMessage(error, errorAction) })); }
+    finally { actionRef.current = ""; setAction(""); }
   }
 
   if (state.status === "loading" && !state.offer) return <div className="offer-state" role="status"><LoaderCircle className="spin" size={24} /><strong>正在加载 Offer</strong><span>正在读取当前版本和审批状态。</span></div>;
@@ -789,6 +826,7 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
       {!((["draft", "changes_requested"].includes(offer.status) || (offer.status === "ready_to_send" && deadlineExpired)) && canRenderOfferAction(role, offer, "update")) && <section className="offer-preview" aria-labelledby="offer-preview-title"><header><h4 id="offer-preview-title">Offer 预览</h4>{offer.isSpecial ?? offer.is_special ? <span>特殊 Offer</span> : null}</header><h5>{offer.content?.title || "正式录用通知"}</h5><p className="offer-body-copy">{offer.content?.body || "正文未填写"}</p><dl><div><dt>薪酬方案</dt><dd>{offer.content?.compensation || "未填写"}</dd></div><div><dt>福利与补充说明</dt><dd>{offer.content?.benefits || "未填写"}</dd></div>{(offer.specialReason || offer.special_reason) && <div><dt>特殊说明</dt><dd>{offer.specialReason || offer.special_reason}</dd></div>}</dl></section>}
     </>}
     {canDecide && <ApprovalDecision offer={offer} approvalId={decisionApprovalId} controller={controller} onSaved={(saved) => setState((current) => ({ ...current, offer: saved }))} onNotify={onNotify} />}
+    {sensitive && (offer.status === "ready_to_send" || offer.attachment) && <OfferAttachment offer={offer} action={action} manageable={offer.status === "ready_to_send" && !sendQueued && !deadlineExpired && canRenderOfferAction(role, offer, "manage_attachment")} onUpload={(file) => void run("uploadAttachment", () => controller.uploadAttachment(offer, file), "正式 Offer 附件已上传", "上传附件")} onRemove={() => void run("removeAttachment", () => controller.removeAttachment(offer), "正式 Offer 附件已移除", "移除附件")} />}
     <div className="offer-actions">
       {canRenderOfferAction(role, offer, "withdraw") && <button className="button secondary" type="button" disabled={Boolean(action)} onClick={() => void run("withdraw", () => controller.withdraw(offer), "Offer 已撤回")}><XCircle size={16} />{action === "withdraw" ? "撤回中…" : "撤回 Offer"}</button>}
       {canRenderOfferAction(role, offer, "send") && <button className="button primary" type="button" disabled={Boolean(action)} onClick={() => void run("send", () => controller.send(offer), "已加入发送队列", "Offer 发送")}><Send size={16} />{action === "send" ? "提交中…" : "确认并发送 Offer"}</button>}

@@ -430,6 +430,16 @@ input::placeholder, textarea::placeholder { color: #9b9ba1; }
 .offer-preview dl { display: grid; gap: 10px; margin: 18px 0 0; }
 .offer-preview dl > div { display: grid; grid-template-columns: minmax(100px, 150px) minmax(0, 1fr); gap: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .offer-preview dt { color: var(--muted); }
+.offer-attachment { min-width: 0; padding: 16px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.offer-attachment-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.offer-attachment h4 { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; font-size: 15px; }
+.offer-attachment small, .offer-attachment-heading > span, .offer-attachment > p { color: var(--muted); font-size: 13px; }
+.offer-attachment-file { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0; min-width: 0; }
+.offer-attachment-file > svg { flex-shrink: 0; margin-top: 3px; }
+.offer-attachment-file > span { display: grid; gap: 4px; min-width: 0; }
+.offer-attachment-file strong { overflow-wrap: anywhere; font-size: 14px; }
+.offer-attachment-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.offer-attachment-input { display: none; }
 .offer-preview dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .offer-decision, .offer-history { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); }
 .offer-decision h4, .offer-history h4 { margin: 0; }

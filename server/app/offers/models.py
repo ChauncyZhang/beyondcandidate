@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, CheckConstraint, Date, DateTime, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, Uuid, text
+from sqlalchemy import JSON, CheckConstraint, Date, DateTime, ForeignKeyConstraint, Index, Integer, LargeBinary, String, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server.app.identity.models import Base
@@ -107,6 +107,25 @@ class OfferVersion(OfferRecord, Base):
         ForeignKeyConstraint(["organization_id", "offer_id"], ["offers.organization_id", "offers.id"], ondelete="CASCADE"),
         ForeignKeyConstraint(["organization_id", "created_by"], ["users.organization_id", "users.id"]),
         ForeignKeyConstraint(["organization_id", "template_id"], ["offer_templates.organization_id", "offer_templates.id"]),
+    )
+
+
+class OfferAttachment(OfferRecord, Base):
+    __tablename__ = "offer_attachments"
+    offer_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    offer_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("organization_id", "offer_version_id"),
+        ForeignKeyConstraint(["organization_id", "offer_version_id", "offer_id"], ["offer_versions.organization_id", "offer_versions.id", "offer_versions.offer_id"], ondelete="CASCADE"),
+        CheckConstraint("size_bytes > 0 and size_bytes <= 10485760", name="ck_offer_attachments_size"),
+        CheckConstraint("content_type = 'application/pdf' and length(filename) > 0", name="ck_offer_attachments_type"),
+        CheckConstraint("length(sha256) = 64 and sha256 = lower(sha256)", name="ck_offer_attachments_sha256"),
+        CheckConstraint("length(ciphertext) > 0", name="ck_offer_attachments_ciphertext"),
     )
 
 

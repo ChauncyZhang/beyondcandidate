@@ -51,8 +51,8 @@ class EmailSecretCipher:
     def decrypt_recipient(self, value: bytes) -> str:
         return self._decrypt(self._recipient_cipher, value)
 
-    def encrypt_attachment(self, value: bytes) -> bytes:
-        if not value or len(value) > 1024 * 1024:
+    def encrypt_attachment(self, value: bytes, *, max_bytes: int = 1024 * 1024) -> bytes:
+        if not 0 < max_bytes <= 10 * 1024 * 1024 or not value or len(value) > max_bytes:
             raise ValueError("invalid attachment snapshot")
         return self._attachment_cipher.encrypt(value)
 

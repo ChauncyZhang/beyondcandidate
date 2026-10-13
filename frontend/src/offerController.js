@@ -115,7 +115,9 @@ function randomKey() {
 
 function normalizeAllowedActions(value) {
   const source = safeObject(value);
-  return Object.fromEntries(["update", "submit", "withdraw", "send", "decide", "proxy_response"].map((action) => [action, source[action] === true]));
+  const actions = Object.fromEntries(["update", "submit", "withdraw", "send", "decide", "proxy_response"].map((action) => [action, source[action] === true]));
+  if (Object.hasOwn(source, "manage_attachment")) actions.manage_attachment = source.manage_attachment === true;
+  return actions;
 }
 
 export function normalizeOnboarding(value) {
@@ -173,6 +175,12 @@ function normalizeOffer(value) {
     specialReason: canViewSensitiveContent ? safeString(value?.special_reason) : "",
     content: canViewSensitiveContent ? safeObject(value?.content) : { redacted: true },
     canViewSensitiveContent,
+    attachment: canViewSensitiveContent && value?.attachment ? {
+      filename: safeString(value.attachment.filename),
+      sizeBytes: safeVersion(value.attachment.size_bytes),
+      contentType: safeString(value.attachment.content_type),
+      sha256: safeString(value.attachment.sha256),
+    } : null,
     pdfReady: value?.pdf_ready === true,
     contentReady: value?.content_ready === true,
     sendQueued: value?.send_queued === true,
@@ -322,6 +330,7 @@ function templateBody(values) {
 }
 
 export function createOfferController({ client = apiClient, idempotencyKey = randomKey } = {}) {
+  const pendingMutations = new Set();
   async function listOffers(applicationId, { signal } = {}) {
     const id = requireId(applicationId, "APPLICATION_ID_REQUIRED");
     const response = await client.request(`/api/v1/offers?application_id=${encodeURIComponent(id)}`, requestOptions(signal));
@@ -352,6 +361,8 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
   async function offerMutation(path, offer, options, signal) {
     const id = requireId(offer?.id);
     const version = requireVersion(offer?.version);
+    if (pendingMutations.has(id)) throw codedError("offer_attachment_busy", "offer mutation in progress");
+    pendingMutations.add(id);
     try {
       const response = await client.request(path(id), requestOptions(signal, {
         ...options,
@@ -360,7 +371,9 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
       }));
       return normalizeOffer(response?.data);
     } catch (error) {
-      return refreshOfferConflict(error, id, signal);
+      return await refreshOfferConflict(error, id, signal);
+    } finally {
+      pendingMutations.delete(id);
     }
   }
 
@@ -432,6 +445,30 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
 
   async function send(offer, { signal } = {}) {
     return offerMutation((id) => `/api/v1/offers/${encodeURIComponent(id)}/send`, offer, { method: "POST" }, signal);
+  }
+
+  function requireAttachmentManagement(offer) {
+    if (!offer?.canViewSensitiveContent || offer?.allowedActions?.manage_attachment !== true
+      || offer.status !== "ready_to_send" || offer.sendQueued || offer.deadlineExpired
+      || (offer.candidateResponseDeadline && new Date(offer.candidateResponseDeadline).getTime() <= Date.now())) {
+      throw codedError("offer_attachment_locked", "offer attachment locked");
+    }
+  }
+
+  async function uploadAttachment(offer, file, { signal } = {}) {
+    requireAttachmentManagement(offer);
+    if (!file || !/\.pdf$/i.test(file.name) || (file.type && file.type !== "application/pdf") || file.size === 0) {
+      throw codedError("offer_attachment_invalid", "PDF required");
+    }
+    if (file.size > 10 * 1024 * 1024) throw codedError("offer_attachment_too_large", "PDF exceeds size limit");
+    const body = new FormData();
+    body.append("file", file.type ? file : new Blob([file], { type: "application/pdf" }), file.name);
+    return offerMutation((id) => `/api/v1/offers/${encodeURIComponent(id)}/attachment`, offer, { method: "POST", body }, signal);
+  }
+
+  async function removeAttachment(offer, { signal } = {}) {
+    requireAttachmentManagement(offer);
+    return offerMutation((id) => `/api/v1/offers/${encodeURIComponent(id)}/attachment`, offer, { method: "DELETE" }, signal);
   }
 
   async function withdraw(offer, { signal } = {}) {
@@ -569,6 +606,8 @@ export function createOfferController({ client = apiClient, idempotencyKey = ran
     approve,
     requestChanges,
     send,
+    uploadAttachment,
+    removeAttachment,
     withdraw,
     proxyResponse,
     listHistory,

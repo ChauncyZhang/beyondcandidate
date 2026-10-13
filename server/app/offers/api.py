@@ -6,11 +6,15 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile
+from starlette.exceptions import HTTPException
 from sqlalchemy import exists, or_, select
 
 from server.app.identity.api import problem
 from server.app.identity.models import AuditLog, Job, Organization, User, UserRole, UserStatus
-from server.app.offers.models import Offer, OfferAccessToken, OfferApproval, OfferEvent, OfferResponse, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
+from server.app.offers.models import Offer, OfferAccessToken, OfferApproval, OfferAttachment, OfferEvent, OfferResponse, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
+from server.app.offers.attachments import AttachmentError, MAX_ATTACHMENT_BYTES, attachment_digest, attachment_view, bounded_upload_request, current_attachment, sanitize_filename, scan_attachment, validate_pdf
 from server.app.offers.schemas import OfferApprovalDecision, OfferCommand, OfferDefaultApproverCommand, OfferTemplateCommand, OfferVersionCommand, ProxyOfferResponse, PublicOfferResponse, SpecialOfferApproversCommand
 from server.app.offers.service import (
     OfferApprovalError,
@@ -30,7 +34,7 @@ from server.app.offers.service import (
 from server.app.recruiting.api import _idempotency, _principal
 from server.app.recruiting.authorization import RecruitingAction, RecruitingAuthorizationService
 from server.app.recruiting.models import Application, Candidate, JobJdVersion
-from server.app.recruiting.service import IdempotencyConflict, persisted_idempotent
+from server.app.recruiting.service import IdempotencyConflict, persisted_idempotent, resolve_idempotent_replay
 from server.app.recruiting.service import is_eligible_offer_approver
 from server.app.communications.interview_messages import CandidateEmailUnavailable, resolve_confirmed_candidate_email
 from server.app.communications.service import DeliveryCommand, EmailConfigurationUnavailable, SenderPolicy, enqueue_delivery
@@ -178,12 +182,14 @@ def _offer_view(db, offer, principal):
         "candidate_response_deadline": offer.candidate_response_deadline.isoformat(), "is_special": offer.is_special,
         "special_reason": offer.special_reason if can_view_sensitive else None, "content": content,
         "can_view_sensitive_content": can_view_sensitive,
+        "attachment": attachment_view(current_attachment(db, offer)) if can_view_sensitive else None,
         "pdf_ready": bool(current and current.pdf_object_key),
         "content_ready": content_ready, "send_queued": send_queued,
         "deadline_expired": deadline_expired,
         "pending_approval_id": str(pending_approval_id) if pending_approval_id else None,
         "response": _offer_response_view(response),
         "allowed_actions": {
+            "manage_attachment": can_manage and offer.status == "ready_to_send" and current is not None and not deadline_expired and not send_queued and candidate is not None and candidate.deleted_at is None,
             "update": can_manage and offer.status in {"draft", "changes_requested", "ready_to_send", "sent"},
             "submit": can_manage and offer.status in {"draft", "changes_requested"},
             "withdraw": can_manage and offer.status not in {"withdrawn", "expired"},
@@ -307,6 +313,117 @@ def update_offer(offer_id: UUID, payload: OfferVersionCommand, request: Request,
         if offer is None or not _can_manage(db, principal, offer): return _error(request, 404, "resource_not_found")
     semantic = {"expected_version": expected, **payload.model_dump(mode="json", exclude_unset=True)}
     return _run_mutation(request, principal, f"offer.update:{offer_id}", key, semantic, lambda db: lambda: (200, {"data": _offer_view(db, update_offer_version(db, principal.organization_id, offer_id, principal.user_id, payload, expected_version=expected, trace_id=request.state.trace_id), principal)}))
+
+
+def _attachment_authorize(request, principal, offer_id):
+    with request.app.state.identity_store.sync_session() as db:
+        offer = _offer(db, principal, offer_id)
+        if offer is None or not _can_manage(db, principal, offer):
+            return _error(request, 404, "resource_not_found")
+    return None
+
+
+def _attachment_mutation(db, request, principal, offer_id, expected, content=None, filename=None):
+    offer = _offer(db, principal, offer_id, lock=True)
+    if offer is None or not _can_manage(db, principal, offer):
+        raise OfferNotFound
+    if offer.version != expected:
+        raise OfferVersionConflict
+    candidate = db.scalar(select(Candidate).join(Application, (Application.organization_id == Candidate.organization_id) & (Application.candidate_id == Candidate.id)).where(
+        Application.organization_id == offer.organization_id,
+        Application.id == offer.application_id,
+    ).with_for_update(of=Candidate))
+    if candidate is None or candidate.deleted_at is not None:
+        raise OfferNotFound
+    view = _offer_view(db, offer, principal)
+    if not view["allowed_actions"]["manage_attachment"]:
+        code = "offer_attachment_locked"
+        if view["deadline_expired"]:
+            code = "offer_response_deadline_expired"
+        raise OfferApprovalError(code=code)
+    attachment = current_attachment(db, offer)
+    if content is None:
+        if attachment is not None:
+            db.delete(attachment)
+    else:
+        ciphertext = request.app.state.email_secret_cipher.encrypt_attachment(content, max_bytes=MAX_ATTACHMENT_BYTES)
+        if attachment is None:
+            attachment = OfferAttachment(organization_id=offer.organization_id, offer_id=offer.id, offer_version_id=offer.current_version_id)
+            db.add(attachment)
+        attachment.filename = filename
+        attachment.content_type = "application/pdf"
+        attachment.size_bytes = len(content)
+        attachment.sha256 = attachment_digest(content)
+        attachment.ciphertext = ciphertext
+    offer.version += 1
+    _audit(db, offer, principal.user_id, "offer.attachment_removed" if content is None else "offer.attachment_uploaded", request.state.trace_id, {"offer_version_id": str(offer.current_version_id)})
+    db.flush()
+    return 200, {"data": _offer_view(db, offer, principal)}
+
+
+def _attachment_replay(request, principal, offer_id, key, semantic):
+    with request.app.state.identity_store.sync_session() as db:
+        offer = _offer(db, principal, offer_id)
+        if offer is None or not _can_manage(db, principal, offer):
+            return _error(request, 404, "resource_not_found")
+        try:
+            replay = resolve_idempotent_replay(db, principal.organization_id, principal.user_id, f"offer.attachment.upload:{offer_id}", key, semantic)
+            db.commit()
+        except IdempotencyConflict:
+            db.rollback()
+            return _error(request, 409, "idempotency_conflict")
+        if replay is not None:
+            status, body = replay
+            return _response(body["data"], status, etag=body["data"]["version"])
+    return None
+
+
+@router.post("/api/v1/offers/{offer_id}/attachment")
+async def upload_offer_attachment(offer_id: UUID, request: Request, if_match: str | None = Header(None, alias="If-Match"), idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
+    principal, expected, key = _principal(request), _version(request, if_match), _idempotency(request, idempotency_key)
+    if any(isinstance(item, JSONResponse) for item in (principal, expected, key)):
+        return next(item for item in (principal, expected, key) if isinstance(item, JSONResponse))
+    denied = await run_in_threadpool(_attachment_authorize, request, principal, offer_id)
+    if denied is not None:
+        return denied
+    try:
+        async with bounded_upload_request(request).form(max_files=1, max_fields=0) as form:
+            file = form.get("file")
+            if len(form) != 1 or not isinstance(file, UploadFile):
+                raise AttachmentError("offer_attachment_file_required")
+            if file.content_type != "application/pdf":
+                raise AttachmentError("offer_attachment_invalid_type")
+            filename = sanitize_filename(file.filename)
+            content = await file.read(MAX_ATTACHMENT_BYTES + 1)
+            if len(content) > MAX_ATTACHMENT_BYTES:
+                raise AttachmentError("offer_attachment_too_large", 413)
+    except AttachmentError as error:
+        return _error(request, error.status, error.code)
+    except HTTPException as error:
+        if error.detail == "offer_attachment_too_large":
+            return _error(request, 413, "offer_attachment_too_large")
+        return _error(request, 422, "offer_attachment_invalid_upload")
+    semantic = {"expected_version": expected, "filename": filename, "sha256": attachment_digest(content), "size_bytes": len(content)}
+    replay = await run_in_threadpool(_attachment_replay, request, principal, offer_id, key, semantic)
+    if replay is not None:
+        return replay
+    try:
+        await scan_attachment(content, request.app.state.settings)
+        await run_in_threadpool(validate_pdf, content)
+    except AttachmentError as error:
+        return _error(request, error.status, error.code)
+    return await run_in_threadpool(_run_mutation, request, principal, f"offer.attachment.upload:{offer_id}", key, semantic, lambda db: lambda: _attachment_mutation(db, request, principal, offer_id, expected, content, filename))
+
+
+@router.delete("/api/v1/offers/{offer_id}/attachment")
+def remove_offer_attachment(offer_id: UUID, request: Request, if_match: str | None = Header(None, alias="If-Match"), idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
+    principal, expected, key = _principal(request), _version(request, if_match), _idempotency(request, idempotency_key)
+    if any(isinstance(item, JSONResponse) for item in (principal, expected, key)):
+        return next(item for item in (principal, expected, key) if isinstance(item, JSONResponse))
+    denied = _attachment_authorize(request, principal, offer_id)
+    if denied is not None:
+        return denied
+    return _run_mutation(request, principal, f"offer.attachment.remove:{offer_id}", key, {"expected_version": expected}, lambda db: lambda: _attachment_mutation(db, request, principal, offer_id, expected))
 
 
 @router.post("/api/v1/offers/{offer_id}/approvals")
@@ -613,7 +730,8 @@ def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(N
                     "请点击以下链接查看并确认 Offer：\n{{offer_public_link}}\n\n"
                     "如对录用内容或入职安排有疑问，请联系招聘负责人。"
                 )
-                enqueue_delivery(db, DeliveryCommand(organization_id=offer.organization_id, recipient=recipient, subject=f"{brand_name} 录用通知｜{job.title}", body=message_body, resource_type="offer_access_token", resource_id=token.id, idempotency_key=key, operation=f"offer.send:{offer.id}", created_by=principal.user_id, trace_id=request.state.trace_id), cipher=request.app.state.email_secret_cipher, sender_policy=SenderPolicy(request.app.state.settings.email_from_address, request.app.state.settings.email_from_name))
+                attachment = current_attachment(db, offer)
+                enqueue_delivery(db, DeliveryCommand(organization_id=offer.organization_id, recipient=recipient, subject=f"{brand_name} 录用通知｜{job.title}", body=message_body, resource_type="offer_access_token", resource_id=token.id, idempotency_key=key, operation=f"offer.send:{offer.id}", created_by=principal.user_id, trace_id=request.state.trace_id, attachment_ciphertext=attachment.ciphertext if attachment else None, attachment_filename=attachment.filename if attachment else None, attachment_content_type=attachment.content_type if attachment else None), cipher=request.app.state.email_secret_cipher, sender_policy=SenderPolicy(request.app.state.settings.email_from_address, request.app.state.settings.email_from_name))
                 _audit(db, offer, principal.user_id, "offer.send_queued", request.state.trace_id, {"version_number": current.version_number})
                 return 202, {"data": _offer_view(db, offer, principal)}
             status, body = persisted_idempotent(db, principal.organization_id, principal.user_id, f"offer.send:{offer_id}", key, {"expected_version": expected}, action)
