@@ -58,6 +58,10 @@ class InvitationInvalidOrExpired(Exception):
     pass
 
 
+class PasswordResetInvalidOrExpired(Exception):
+    pass
+
+
 class CurrentPasswordInvalid(Exception):
     pass
 
@@ -188,6 +192,7 @@ class IdentityService:
                 selectinload(UserSession.user).selectinload(User.organization),
             )
             .where(UserSession.token_hash == hash_token(token))
+            .execution_options(populate_existing=True)
         )
         if record is None:
             raise InvalidSession
@@ -303,6 +308,7 @@ class IdentityService:
             now = self.clock.current_time()
             if (
                 invitation is None
+                or invitation.purpose != "invitation"
                 or invitation.used_at is not None
                 or self._aware(invitation.expires_at) <= now
                 or user is None
@@ -332,6 +338,81 @@ class IdentityService:
             db.commit()
             return {"email": email, "organization_slug": organization_slug}
 
+    def accept_password_reset(
+        self, token: str, password: str, *, trace_id: str
+    ) -> dict[str, str]:
+        with self.store.sync_session() as db:
+            digest = hash_token(token)
+            user_id = db.scalar(
+                select(PasswordInvitation.user_id).where(
+                    PasswordInvitation.token_hash == digest,
+                    PasswordInvitation.purpose == "password_reset",
+                )
+            )
+            if user_id is None:
+                raise PasswordResetInvalidOrExpired
+            # All token lifecycle paths lock the user before locking any token.
+            user = db.scalar(select(User).where(User.id == user_id).with_for_update(of=User))
+            reset = db.scalar(
+                select(PasswordInvitation)
+                .where(PasswordInvitation.token_hash == digest)
+                .with_for_update(of=PasswordInvitation)
+            )
+            now = self.clock.current_time()
+            if (
+                reset is None
+                or reset.purpose != "password_reset"
+                or reset.used_at is not None
+                or self._aware(reset.expires_at) <= now
+                or user is None
+                or user.status != UserStatus.ACTIVE
+                or reset.reset_authorization_version != user.authorization_version
+            ):
+                raise PasswordResetInvalidOrExpired
+            user.password_hash = self.passwords.hash(password)
+            user.failed_login_count = 0
+            user.failed_login_window_started_at = None
+            user.locked_until = None
+            user.authorization_version += 1
+            reset.used_at = now
+            db.execute(
+                update(PasswordInvitation)
+                .where(
+                    PasswordInvitation.organization_id == user.organization_id,
+                    PasswordInvitation.user_id == user.id,
+                    PasswordInvitation.purpose == "password_reset",
+                    PasswordInvitation.used_at.is_(None),
+                    PasswordInvitation.expires_at > now,
+                )
+                .values(expires_at=now)
+            )
+            db.execute(
+                update(UserSession)
+                .where(
+                    UserSession.organization_id == user.organization_id,
+                    UserSession.user_id == user.id,
+                    UserSession.revoked_at.is_(None),
+                )
+                .values(revoked_at=now, revocation_reason="password_reset")
+            )
+            db.add(AuditLog(
+                organization_id=user.organization_id,
+                actor_user_id=user.id,
+                category="system",
+                event_type="identity.password_reset_accepted",
+                outcome="success",
+                resource_type="user",
+                resource_id=user.id,
+                trace_id=trace_id,
+                metadata_json={},
+            ))
+            result = {
+                "email": user.email,
+                "organization_slug": db.scalar(select(Organization.slug).where(Organization.id == user.organization_id)),
+            }
+            db.commit()
+            return result
+
     def change_password(
         self,
         token: str,
@@ -353,6 +434,12 @@ class IdentityService:
                     User.id == current_session.user_id,
                 )
                 .with_for_update(of=User)
+                .execution_options(populate_existing=True)
+            )
+            # The first resolution only locates the user. A reset may have
+            # committed while we waited for its lock; refresh the session too.
+            current_session = self._resolve_session(
+                db, token, trace_id=trace_id, network=network
             )
             if user is None or not self.passwords.verify(
                 user.password_hash, current_password

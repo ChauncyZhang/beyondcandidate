@@ -38,6 +38,8 @@ def test_password_invitation_model_uses_only_a_sha256_token_digest() -> None:
         "expires_at",
         "used_at",
         "created_at",
+        "purpose",
+        "reset_authorization_version",
     }
     assert table.c.token_hash.type.length == 64
     assert table.c.token_hash.unique

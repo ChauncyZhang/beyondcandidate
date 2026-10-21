@@ -11,6 +11,7 @@ from server.app.identity.service import (
     InvalidSession,
     InvitationInvalidOrExpired,
     PasswordUnchanged,
+    PasswordResetInvalidOrExpired,
 )
 
 
@@ -130,6 +131,22 @@ def accept_invitation(payload: InvitationAcceptRequest, request: Request):
             422,
             "invitation_invalid_or_expired",
             "The invitation is invalid or expired.",
+        )
+    return {"data": registration}
+
+
+@router.post("/auth/password-reset/accept")
+def accept_password_reset(payload: InvitationAcceptRequest, request: Request):
+    if not allowed_origin(request):
+        return problem(request, 403, "csrf_validation_failed", "Request origin or CSRF token is invalid.")
+    try:
+        registration = request.app.state.identity_service.accept_password_reset(
+            payload.token, payload.password, trace_id=request.state.trace_id
+        )
+    except PasswordResetInvalidOrExpired:
+        return problem(
+            request, 422, "password_reset_invalid_or_expired",
+            "The password reset link is invalid or expired.",
         )
     return {"data": registration}
 

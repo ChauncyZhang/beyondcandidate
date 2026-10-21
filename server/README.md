@@ -28,6 +28,45 @@ docker run --rm ux09-server-test
 When a local Python 3.12 interpreter is available, installing
 `server/requirements-dev.txt` and running `python -m pytest server/tests` is equivalent.
 
+### Invitation And Password Recovery
+
+Invitation links activate a pending member once and expire after 48 hours. An
+already active member must log in rather than reuse that invitation. If the
+password is forgotten, an authorized administrator can open **Settings >
+Organization > Members > Reset Password** and generate a one-time link valid for
+one hour. Share that link with the member securely; it is shown only in the
+current dialog. Issuing it does not change the password or revoke sessions.
+Consuming it replaces the password, clears login lockout, revokes every old
+session, and invalidates other outstanding reset links. Administrators cannot
+use this action for themselves; the current-password change flow is unchanged.
+
+| Contract | Durable Regression |
+| --- | --- |
+| Activation remains once-only; consumed invitations offer login recovery; successful activation removes the token before external navigation | `frontend/src/PasswordResetUi.test.js`, `frontend/src/InvitationUi.test.js`, `server/tests/test_password_invitations.py`, `server/tests/test_invitation_reissue.py` |
+| Active-member reset requires current administrator authority and tenant scope; issuance preserves the account; token purposes cannot cross-use; consumption revokes sessions and clears lockout | `server/tests/test_password_reset.py`, `frontend/src/passwordReset.test.js` |
+| Privilege or password changes invalidate older reset links; a concurrent old-session password change cannot overwrite a completed reset | `server/tests/test_password_reset.py`, `server/tests/test_password_reset_postgres.py` |
+| Confirmation, safe errors, link encoding, password entry and return to login work at desktop and mobile widths | `frontend/src/PasswordResetUi.test.js` |
+| Forward migration preserves existing invitations and grants; concurrent consumption succeeds only once | `server/tests/test_password_reset_postgres.py` |
+
+Focused entries (included in the normal frontend/backend test discovery):
+
+```powershell
+python -m pytest server/tests/test_password_reset.py server/tests/test_password_invitations.py server/tests/test_invitation_reissue.py server/tests/test_identity.py server/tests/test_identity_management.py -q
+cd frontend
+node --test --test-concurrency=1 src/passwordReset.test.js src/PasswordResetUi.test.js src/invitation.test.js src/InvitationUi.test.js
+```
+
+The browser tests use mocked HTTP responses; they do not issue real reset links
+or validate a live Feishu authorization. The API tests use isolated SQLite.
+For migration and locking verification, set `POSTGRES_SMOKE_URL` to a disposable,
+initially empty PostgreSQL database and run
+`python -m pytest server/tests/test_password_reset_postgres.py -q`. This test
+leaves its synthetic data in that disposable database and refuses a nonempty DB.
+Do not run it against a shared or production database. Revision
+`0043_password_reset` is forward-only. Before rolling back to code that predates
+purpose checks, expire all outstanding password-reset tokens through an
+explicitly authorized operational action.
+
 ### Interview adjacency regression
 
 Ordinary scheduling uses zero implicit buffer. A 14:00-15:00 interview may touch

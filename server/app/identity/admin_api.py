@@ -858,6 +858,7 @@ def reissue_user_invitation(user_id: UUID, request: Request):
             .where(
                 PasswordInvitation.organization_id == principal.organization_id,
                 PasswordInvitation.user_id == user_id,
+                PasswordInvitation.purpose == "invitation",
                 PasswordInvitation.used_at.is_(None),
                 PasswordInvitation.expires_at > now,
             )
@@ -882,6 +883,82 @@ def reissue_user_invitation(user_id: UUID, request: Request):
         ))
         db.commit()
         return {"data": {"invitation": {
+            "token": raw_token, "expires_at": expires_at.isoformat(),
+        }}}
+
+
+@router.post("/users/{user_id}/password-reset")
+def issue_user_password_reset(user_id: UUID, request: Request):
+    principal = _principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
+    if user_id == principal.user_id:
+        return problem(request, 409, "self_password_reset_forbidden", "Use the current-password change flow for your own account.")
+    service = request.app.state.identity_service
+    with request.app.state.identity_store.sync_session() as db:
+        # Stable ordering also prevents two administrators resetting each other
+        # from acquiring the same user locks in opposite orders.
+        users = db.scalars(
+            select(User)
+            .where(User.organization_id == principal.organization_id, User.id.in_([principal.user_id, user_id]))
+            .order_by(User.id)
+            .with_for_update(of=User)
+        ).all()
+        by_id = {user.id: user for user in users}
+        actor = by_id.get(principal.user_id)
+        if actor is None or actor.status != UserStatus.ACTIVE:
+            return problem(request, 401, "authentication_required", "Authentication is required.")
+        try:
+            service._resolve_session(db, session_token(request))
+        except InvalidSession:
+            return problem(request, 401, "authentication_required", "Authentication is required.")
+        actor_roles = set(db.scalars(select(UserRole.role).where(UserRole.user_id == actor.id)))
+        if not actor_roles.intersection(ADMIN_ROLES):
+            return problem(request, 403, "authorization_forbidden", "The action is not permitted.")
+        user = by_id.get(user_id)
+        if user is None:
+            return problem(request, 404, "user_not_found", "The user was not found.")
+        target_roles = set(db.scalars(select(UserRole.role).where(UserRole.user_id == user_id)))
+        allowed_roles = INVITABLE_ROLES if "system_admin" in actor_roles else RECRUITING_ADMIN_INVITABLE_ROLES
+        if not target_roles or not target_roles.issubset(allowed_roles):
+            return problem(request, 403, "role_assignment_forbidden", "The role cannot be assigned.")
+        if user.status != UserStatus.ACTIVE:
+            return problem(request, 409, "user_not_active", "Only active users can reset their password.")
+        now = service.clock.current_time()
+        expires_at = now + timedelta(hours=1)
+        raw_token = service.tokens.new_token()
+        db.execute(
+            update(PasswordInvitation)
+            .where(
+                PasswordInvitation.organization_id == user.organization_id,
+                PasswordInvitation.user_id == user.id,
+                PasswordInvitation.purpose == "password_reset",
+                PasswordInvitation.used_at.is_(None),
+                PasswordInvitation.expires_at > now,
+            )
+            .values(expires_at=now)
+        )
+        db.add(PasswordInvitation(
+            organization_id=user.organization_id,
+            user_id=user.id,
+            purpose="password_reset",
+            reset_authorization_version=user.authorization_version,
+            token_hash=hash_token(raw_token),
+            expires_at=expires_at,
+        ))
+        db.add(AuditLog(
+            organization_id=user.organization_id,
+            actor_user_id=actor.id,
+            category="system",
+            event_type="identity.password_reset_issued",
+            outcome="success",
+            resource_type="user",
+            resource_id=user.id,
+            trace_id=request.state.trace_id,
+            metadata_json={},
+        ))
+        db.commit()
+        return {"data": {"password_reset": {
             "token": raw_token, "expires_at": expires_at.isoformat(),
         }}}
 

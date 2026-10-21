@@ -175,6 +175,10 @@ class PasswordInvitation(Base):
     )
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    purpose: Mapped[str] = mapped_column(
+        String(32), default="invitation", server_default="invitation"
+    )
+    reset_authorization_version: Mapped[int | None] = mapped_column(Integer)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
@@ -182,6 +186,10 @@ class PasswordInvitation(Base):
     )
     user: Mapped[User] = relationship()
     __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('invitation','password_reset')",
+            name="ck_password_invitations_purpose",
+        ),
         ForeignKeyConstraint(
             ["organization_id", "user_id"],
             ["users.organization_id", "users.id"],

@@ -4,7 +4,7 @@ import { canEditAiSettings, canEditOrganizationSettings, canEditRetentionSetting
 import { createLlmSettingsController, getTestDisabledReason, releaseLlmSettingsSubscription } from "./llmSettings.js";
 import { createOcrSettingsController, getOcrTestDisabledReason, releaseOcrSettingsSubscription } from "./ocrSettings.js";
 import { createGovernanceSettingsController, releaseGovernanceSettingsSubscription } from "./governanceSettings.js";
-import { canReinviteUser, getInviteRoleOptions, getRecruitingScopeLabel, isRecruitingScopeValid, organizationSettingsController, roleUsesRecruitingScope } from "./organizationSettings.js";
+import { canReinviteUser, canResetUserPassword, getInviteRoleOptions, getRecruitingScopeLabel, isRecruitingScopeValid, organizationSettingsController, roleUsesRecruitingScope } from "./organizationSettings.js";
 import { FeishuIntegrationSettings } from "./FeishuIntegrationSettings.jsx";
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { workflowTemplateController } from "./workflowTemplateController.js";
@@ -152,6 +152,7 @@ function RecruitingScopeFields({ value, departments, onChange, role }) {
 
 function OrganizationSettings({
   role,
+  currentUserId,
   onNotify,
   pageActionHost,
   activeTab = "成员",
@@ -180,6 +181,7 @@ function OrganizationSettings({
   const [departmentName, setDepartmentName] = useState("");
   const [copied, setCopied] = useState(false);
   const [reinviteMember, setReinviteMember] = useState(null);
+  const [resetMember, setResetMember] = useState(null);
   const inviteRoles = getInviteRoleOptions(role);
   const activeDepartments = state.departments.filter((department) => department.status === "active");
   const busy = state.actionStatus === "saving";
@@ -187,6 +189,8 @@ function OrganizationSettings({
     state.invitation && typeof window !== "undefined"
       ? `${window.location.origin}${window.location.pathname}#invite=${encodeURIComponent(state.invitation.token)}`
       : "";
+  const passwordResetLink = state.passwordReset && typeof window !== "undefined"
+    ? `${window.location.origin}/#reset-password=${encodeURIComponent(state.passwordReset.token)}` : "";
 
   useEffect(() => {
     void controller.load();
@@ -216,6 +220,7 @@ function OrganizationSettings({
     setCopied(false);
     setScopeMember(null);
     setReinviteMember(null);
+    setResetMember(null);
     controller.dismissInvitation();
     controller.clearDepartment();
   };
@@ -240,6 +245,22 @@ function OrganizationSettings({
     try {
       await controller.reinviteMember(reinviteMember.id, role);
       onNotify("新邀请已创建，请安全发送最新链接");
+    } catch {
+      /* safe controller message is rendered */
+    }
+  }
+  function openPasswordReset(user) {
+    if (busy || !canResetUserPassword(role, user, currentUserId)) return;
+    controller.dismissInvitation();
+    setCopied(false);
+    setResetMember(user);
+    setDrawer("password-reset");
+  }
+  async function submitPasswordReset() {
+    if (busy || !resetMember) return;
+    try {
+      await controller.resetMemberPassword(resetMember.id, role, currentUserId);
+      onNotify("密码重置链接已生成，请安全发送给本人");
     } catch {
       /* safe controller message is rendered */
     }
@@ -426,6 +447,7 @@ function OrganizationSettings({
                 </span>
                 <span className="member-row-action">
                   {canReinviteUser(role, user) && <button className="text-button" type="button" disabled={busy} onClick={() => openReinvite(user)}><RefreshCw size={14} aria-hidden="true" />重新邀请</button>}
+                  {canResetUserPassword(role, user, currentUserId) && <button className="text-button" type="button" disabled={busy} onClick={() => openPasswordReset(user)}><KeyRound size={14} aria-hidden="true" />重置密码</button>}
                   {editable && (user.roleValues.some(roleUsesRecruitingScope) || (role === "系统管理员" && !user.roleValues.includes("system_admin"))) && <button className="text-button" type="button" onClick={() => openRecruitingScope(user)}>{role === "系统管理员" ? "配置成员" : "配置负责范围"}</button>}
                 </span>
               </div>
@@ -451,6 +473,25 @@ function OrganizationSettings({
           )}
         </div>
       )}
+      {drawer === "password-reset" && <OrganizationDrawer
+        title="重置成员密码"
+        description={`${resetMember.name}（${resetMember.email}）：重置链接仅可使用一次，有效期为 1 小时。`}
+        busy={busy}
+        onClose={closeDrawer}
+        footer={<>
+          <button className="button secondary" type="button" disabled={busy} onClick={closeDrawer}>{state.passwordReset ? "完成" : "取消"}</button>
+          {!state.passwordReset && <button className="button primary" type="button" disabled={busy} onClick={submitPasswordReset}>{busy ? "正在生成…" : "生成重置链接"}</button>}
+        </>}
+      >
+        {state.actionError && <div className="settings-error" role="alert"><AlertTriangle size={17} />{state.actionError}</div>}
+        <p>本人完成重置前，原密码仍可使用。重置完成后，该账号的所有旧登录会话将退出，登录锁定也会解除。角色和负责范围保持不变。</p>
+        {state.passwordReset && <div className="invitation-result">
+          <CheckCircle2 size={24} /><h3>重置链接已创建</h3>
+          <p>请立即安全发送给本人，不要转发给其他人。再次生成将使旧重置链接失效。</p>
+          <label>密码重置链接<div><input aria-label="密码重置链接" readOnly value={passwordResetLink} /><button className="button secondary" type="button" onClick={async () => { try { await navigator.clipboard.writeText(passwordResetLink); setCopied(true); } catch { setCopied(false); } }}><Copy size={16} />{copied ? "已复制" : "复制"}</button></div></label>
+          <small>有效期至 {new Date(state.passwordReset.expiresAt).toLocaleString("zh-CN", { hour12: false })}</small>
+        </div>}
+      </OrganizationDrawer>}
       {(drawer === "invite" || drawer === "reinvite") && (
         <OrganizationDrawer
           title={drawer === "reinvite" ? "重新邀请成员" : "邀请成员"}
@@ -1084,14 +1125,14 @@ function EmailSettings({ onNotify, onDirtyChange, controller = emailSettingsCont
   </section>;
 }
 
-export function SettingsWorkspace({ currentRole, onRoleChange, onNotify, onUnsavedChangesChange = () => {}, pageActionHost, offerController, section = "组织与权限", organizationTab = "成员", templateTab = "招聘流程", onRouteChange = () => {} }) {
+export function SettingsWorkspace({ currentRole, currentUserId, onRoleChange, onNotify, onUnsavedChangesChange = () => {}, pageActionHost, offerController, section = "组织与权限", organizationTab = "成员", templateTab = "招聘流程", onRouteChange = () => {} }) {
   const [aiDirty, setAiDirty] = useState(false);
   const [emailDirty, setEmailDirty] = useState(false);
   const [offerDirty, setOfferDirty] = useState(false);
   const allowedSettingsSections = getAllowedSettingsSections(currentRole);
   const visibleSettingsSections = settingsSections.filter(([label]) => allowedSettingsSections.includes(label));
   const activeSection = allowedSettingsSections.includes(section) ? section : allowedSettingsSections[0];
-  const content = activeSection === "组织与权限" ? <OrganizationSettings role={currentRole} onNotify={onNotify} pageActionHost={pageActionHost} activeTab={organizationTab} onTabChange={(tab) => onRouteChange("组织与权限", tab)} /> : activeSection === "流程与评价模板" ? <TemplateSettings role={currentRole} onNotify={onNotify} activeTab={templateTab} onTabChange={(tab) => onRouteChange("流程与评价模板", tab)} /> : activeSection === "AI 设置" ? <><AiSettings role={currentRole} onNotify={onNotify} onDirtyChange={setAiDirty} />{currentRole === "系统管理员" && <EmailSettings onNotify={onNotify} onDirtyChange={setEmailDirty} />}</> : activeSection === "飞书集成" ? <FeishuIntegrationSettings onNotify={onNotify} /> : activeSection === "审计与数据治理" ? <AuditSettings key={currentRole} role={currentRole} onNotify={onNotify} /> : activeSection === "Offer 设置" ? <OfferSettings controller={offerController} onNotify={onNotify} onDirtyChange={setOfferDirty} /> : <section className="settings-denied"><LockKeyhole size={31} /><h3>无设置权限</h3><p>当前账号未获得系统设置访问权限。</p></section>;
+  const content = activeSection === "组织与权限" ? <OrganizationSettings role={currentRole} currentUserId={currentUserId} onNotify={onNotify} pageActionHost={pageActionHost} activeTab={organizationTab} onTabChange={(tab) => onRouteChange("组织与权限", tab)} /> : activeSection === "流程与评价模板" ? <TemplateSettings role={currentRole} onNotify={onNotify} activeTab={templateTab} onTabChange={(tab) => onRouteChange("流程与评价模板", tab)} /> : activeSection === "AI 设置" ? <><AiSettings role={currentRole} onNotify={onNotify} onDirtyChange={setAiDirty} />{currentRole === "系统管理员" && <EmailSettings onNotify={onNotify} onDirtyChange={setEmailDirty} />}</> : activeSection === "飞书集成" ? <FeishuIntegrationSettings onNotify={onNotify} /> : activeSection === "审计与数据治理" ? <AuditSettings key={currentRole} role={currentRole} onNotify={onNotify} /> : activeSection === "Offer 设置" ? <OfferSettings controller={offerController} onNotify={onNotify} onDirtyChange={setOfferDirty} /> : <section className="settings-denied"><LockKeyhole size={31} /><h3>无设置权限</h3><p>当前账号未获得系统设置访问权限。</p></section>;
   useEffect(() => { onUnsavedChangesChange(aiDirty || emailDirty || offerDirty); }, [aiDirty, emailDirty, offerDirty, onUnsavedChangesChange]);
   useEffect(() => () => onUnsavedChangesChange(false), [onUnsavedChangesChange]);
   function openSection(nextSection) {

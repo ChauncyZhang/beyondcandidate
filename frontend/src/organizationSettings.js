@@ -1,5 +1,5 @@
 import { apiClient } from "./apiClient.js";
-import { reinvitationErrorMessage } from "./invitationErrors.js";
+import { passwordResetErrorMessage, reinvitationErrorMessage } from "./invitationErrors.js";
 
 const ROLE_LABELS = new Map([
   ["system_admin", "系统管理员"],
@@ -108,8 +108,16 @@ export function canReinviteUser(currentRole, user) {
   return user.roleValues.length > 0 && user.roleValues.every((role) => allowed.has(role));
 }
 
+export function canResetUserPassword(currentRole, user, currentUserId) {
+  if (user?.rawStatus !== "active" || !user?.id || user.id === currentUserId) return false;
+  if (currentRole === "系统管理员") return true;
+  if (currentRole !== "招聘管理员") return false;
+  const allowed = new Set(getInviteRoleOptions(currentRole).map(({ value }) => value));
+  return user.roleValues.length > 0 && user.roleValues.every((role) => allowed.has(role));
+}
+
 export function createOrganizationSettingsController({ client = apiClient, createIdempotencyKey = () => globalThis.crypto.randomUUID() } = {}) {
-  let state = Object.freeze({ status: "idle", users: [], departments: [], error: "", actionStatus: "idle", actionError: "", invitation: null, departmentDetailStatus: "idle", departmentDetail: null });
+  let state = Object.freeze({ status: "idle", users: [], departments: [], error: "", actionStatus: "idle", actionError: "", invitation: null, passwordReset: null, departmentDetailStatus: "idle", departmentDetail: null });
   const listeners = new Set();
   const setState = (next) => {
     state = Object.freeze(next);
@@ -207,6 +215,27 @@ export function createOrganizationSettingsController({ client = apiClient, creat
         throw error;
       }
     },
+    async resetMemberPassword(userId, currentRole, currentUserId) {
+      if (state.actionStatus === "saving") return null;
+      patchState({ actionStatus: "saving", actionError: "", invitation: null, passwordReset: null });
+      try {
+        const user = state.users.find((item) => item.id === userId);
+        if (!canResetUserPassword(currentRole, user, currentUserId)) {
+          const error = new Error("Password reset not allowed");
+          error.code = userId === currentUserId ? "self_password_reset_forbidden" : user?.rawStatus !== "active" ? "user_not_active" : "role_assignment_forbidden";
+          error.status = error.code === "role_assignment_forbidden" ? 403 : 409;
+          throw error;
+        }
+        const result = await client.requestPasswordReset(userId);
+        const passwordReset = { token: safeString(result?.password_reset?.token), expiresAt: safeString(result?.password_reset?.expires_at) };
+        if (!passwordReset.token || !passwordReset.expiresAt) throw new Error("Invalid password reset response");
+        patchState({ actionStatus: "success", passwordReset });
+        return passwordReset;
+      } catch (error) {
+        patchState({ actionStatus: "error", actionError: passwordResetErrorMessage(error) });
+        throw error;
+      }
+    },
     async addDepartment(name) {
       patchState({ actionStatus: "saving", actionError: "" });
       try {
@@ -253,7 +282,7 @@ export function createOrganizationSettingsController({ client = apiClient, creat
       }
     },
     clearDepartment() { patchState({ departmentDetailStatus: "idle", departmentDetail: null, actionError: "", actionStatus: "idle" }); },
-    dismissInvitation() { patchState({ invitation: null, actionStatus: "idle", actionError: "" }); },
+    dismissInvitation() { patchState({ invitation: null, passwordReset: null, actionStatus: "idle", actionError: "" }); },
   };
 }
 

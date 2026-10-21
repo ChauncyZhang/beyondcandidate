@@ -221,10 +221,10 @@ function UnsavedChangesDialog({ logout, onContinue, onDiscard }) {
   return <div className="ux07-dialog-backdrop"><section className="ux07-dialog" role="dialog" aria-modal="true" aria-label="未保存的设置"><header><div><h3>设置尚未保存</h3><p>{logout ? "退出登录会丢弃当前邮件或 AI 设置修改。" : "离开当前页面会丢弃邮件或 AI 设置修改。"}</p></div></header><div className="ux07-danger-impact"><CircleAlert size={22} /><span>SMTP 密码替换值仅保留在当前编辑页面；取消离开可继续编辑且不会丢失。</span></div><footer><button className="button secondary" type="button" autoFocus onClick={onContinue}>继续编辑</button><button className="button danger" type="button" onClick={onDiscard}>{logout ? "放弃修改并退出" : "放弃修改并离开"}</button></footer></section></div>;
 }
 
-function inviteTokenFromHash() {
+function inviteTokenFromHash(key = "invite") {
   if (typeof window === "undefined") return "";
   const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
-  return new URLSearchParams(hash).get("invite")?.trim() || "";
+  return new URLSearchParams(hash).get(key)?.trim() || "";
 }
 
 export function App({ controller = sessionController, screeningController = defaultScreeningController, candidateController = defaultCandidateController, jobController = defaultJobController, workbenchController = defaultWorkbenchController, offerController = defaultOfferController, interviewController = defaultInterviewController, talentController = defaultTalentController, reportController = defaultReportController, accountClient = apiClient }) {
@@ -232,7 +232,8 @@ export function App({ controller = sessionController, screeningController = defa
   const location = useLocation();
   const publicRoute = useMemo(() => parseAppRoute(location), [location.pathname, location.search]);
   const session = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
-  const [inviteToken, setInviteToken] = useState(inviteTokenFromHash);
+  const [inviteToken, setInviteToken] = useState(() => inviteTokenFromHash());
+  const [resetToken, setResetToken] = useState(() => inviteTokenFromHash("reset-password"));
   const [acceptedEmail, setAcceptedEmail] = useState("");
   const handleLogin = useCallback(async (credentials) => {
     const user = await controller.login(credentials);
@@ -247,13 +248,17 @@ export function App({ controller = sessionController, screeningController = defa
     return undefined;
   }, [controller, publicRoute.kind]);
   useEffect(() => {
-    const handleHashChange = () => setInviteToken(inviteTokenFromHash());
+    const handleHashChange = () => {
+      setInviteToken(inviteTokenFromHash());
+      setResetToken(inviteTokenFromHash("reset-password"));
+    };
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
 
   if (publicRoute.kind === "public-offer") return <PublicOfferView token={publicRoute.token} />;
   if (session.status === "bootstrapping") return <SessionLoadingView />;
+  if (resetToken) return <InviteAcceptView key={resetToken} mode="password-reset" token={resetToken} client={accountClient} onAccepted={(email) => { window.history.replaceState(null, "", "/"); setAcceptedEmail(email); setResetToken(""); if (session.status !== "anonymous") window.location.assign("/"); }} />;
   if (session.status === "anonymous") {
     if (inviteToken) return <InviteAcceptView token={inviteToken} client={accountClient} onAccepted={(email) => { window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`); setAcceptedEmail(email); setInviteToken(""); }} />;
     return <LoginView error={session.error} retryAfterSeconds={session.retryAfterSeconds} submitting={session.submitting} initialEmail={acceptedEmail} onLogin={handleLogin} />;
@@ -1360,7 +1365,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
         )}
 
         {!screeningTask && activeNav === "设置" && (
-          <SettingsWorkspace currentRole={currentRole} onNotify={notify} onUnsavedChangesChange={setHasUnsavedSettings} offerController={offerController} section={route.section} organizationTab={settingsOrganizationTab} templateTab={route.section === "流程与评价模板" ? route.tab : undefined} onRouteChange={(section, tab) => navigate(settingsPath(section, tab, route.returnTo))} pageActionHost={pageActionHost} />
+          <SettingsWorkspace currentRole={currentRole} currentUserId={session.user?.id} onNotify={notify} onUnsavedChangesChange={setHasUnsavedSettings} offerController={offerController} section={route.section} organizationTab={settingsOrganizationTab} templateTab={route.section === "流程与评价模板" ? route.tab : undefined} onRouteChange={(section, tab) => navigate(settingsPath(section, tab, route.returnTo))} pageActionHost={pageActionHost} />
         )}
 
         {!screeningTask && activeNav !== "工作台" && activeNav !== "职位" && activeNav !== "筛选任务" && activeNav !== "候选人" && activeNav !== "面试" && activeNav !== "人才库" && activeNav !== "报表" && activeNav !== "设置" && (

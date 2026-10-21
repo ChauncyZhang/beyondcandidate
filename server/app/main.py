@@ -249,6 +249,7 @@ def create_app(
             if response is None and not provider_authenticated and request.url.path not in {
                 "/api/v1/auth/login",
                 "/api/v1/auth/invitations/accept",
+                "/api/v1/auth/password-reset/accept",
                 "/api/v1/auth/feishu/authorize",
             }:
                 token = session_token(request)
