@@ -10,6 +10,7 @@ const {
   createInitialJobWorkspaceState,
   failJobRequest,
   getJobDefinitionErrors,
+  getJobPublicationChecks,
   retryJobRefresh,
   startJobRequest,
   succeedJobMutationRefresh,
@@ -23,6 +24,36 @@ const firstPage = {
   owners: [{ id: "owner-1", name: "招聘经理" }],
   statusCounts: { 草稿: 1, 招聘中: 2, 已暂停: 0, 已关闭: 0, 已归档: 0 },
 };
+
+test("publication checks use the submit requirements, not optional department and rules", () => {
+  const values = { name: "工程师", jd: "开发工作", process: "标准流程", headcount: 1, hiringManagerIds: ["m1"], hiringOwnerId: "m1" };
+  assert.ok(getJobPublicationChecks(values).every((item) => item.complete));
+  for (const changes of [{ name: "  " }, { jd: "\n " }, { process: " " }, { hiringManagerIds: [] }, { hiringOwnerId: "m2" }, { headcount: 0 }, { headcount: 1.5 }, { headcount: 1001 }]) {
+    const invalid = { ...values, ...changes };
+    const checks = getJobPublicationChecks(invalid);
+    for (const field of Object.keys(getJobDefinitionErrors(invalid))) {
+      assert.equal(checks.find((item) => item.field === field).complete, false, field);
+    }
+    assert.ok(checks.some((item) => !item.complete));
+  }
+  const unavailable = getJobPublicationChecks(values, { workflowUnavailable: true });
+  assert.equal(unavailable.find((item) => item.field === "process").complete, false);
+});
+
+test("publication checks reject server text and rule bounds without requiring optional content", () => {
+  const values = { name: "工程师", jd: "描述", process: "流程", headcount: 1, hiringManagerIds: ["m1"], hiringOwnerId: "m1" };
+  for (const [field, limit] of [["name", 200], ["jd", 50000], ["location", 200], ["process", 100], ["mustHave", 100], ["niceToHave", 100]]) {
+    assert.deepEqual(getJobDefinitionErrors({ ...values, [field]: "字".repeat(limit) }), {});
+    const invalid = { ...values, [field]: "字".repeat(limit + 1) };
+    assert.ok(getJobDefinitionErrors(invalid)[field], field);
+    assert.ok(getJobPublicationChecks(invalid).some((check) => !check.complete), field);
+  }
+  for (const field of ["mustHave", "niceToHave"]) {
+    assert.deepEqual(getJobDefinitionErrors({ ...values, [field]: Array(50).fill("开发").join("、") }), {});
+    assert.ok(getJobDefinitionErrors({ ...values, [field]: Array(51).fill("开发").join("，") })[field]);
+  }
+  assert.deepEqual(getJobDefinitionErrors({ ...values, name: "𠮷".repeat(200), location: "  ", mustHave: "、 ,，", niceToHave: [] }), {});
+});
 
 test("stale success and failure responses leave the active request unchanged", () => {
   assert.equal(typeof createInitialJobWorkspaceState, "function");

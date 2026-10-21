@@ -242,7 +242,7 @@ export function ImportWizard({ activeJob, recentTask, onClose, onCreateTask, onR
   const [jobsState, setJobsState] = useState("loading");
   const [position, setPosition] = useState("");
   const [source, setSource] = useState("BOSS 直聘");
-  const [note, setNote] = useState("7 月 AI 工程师主动搜寻批次");
+  const [note, setNote] = useState(() => `${new Date().getMonth() + 1} 月 AI 工程师主动搜寻批次`);
   const [files, setFiles] = useState([]);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -369,7 +369,7 @@ export function ImportWizard({ activeJob, recentTask, onClose, onCreateTask, onR
               <label>目标职位<select value={position} disabled={jobsState !== "ready"} onChange={(event) => setPosition(event.target.value)} aria-describedby="server-jobs-state"><option value="">{jobsState === "loading" ? "正在加载可用职位…" : jobsState === "error" ? "职位加载失败，请关闭后重试" : jobsState === "empty" ? "暂无可用职位" : "请选择职位"}</option>{serverJobs.map((job) => <option key={job.id} value={job.id}>{jobOptionLabel(job, serverJobs)}</option>)}</select><small id="server-jobs-state" className="field-state" aria-live="polite">{jobsState === "error" ? "无法获取授权职位，当前不能继续。" : jobsState === "empty" ? "当前账号没有可用于筛选的职位。" : ""}</small></label>
               <label>简历来源<select value={source} onChange={(event) => setSource(event.target.value)}><option>BOSS 直聘</option><option>猎聘</option><option>智联招聘</option><option>员工内推</option><option>人才库重新激活</option><option>其他合法来源</option></select></label>
             </div>
-            <label className="wizard-field">批次说明<textarea rows="4" value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：7 月 AI 工程师主动搜寻批次" /></label>
+            <label className="wizard-field">批次说明<textarea rows="4" value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：AI 工程师主动搜寻批次" /></label>
             <div className="privacy-note"><CircleAlert size={17} /><span>请确认简历来源合法并符合公司隐私政策。候选人数据仅用于本次招聘流程。</span></div>
           </div>}
 

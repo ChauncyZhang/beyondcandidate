@@ -27,7 +27,7 @@ import {
   getJobFormActions,
   getJobSaveSuccessMessage,
 } from "./jobController.js";
-import { commitJobMutation, getJobDefinitionErrors, retryJobRefresh } from "./jobWorkspaceState.js";
+import { commitJobMutation, getJobDefinitionErrors, getJobPublicationChecks, retryJobRefresh } from "./jobWorkspaceState.js";
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { applicationStageLabel } from "./recruitingTerminology.js";
 import { workflowTemplateController } from "./workflowTemplateController.js";
@@ -180,9 +180,8 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
     if (!workflowTemplates.length) return;
     setValues((current) => {
       const selected = workflowTemplates.find((item) => item.id === current.workflowTemplateId)
-        || workflowTemplates.find((item) => item.name === current.process || (current.process === "技术岗位流程" && item.name === "技术岗位标准流程"))
-        || workflowTemplates.find((item) => item.status === "active")
-        || workflowTemplates[0];
+        || workflowTemplates.find((item) => item.status === "active" && (item.name === current.process || (current.process === "技术岗位流程" && item.name === "技术岗位标准流程")))
+        || workflowTemplates.find((item) => item.status === "active");
       if (!selected || (current.workflowTemplateId === selected.id && current.process === selected.name)) return current;
       return { ...current, workflowTemplateId: selected.id, process: selected.name };
     });
@@ -268,9 +267,10 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
     }
   }
 
-  const completion = [values.name, values.departmentId, values.jd, values.mustHave, values.process].filter(Boolean).length;
   const reviewerSelectionInvalid = !values.hiringOwnerId || !values.hiringManagerIds.includes(values.hiringOwnerId);
-  const workflowUnavailable = workflowTemplatesStatus !== "ready" || !values.workflowTemplateId;
+  const workflowUnavailable = workflowTemplatesStatus !== "ready" || !workflowTemplates.some((item) => item.id === values.workflowTemplateId && item.status === "active");
+  const publicationChecks = getJobPublicationChecks(values, { workflowUnavailable });
+  const completion = publicationChecks.filter((item) => item.complete).length;
   const offerApproverOptions = hiringManagers;
   return (
     <div className="job-page job-form-page">
@@ -284,16 +284,16 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
             <section className="form-section"><header><span>1</span><div><h3>基本信息</h3><p>设置职位归属、招聘目标和负责人。</p></div></header><div className="job-fields two-columns">
               <label>职位名称<input value={values.name} onChange={(event) => change("name", event.target.value)} placeholder="例如：平台工程师" />{errors.name && <small className="field-error">{errors.name}</small>}</label>
               <div className="job-department-field"><span className="field-label-row"><label htmlFor="job-department">所属部门</label><button aria-label="管理部门" type="button" onClick={onManageDepartments}>管理部门</button></span><select id="job-department" aria-label="所属部门" value={values.departmentId} onChange={(event) => change("departmentId", event.target.value)}><option value="">未分配部门</option>{departments.map((item) => <option key={item.id} value={item.id} disabled={item.status === "inactive" && item.id !== values.departmentId}>{item.name}{item.status === "inactive" ? "（已停用）" : ""}</option>)}</select></div>
-              <label>工作地点<input value={values.location} onChange={(event) => change("location", event.target.value)} placeholder="例如：上海或远程" /></label>
-              <label>招聘人数<input type="number" min="1" max="99" value={values.headcount} onChange={(event) => change("headcount", Number(event.target.value))} /></label>
+              <label>工作地点<input value={values.location} onChange={(event) => change("location", event.target.value)} placeholder="例如：上海或远程" />{errors.location && <small className="field-error">{errors.location}</small>}</label>
+              <label>招聘人数<input type="number" min="1" max="1000" value={values.headcount} onChange={(event) => change("headcount", Number(event.target.value))} />{errors.headcount && <small className="field-error">{errors.headcount}</small>}</label>
               <label>招聘负责人（HR）<select value={values.recruitingOwnerId} onChange={(event) => change("recruitingOwnerId", event.target.value)} disabled={recruitersStatus === "loading"}><option value="">{recruitersStatus === "loading" ? "正在加载招聘负责人…" : "未分配招聘负责人"}</option>{recruiters.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{recruitersStatus === "error" && <span className="field-state owner-directory-error" role="alert">招聘负责人加载失败。<button type="button" onClick={onRetryRecruiters}>重试</button></span>}</label>
               <fieldset className="job-reviewer-field" aria-describedby="job-reviewer-help"><legend>用人经理（简历评审）</legend><p id="job-reviewer-help">选择可查看该职位评审的负责人，再指定一位默认评审人。AI 自动流转只通知默认评审人；其他负责人可查看，但不会自动收到每份简历通知。</p>{hiringManagersStatus === "loading" ? <span className="reviewer-directory-state" role="status">正在加载用人经理…</span> : hiringManagersStatus === "error" ? <span className="reviewer-directory-state owner-directory-error" role="alert">用人经理加载失败。<button type="button" onClick={onRetryHiringManagers}>重试</button></span> : hiringManagers.length === 0 ? <span className="reviewer-directory-state" role="status">暂无可选用人经理，请先在组织设置中添加。</span> : <div className="job-reviewer-options">{hiringManagers.map((item) => <label className={values.hiringManagerIds.includes(item.id) ? "selected" : ""} key={item.id}><input type="checkbox" checked={values.hiringManagerIds.includes(item.id)} onChange={(event) => changeHiringManager(item.id, event.target.checked)} /><span>{item.name}</span></label>)}</div>}{errors.hiringManagerIds && <small className="field-error" role="alert">{errors.hiringManagerIds}</small>}<label htmlFor="job-default-reviewer">默认评审人<select id="job-default-reviewer" value={values.hiringOwnerId} onChange={(event) => change("hiringOwnerId", event.target.value)} disabled={hiringManagersStatus !== "ready" || values.hiringManagerIds.length === 0}><option value="">请选择默认评审人</option>{hiringManagers.filter((item) => values.hiringManagerIds.includes(item.id)).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{errors.hiringOwnerId && <small className="field-error" role="alert">{errors.hiringOwnerId}</small>}{reviewerSelectionInvalid && !errors.hiringOwnerId && <small className="field-state">选择默认评审人后才可保存职位。</small>}</fieldset>
               <label>优先级<span className="segmented-control" role="group" aria-label="职位优先级">{["高", "中", "低"].map((item) => <button key={item} type="button" aria-pressed={values.priority === item} className={values.priority === item ? "active" : ""} onClick={() => change("priority", item)}>{item}</button>)}</span></label>
             </div></section>
             <section className="form-section"><header><span>2</span><div><h3>职位描述与筛选标准</h3><p>JD 面向候选人展示，筛选标准仅供招聘团队使用。</p></div></header><div className="job-fields">
               <label>公开 JD<textarea rows="8" value={values.jd} onChange={(event) => change("jd", event.target.value)} placeholder="粘贴或输入完整职位描述" />{errors.jd && <small className="field-error">{errors.jd}</small>}</label>
-              <label>必须条件<textarea rows="3" value={values.mustHave} onChange={(event) => change("mustHave", event.target.value)} placeholder="用顿号分隔" /></label>
-              <label>加分项<textarea rows="3" value={values.niceToHave} onChange={(event) => change("niceToHave", event.target.value)} placeholder="用顿号分隔" /></label>
+              <label>必须条件<textarea rows="3" value={values.mustHave} onChange={(event) => change("mustHave", event.target.value)} placeholder="用顿号分隔" />{errors.mustHave && <small className="field-error">{errors.mustHave}</small>}</label>
+              <label>加分项<textarea rows="3" value={values.niceToHave} onChange={(event) => change("niceToHave", event.target.value)} placeholder="用顿号分隔" />{errors.niceToHave && <small className="field-error">{errors.niceToHave}</small>}</label>
             </div></section>
             <section className="form-section recruitment-config"><header><span>3</span><div><h3>招聘配置</h3><p>选择招聘流程；LLM 是当前唯一的评分和路由来源。</p></div></header><div className="job-fields">
               <div className="job-template-field"><span className="field-label-row"><label htmlFor="job-workflow-template">流程模板</label><button type="button" onClick={onManageTemplates}>管理模板</button></span><select id="job-workflow-template" aria-label="流程模板" value={values.workflowTemplateId} disabled={workflowTemplatesStatus === "loading" || !workflowTemplates.length} onChange={(event) => changeWorkflowTemplate(event.target.value)}><option value="">{workflowTemplatesStatus === "loading" ? "正在加载流程模板…" : "请选择流程模板"}</option>{workflowTemplates.map((template) => <option key={template.id} value={template.id} disabled={template.status === "inactive" && template.id !== values.workflowTemplateId}>{template.name}{template.status === "inactive" ? "（已停用）" : ""}</option>)}</select>{workflowTemplatesStatus === "error" && <small className="field-error">流程模板加载失败，请稍后重试。</small>}{errors.process && <small className="field-error">{errors.process}</small>}</div>
@@ -310,7 +310,7 @@ function JobForm({ initialJob, initialDraft, departments, recruiters, recruiters
               <div className="toggle-row ai-evaluation-row"><span><Bot size={18} /><span><strong>AI 简历评估</strong><small>启用后由 LLM 生成评分、结论与依据，并自动转交默认评审人；其他负责人可查看评审。</small></span></span><label className="compact-switch"><input aria-label="AI 简历评估" type="checkbox" checked={values.llmEnabled} onChange={(event) => change("llmEnabled", event.target.checked)} /><span aria-hidden="true" /></label></div>
             </div></section>
           </div>
-          <aside className="form-summary"><h3>发布检查</h3><div className="completion-ring"><strong>{completion}/5</strong><span>关键项已完成</span></div>{[["职位名称", values.name], ["所属部门", values.departmentId], ["公开 JD", values.jd], ["筛选条件", values.mustHave], ["招聘流程", values.process]].map(([label, value]) => <div className={value ? "check-row done" : "check-row"} key={label}>{value ? <Check size={15} /> : <Clock3 size={15} />}<span>{label}</span></div>)}</aside>
+          <aside className="form-summary"><h3>发布检查</h3><div className="completion-ring" role="status"><strong>{completion}/{publicationChecks.length}</strong><span>必填项已完成</span></div>{publicationChecks.map(({ field, label, complete, error }) => <div className={complete ? "check-row done" : "check-row"} key={field}>{complete ? <Check size={15} /> : <Clock3 size={15} />}<span>{label}{error && <small className="field-error">{error}</small>}</span></div>)}</aside>
         </div>
       </fieldset>
       {confirmExit && <JobDialog onClose={() => setConfirmExit(false)} onDiscard={() => { onDraftClear(); onDiscard(); }} onSave={() => { setConfirmExit(false); void submit(false); }} saving={saving} />}

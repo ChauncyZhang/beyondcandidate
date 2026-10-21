@@ -180,7 +180,7 @@ function normalizeStatusCounts(value) {
   return Object.fromEntries([...API_TO_UI_STATUS].map(([api, ui]) => [ui, safeCount(value?.[api])]));
 }
 
-function normalizeRules(value) {
+export function normalizeRules(value) {
   const rules = Array.isArray(value) ? value : safeString(value).split(/[、,，]/);
   return rules.map((item) => safeString(item).trim()).filter(Boolean);
 }

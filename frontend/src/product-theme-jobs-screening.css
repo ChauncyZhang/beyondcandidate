@@ -499,6 +499,24 @@ body .completion-ring strong {
   color: var(--blue);
 }
 
+body .form-summary .check-row {
+  padding: 8px 0;
+}
+
+body .form-summary .check-row > svg {
+  flex-shrink: 0;
+}
+
+body .form-summary .check-row > span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+body .form-summary .check-row .field-error {
+  margin: 0;
+}
+
 body .job-confirm-backdrop,
 body .screening-modal-backdrop {
   background: rgba(25, 25, 28, .36);
