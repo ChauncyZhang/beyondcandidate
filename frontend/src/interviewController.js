@@ -302,7 +302,7 @@ function conflictBody(form) {
     starts_at: startsAt,
     ends_at: endsAt,
     participant_ids: safeArray(form?.participantIds).map((id) => requireId(id, "INTERVIEW_PARTICIPANT_ID_REQUIRED")),
-    buffer_minutes: Number.isInteger(form?.bufferMinutes) ? form.bufferMinutes : 15,
+    buffer_minutes: Number.isInteger(form?.bufferMinutes) ? form.bufferMinutes : 0,
   };
 }
 
@@ -459,7 +459,7 @@ export function createInterviewController({ client = apiClient, idempotencyKey =
     params.set("to", rangeTimestamp(filters.to, true, filters.timezone));
     safeArray(filters.participantIds).forEach((id) => params.append("participant_ids", requireId(id, "INTERVIEW_PARTICIPANT_ID_REQUIRED")));
     params.set("timezone", safeString(filters.timezone, "Asia/Shanghai"));
-    params.set("buffer", String(Number.isInteger(filters.buffer) ? filters.buffer : 15));
+    params.set("buffer", String(Number.isInteger(filters.buffer) ? filters.buffer : 0));
     if (safeString(filters.exclude)) params.set("exclude", filters.exclude);
     const response = await client.request(`/api/v1/interview-availability?${params}`, signalOption(signal));
     return {
@@ -468,7 +468,7 @@ export function createInterviewController({ client = apiClient, idempotencyKey =
         status: participant?.status === "confirmed" ? "confirmed" : "unknown",
         busy: safeArray(participant?.busy).map((range) => ({ startsAt: safeString(range?.starts_at), endsAt: safeString(range?.ends_at) })),
       })),
-      bufferMinutes: Number.isInteger(response?.data?.buffer_minutes) ? response.data.buffer_minutes : 15,
+      bufferMinutes: Number.isInteger(response?.data?.buffer_minutes) ? response.data.buffer_minutes : 0,
     };
   }
 

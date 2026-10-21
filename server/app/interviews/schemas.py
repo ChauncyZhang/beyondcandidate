@@ -27,7 +27,7 @@ class ScheduleInput(StrictModel):
     starts_at: datetime
     ends_at: datetime
     participant_ids: list[UUID] = Field(min_length=1, max_length=20)
-    buffer_minutes: int = Field(default=15, ge=0, le=120)
+    buffer_minutes: int = Field(default=0, ge=0, le=120)
 
     @model_validator(mode="after")
     def validate_schedule(self):

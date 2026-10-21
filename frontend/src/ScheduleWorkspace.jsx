@@ -182,7 +182,7 @@ export function ScheduleWorkspace({ record, candidateId, candidates, participant
     setAvailability({ status: "loading", data: null });
     try {
       const data = await onGetAvailability(
-        { ...range, participantIds: form.interviewerIds, timezone: form.timezone, buffer: 15, exclude: record?.id || "" },
+        { ...range, participantIds: form.interviewerIds, timezone: form.timezone, buffer: 0, exclude: record?.id || "" },
         { signal: abortController.signal },
       );
       if (requestId !== availabilityRequestId.current) return;

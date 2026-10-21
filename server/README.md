@@ -28,6 +28,27 @@ docker run --rm ux09-server-test
 When a local Python 3.12 interpreter is available, installing
 `server/requirements-dev.txt` and running `python -m pytest server/tests` is equivalent.
 
+### Interview adjacency regression
+
+Ordinary scheduling uses zero implicit buffer. A 14:00-15:00 interview may touch
+an existing 15:00-16:00 interview; actual overlap remains forbidden. Explicit
+buffer values on availability/conflict queries retain their existing meaning.
+
+| Contract | Durable regression |
+| --- | --- |
+| New scheduling and rescheduling allow touching endpoints; 60/90-minute durations still determine actual overlap; saving does not bypass conflicts | `frontend/src/InterviewAdjacent.test.js` |
+| Default buffer is zero; explicitly requested buffer is preserved | `frontend/src/interviewController.test.js`, `server/tests/test_interview_adjacency_api.py` |
+| Authoritative create/update and calendar conflicts agree with selectable slots; real overlap stays blocked | `server/tests/test_interview_adjacency_api.py`, existing `server/tests/test_interview_api.py` |
+
+Frontend focused entry (from `frontend`):
+`node --test --test-concurrency=1 src/InterviewAdjacent.test.js src/interviewController.test.js src/InterviewScheduleState.test.js`.
+The normal frontend test gate includes these `src/*.test.js` cases.
+Backend focused entry (from the repository root with the test dependencies):
+`python -m pytest server/tests/test_interview_adjacency_api.py server/tests/test_interview_api.py server/tests/test_interview_domain.py -q`.
+These backend cases run in the normal `server/tests` gate. API tests use isolated
+SQLite and synthetic calendar providers; they do not verify live Feishu calendar
+data or replace the existing PostgreSQL concurrency gate.
+
 ## Screening document parsing and OCR
 
 Scope: resume upload, parsing, OCR rendering, and screening/profile enrichment in the

@@ -356,7 +356,7 @@ def _schedule_conflicts(
     ends_at: datetime,
     *,
     exclude_interview_id: UUID | None = None,
-    buffer_minutes: int = 15,
+    buffer_minutes: int = 0,
 ) -> tuple[list[UUID], list[UUID]]:
     lower_bound = starts_at - timedelta(minutes=buffer_minutes)
     upper_bound = ends_at + timedelta(minutes=buffer_minutes)
@@ -411,7 +411,7 @@ def _realtime_availability_conflicts(
     ends_at: datetime,
     *,
     exclude_interview_id: UUID | None = None,
-    buffer_minutes: int = 15,
+    buffer_minutes: int = 0,
 ) -> tuple[list[UUID], list[UUID], list[UUID]]:
     provider = getattr(
         request.app.state,
@@ -889,7 +889,7 @@ def get_interview_availability(
     date_to: datetime = Query(alias="to"),
     participant_ids: list[str] = Query(),
     timezone_name: str = Query(alias="timezone"),
-    buffer: int = Query(15, ge=0, le=240),
+    buffer: int = Query(0, ge=0, le=240),
     exclude: UUID | None = None,
 ):
     principal = _principal(request)

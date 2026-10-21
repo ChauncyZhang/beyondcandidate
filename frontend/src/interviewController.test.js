@@ -285,6 +285,18 @@ test("requests privacy-safe availability with range, participants, buffer, timez
   assert.equal(calls[0].path, `/api/v1/interview-availability?from=2026-07-13T00%3A00%3A00%2B08%3A00&to=2026-07-19T23%3A59%3A59%2B08%3A00&participant_ids=${USER_ID}&timezone=Asia%2FShanghai&buffer=15&exclude=${INTERVIEW_ID}`);
 });
 
+test("default availability and conflict checks do not insert an implicit buffer", async () => {
+  const { client, calls } = queuedClient([{ data: { participants: [] } }, { data: { hard: [], soft: [] } }, { data: { hard: [], soft: [] } }]);
+  const controller = createInterviewController({ client });
+  const availability = await controller.availability({ from: "2099-07-13", to: "2099-07-19", participantIds: [USER_ID], timezone: "Asia/Shanghai" });
+  assert.equal(new URL(calls[0].path, "https://example.test").searchParams.get("buffer"), "0");
+  assert.equal(availability.bufferMinutes, 0);
+  await controller.checkConflicts(INTERVIEW_ID, { date: "2099-07-13", time: "14:00", duration: 60, timezone: "Asia/Shanghai", participantIds: [USER_ID] });
+  assert.equal(calls[1].options.body.buffer_minutes, 0);
+  await controller.checkConflicts(INTERVIEW_ID, { date: "2099-07-13", time: "14:00", duration: 60, timezone: "Asia/Shanghai", participantIds: [USER_ID], bufferMinutes: 15 });
+  assert.equal(calls[2].options.body.buffer_minutes, 15);
+});
+
 test("serializes the exact adjacent-week availability range in the selected timezone", async () => {
   const { client, calls } = queuedClient([{ data: { participants: [] } }]);
   const controller = createInterviewController({ client });
@@ -457,7 +469,7 @@ test("checks conflicts, transitions, downloads calendar, and lists my tasks", as
   assert.equal(downloaded, calendar);
   assert.equal(tasks[0].interviewId, INTERVIEW_ID);
   assert.deepEqual(calls, [
-    { kind: "request", path: `/api/v1/interviews/${INTERVIEW_ID}/conflicts`, options: { method: "POST", body: { starts_at: "2026-07-15T10:00:00+08:00", ends_at: "2026-07-15T11:00:00+08:00", participant_ids: [USER_ID], buffer_minutes: 15 }, signal } },
+    { kind: "request", path: `/api/v1/interviews/${INTERVIEW_ID}/conflicts`, options: { method: "POST", body: { starts_at: "2026-07-15T10:00:00+08:00", ends_at: "2026-07-15T11:00:00+08:00", participant_ids: [USER_ID], buffer_minutes: 0 }, signal } },
     { kind: "request", path: `/api/v1/interviews/${INTERVIEW_ID}/transitions`, options: { method: "POST", body: { target: "confirmed", reason: "候选人确认" }, ifMatch: '"7"', idempotencyKey: "transition-key", signal } },
     { kind: "download", path: `/api/v1/interviews/${INTERVIEW_ID}/calendar-file`, options: { signal } },
     { kind: "request", path: "/api/v1/me/tasks", options: { signal } },
@@ -570,7 +582,7 @@ test("checks a new schedule through the application-scoped conflict endpoint", a
         starts_at: "2026-07-15T10:00:00+08:00",
         ends_at: "2026-07-15T11:00:00+08:00",
         participant_ids: [USER_ID],
-        buffer_minutes: 15,
+        buffer_minutes: 0,
       },
     },
   }]);
