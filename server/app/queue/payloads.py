@@ -135,6 +135,8 @@ class PayloadPolicyRegistry:
 
 
 DEFAULT_PAYLOAD_POLICIES = PayloadPolicyRegistry()
+PASSWORD_RECOVERY_PAYLOAD = PayloadSchema({"organization_id": OpaqueIdField(), "request_id": OpaqueIdField()})
+DEFAULT_PAYLOAD_POLICIES.register_job("identity.password_recovery", PASSWORD_RECOVERY_PAYLOAD)
 DEFAULT_PAYLOAD_POLICIES.register_job("communications.send_email", PayloadSchema({"organization_id":OpaqueIdField(),"delivery_id":OpaqueIdField()}))
 DEFAULT_PAYLOAD_POLICIES.register_job("screening.parse_item", PayloadSchema({"organization_id":OpaqueIdField(),"screening_item_id":OpaqueIdField(),"parser_version":IdentifierField()}))
 DEFAULT_PAYLOAD_POLICIES.register_job("screening.score_item", PayloadSchema({"organization_id":OpaqueIdField(),"screening_item_id":OpaqueIdField(),"jd_version_id":OpaqueIdField(),"rule_version_id":OpaqueIdField(),"rule_engine_version":IdentifierField()}))

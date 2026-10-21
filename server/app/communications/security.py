@@ -25,6 +25,11 @@ class EmailSecretCipher:
         self._recipient_cipher = Fernet(base64.urlsafe_b64encode(derive(b"recipient")))
         self._attachment_cipher = Fernet(base64.urlsafe_b64encode(derive(b"attachment-snapshot")))
         self._idempotency_key = derive(b"idempotency-hmac")
+        self._password_reset_key = derive(b"password-reset-token-v1")
+
+    def raw_password_reset_token(self, reset_id) -> str:
+        digest = hmac.new(self._password_reset_key, str(reset_id).encode("ascii"), hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
     @staticmethod
     def _encrypt(cipher: Fernet, value: str) -> bytes:

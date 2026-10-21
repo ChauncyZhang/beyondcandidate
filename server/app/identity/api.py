@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import SQLAlchemyError
 
 from server.app.identity.service import (
     AccountTemporarilyLocked,
@@ -36,6 +37,17 @@ class LoginRequest(BaseModel):
 class InvitationAcceptRequest(BaseModel):
     token: str = Field(min_length=20, max_length=512)
     password: str = Field(min_length=12, max_length=128)
+
+
+class PasswordResetRequest(BaseModel):
+    organization_slug: str = Field(min_length=1, max_length=100)
+    email: str = Field(min_length=3, max_length=320)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        from server.app.communications.security import EmailSecretCipher
+        return EmailSecretCipher.normalize_email(value.strip())
 
 
 class PasswordChangeRequest(BaseModel):
@@ -149,6 +161,24 @@ def accept_password_reset(payload: InvitationAcceptRequest, request: Request):
             "The password reset link is invalid or expired.",
         )
     return {"data": registration}
+
+
+@router.post("/auth/password-reset/request", status_code=202)
+def request_password_reset(payload: PasswordResetRequest, request: Request):
+    from server.app.identity.password_recovery import request_password_reset as issue
+
+    if not allowed_origin(request):
+        return problem(request, 403, "csrf_validation_failed", "Request origin or CSRF token is invalid.")
+    settings = request.app.state.settings
+    if not settings.offer_public_base_url:
+        return problem(request, 503, "password_reset_unavailable", "Password recovery is temporarily unavailable.")
+    try:
+        issue(request.app.state.identity_service, request.app.state.email_secret_cipher,
+            settings, payload.organization_slug, payload.email, trace_id=request.state.trace_id,
+            network=request.headers.get("x-real-ip") or (request.client.host if request.client else None))
+    except SQLAlchemyError:
+        return problem(request, 503, "password_reset_unavailable", "Password recovery is temporarily unavailable.")
+    return JSONResponse({"data": {"requested": True}}, status_code=202, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/me")

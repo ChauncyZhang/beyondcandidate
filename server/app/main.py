@@ -250,6 +250,7 @@ def create_app(
                 "/api/v1/auth/login",
                 "/api/v1/auth/invitations/accept",
                 "/api/v1/auth/password-reset/accept",
+                "/api/v1/auth/password-reset/request",
                 "/api/v1/auth/feishu/authorize",
             }:
                 token = session_token(request)

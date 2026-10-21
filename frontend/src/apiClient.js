@@ -232,6 +232,10 @@ export function createApiClient({ fetchImpl = globalThis.fetch } = {}) {
       const response = await request(`/api/v1/settings/users/${encodeURIComponent(id)}/password-reset`, { method: "POST" });
       return response?.data ?? null;
     },
+    async requestPasswordResetEmail(body) {
+      const response = await request("/api/v1/auth/password-reset/request", { method: "POST", body });
+      return response?.data ?? null;
+    },
     async acceptPasswordReset(body) {
       const response = await request("/api/v1/auth/password-reset/accept", { method: "POST", body });
       return response?.data ?? null;

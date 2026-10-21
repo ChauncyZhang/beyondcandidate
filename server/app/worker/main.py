@@ -217,13 +217,28 @@ def build_communications_handler(settings: Settings):
     return EmailDeliveryJobHandler(sessions, None, EmailSecretCipher(key.encode()), offer_token_codec=OfferTokenCodec(key.encode()), offer_public_base_url=public_base, timeout_seconds=settings.email_smtp_timeout_seconds)
 
 
+def build_password_recovery_handler(settings: Settings):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from server.app.communications.security import EmailSecretCipher
+    from server.app.identity.password_recovery import PasswordRecoveryJobHandler
+
+    key = settings.email_encryption_key.get_secret_value()
+    if key == "change-me":
+        key = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    sessions = sessionmaker(create_engine(_sync_database_url(settings.database_url), pool_pre_ping=True), expire_on_commit=False)
+    return PasswordRecoveryJobHandler(sessions, EmailSecretCipher(key.encode()), settings)
+
+
 def build_terminal_callbacks():
     from server.app.communications.service import communications_terminal_callbacks
     from server.app.governance.terminal import governance_terminal_callbacks
     from server.app.reports.terminal import report_terminal_callbacks
     from server.app.screening.terminal import screening_terminal_callbacks
+    from server.app.identity.password_recovery import RECOVERY_JOB_TYPE, password_recovery_terminal_callback
 
     return {
+        RECOVERY_JOB_TYPE: password_recovery_terminal_callback,
         **communications_terminal_callbacks(),
         **screening_terminal_callbacks(),
         **report_terminal_callbacks(),
@@ -364,6 +379,7 @@ async def _run() -> None:
     handlers=build_screening_handlers(settings,storage_client,settings.object_storage_bucket)
     handlers.update(build_governance_handlers(settings, governance))
     handlers["communications.send_email"] = build_communications_handler(settings)
+    handlers["identity.password_recovery"] = build_password_recovery_handler(settings)
     from server.app.integrations.feishu.worker import build_feishu_outbox_handlers
     worker = Worker(DatabaseProbe(create_engine(settings.database_url)), ObjectStorageProbe(storage_client, settings.object_storage_bucket), interval_seconds=settings.worker_poll_interval_seconds, readiness_timeout_seconds=settings.readiness_timeout_seconds, worker_id=settings.worker_id, lease_seconds=settings.worker_lease_seconds, shutdown_timeout_seconds=settings.worker_shutdown_timeout_seconds, cancel_timeout_seconds=settings.worker_cancel_timeout_seconds, heartbeat_seconds=settings.worker_heartbeat_seconds, queue=gateway, handlers=handlers, outbox_handlers=build_feishu_outbox_handlers(settings))
     loop = asyncio.get_running_loop()

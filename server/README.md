@@ -30,6 +30,25 @@ When a local Python 3.12 interpreter is available, installing
 
 ### Invitation And Password Recovery
 
+The login page's **Forgot Password** action requests a reset email using the
+registered email and organization. The existing organization SMTP configuration
+and email queue deliver the one-hour, once-only link. The public request always
+acknowledges eligible, unknown, inactive and throttled accounts with the same
+response; it does not return a token or disclose whether an account exists.
+Requesting an email does not change the password, revoke sessions, or invalidate
+other valid links. The browser applies a 60-second resend cooldown; the backend
+also enforces limits across API workers. Administrator-issued recovery remains
+available as a fallback.
+
+Anonymous intake never queries or locks a user before acknowledging the request.
+For an existing organization it persists an encrypted email and an ID-only
+`identity.password_recovery` job, regardless of account eligibility. The worker
+checks eligibility and per-user limits later, then clears the temporary email
+on completion or terminal failure. Expiry remains one hour from the original
+request, not from delayed worker processing. Revision `0044_password_recovery`
+adds this intake table; drain recovery jobs before rolling back to an older
+worker that cannot handle them.
+
 Invitation links activate a pending member once and expire after 48 hours. An
 already active member must log in rather than reuse that invitation. If the
 password is forgotten, an authorized administrator can open **Settings >
@@ -42,6 +61,9 @@ use this action for themselves; the current-password change flow is unchanged.
 
 | Contract | Durable Regression |
 | --- | --- |
+| Login recovery preserves email, never submits a typed password, handles manual organization entry, and offers safe failure/retry and mobile layout | `frontend/src/forgotPassword.test.js`, `frontend/src/ForgotPasswordUi.test.js` |
+| Anonymous requests do not disclose account state, preserve existing links, enforce server-side limits, and queue only opaque IDs; SMTP rendering produces a usable once-only link without persisting it | `server/tests/test_password_recovery.py` |
+| Concurrent recovery requests respect shared network/user limits; a worker waiting for the user lock rereads token expiry before sending | `server/tests/test_password_recovery_postgres.py` |
 | Activation remains once-only; consumed invitations offer login recovery; successful activation removes the token before external navigation | `frontend/src/PasswordResetUi.test.js`, `frontend/src/InvitationUi.test.js`, `server/tests/test_password_invitations.py`, `server/tests/test_invitation_reissue.py` |
 | Active-member reset requires current administrator authority and tenant scope; issuance preserves the account; token purposes cannot cross-use; consumption revokes sessions and clears lockout | `server/tests/test_password_reset.py`, `frontend/src/passwordReset.test.js` |
 | Privilege or password changes invalidate older reset links; a concurrent old-session password change cannot overwrite a completed reset | `server/tests/test_password_reset.py`, `server/tests/test_password_reset_postgres.py` |
@@ -52,8 +74,11 @@ Focused entries (included in the normal frontend/backend test discovery):
 
 ```powershell
 python -m pytest server/tests/test_password_reset.py server/tests/test_password_invitations.py server/tests/test_invitation_reissue.py server/tests/test_identity.py server/tests/test_identity_management.py -q
+python -m pytest server/tests/test_password_recovery.py server/tests/test_communications_api.py -q
+python -m pytest server/tests/test_queue.py server/tests/test_queue_review.py server/tests/test_worker.py -q
 cd frontend
 node --test --test-concurrency=1 src/passwordReset.test.js src/PasswordResetUi.test.js src/invitation.test.js src/InvitationUi.test.js
+node --test --test-concurrency=1 src/forgotPassword.test.js src/ForgotPasswordUi.test.js
 ```
 
 The browser tests use mocked HTTP responses; they do not issue real reset links
@@ -66,6 +91,13 @@ Do not run it against a shared or production database. Revision
 `0043_password_reset` is forward-only. Before rolling back to code that predates
 purpose checks, expire all outstanding password-reset tokens through an
 explicitly authorized operational action.
+
+The separate self-service concurrency check requires
+`PASSWORD_RECOVERY_POSTGRES_URL` pointing to an initially empty disposable
+PostgreSQL database. Run
+`python -m pytest server/tests/test_password_recovery_postgres.py -q` from the
+repository root; it upgrades that isolated database and retains synthetic data.
+It does not contact a real mailbox or production database.
 
 ### Interview adjacency regression
 

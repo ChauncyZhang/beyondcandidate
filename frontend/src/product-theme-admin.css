@@ -1145,6 +1145,8 @@
 .login-page .login-submit { width: 100%; min-height: 44px; justify-content: center; }
 .login-page .login-form small { color: var(--muted); font-size: 12px; }
 .login-page .login-form .field-error { color: var(--red); }
+.login-page .login-forgot-password { justify-self: end; padding: 0; min-height: 24px; font-size: 13px; }
+.login-page .login-recovery-success { color: var(--ink-secondary); }
 .login-page .login-footnote { margin: 15px 0 0; color: var(--muted); font-size: 12px; text-align: center; }
 
 .access-denied-page .access-denied-card { text-align: center; }

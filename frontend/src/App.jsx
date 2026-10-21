@@ -261,7 +261,7 @@ export function App({ controller = sessionController, screeningController = defa
   if (resetToken) return <InviteAcceptView key={resetToken} mode="password-reset" token={resetToken} client={accountClient} onAccepted={(email) => { window.history.replaceState(null, "", "/"); setAcceptedEmail(email); setResetToken(""); if (session.status !== "anonymous") window.location.assign("/"); }} />;
   if (session.status === "anonymous") {
     if (inviteToken) return <InviteAcceptView token={inviteToken} client={accountClient} onAccepted={(email) => { window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`); setAcceptedEmail(email); setInviteToken(""); }} />;
-    return <LoginView error={session.error} retryAfterSeconds={session.retryAfterSeconds} submitting={session.submitting} initialEmail={acceptedEmail} onLogin={handleLogin} />;
+    return <LoginView error={session.error} retryAfterSeconds={session.retryAfterSeconds} submitting={session.submitting} initialEmail={acceptedEmail} onLogin={handleLogin} client={accountClient} />;
   }
   if (session.status !== "authenticated") {
     const identity = getSessionIdentity(session.user, null);

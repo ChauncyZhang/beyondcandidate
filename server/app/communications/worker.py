@@ -1,4 +1,5 @@
 import logging
+import hmac
 import uuid
 from datetime import datetime, timezone
 from html import escape
@@ -11,7 +12,9 @@ from server.app.communications.models import EmailDelivery, EmailProviderConfig
 from server.app.communications.provider import MailMessage, PermanentMailError, SmtpMailProvider, TemporaryMailError
 from server.app.communications.security import EmailSecretCipher
 from server.app.communications.service import EMAIL_JOB_PAYLOAD, INTERVIEW_FEISHU_WAIT_ATTEMPTS, communications_terminal_callbacks, mark_delivery_failed
-from server.app.identity.models import Organization
+from server.app.identity.models import Organization, PasswordInvitation, User, UserStatus
+from server.app.identity.security import hash_token
+from server.app.identity.service import Clock
 from server.app.integrations.feishu.models import FeishuInterviewSync
 from server.app.interviews.domain import replace_calendar_location
 from server.app.interviews.models import Interview
@@ -207,10 +210,47 @@ def _interview_html_body(*, brand_name: str, subject: str, body: str, kind: str)
 
 
 class EmailDeliveryJobHandler:
-    def __init__(self, sessions, provider, cipher: EmailSecretCipher, *, offer_token_codec=None, offer_public_base_url: str | None = None, timeout_seconds: float = 10) -> None:
+    def __init__(self, sessions, provider, cipher: EmailSecretCipher, *, offer_token_codec=None, offer_public_base_url: str | None = None, timeout_seconds: float = 10, clock=None) -> None:
         self._sessions, self._provider, self._cipher = sessions, provider, cipher
         self._offer_token_codec, self._offer_public_base_url = offer_token_codec, offer_public_base_url
         self._timeout = timeout_seconds
+        self._clock = clock or Clock()
+
+    def _password_reset_body(self, db, delivery, recipient):
+        from server.app.identity.password_recovery import LINK_PLACEHOLDER
+
+        user_id = db.scalar(select(PasswordInvitation.user_id).where(
+            PasswordInvitation.id == delivery.resource_id,
+            PasswordInvitation.organization_id == delivery.organization_id,
+        ))
+        if user_id is None or not self._offer_public_base_url:
+            return None
+        # Lifecycle writers lock the user first; only read token state afterwards.
+        user = db.scalar(select(User).where(User.id == user_id,
+            User.organization_id == delivery.organization_id).with_for_update(of=User))
+        reset = db.scalar(select(PasswordInvitation).where(
+            PasswordInvitation.id == delivery.resource_id,
+            PasswordInvitation.organization_id == delivery.organization_id,
+        ).execution_options(populate_existing=True))
+        if reset is None:
+            return None
+        organization = db.get(Organization, delivery.organization_id)
+        raw = self._cipher.raw_password_reset_token(reset.id)
+        expires = reset.expires_at
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if (
+            reset.purpose != "password_reset" or reset.used_at is not None
+            or expires <= self._clock.current_time()
+            or user is None or user.status != UserStatus.ACTIVE
+            or organization is None or organization.status != "active"
+            or reset.reset_authorization_version != user.authorization_version
+            or recipient.strip().casefold() != user.normalized_email
+            or not hmac.compare_digest(reset.token_hash, hash_token(raw))
+        ):
+            return None
+        link = f"{self._offer_public_base_url.rstrip('/')}/#reset-password={raw}"
+        return delivery.rendered_body.replace(LINK_PLACEHOLDER, link)
 
     async def __call__(self, job) -> None:
         try:
@@ -238,6 +278,8 @@ class EmailDeliveryJobHandler:
                 EmailProviderConfig.id == delivery.provider_config_id,
                 EmailProviderConfig.version == delivery.provider_config_version,
             ))
+            if delivery.resource_type == "password_reset":
+                config = latest_config
             if latest_config is None or not latest_config.enabled or config is None or not config.enabled:
                 mark_delivery_failed(db, delivery, "email_configuration_unavailable")
                 setup_error = "email_configuration_unavailable"
@@ -255,6 +297,13 @@ class EmailDeliveryJobHandler:
                     setup_error = "email_secret_unavailable"
                 else:
                     body = delivery.rendered_body
+                    if delivery.resource_type == "password_reset":
+                        body = self._password_reset_body(db, delivery, recipient)
+                        if body is None:
+                            delivery.status = "cancelled"
+                            delivery.safe_error_code = "password_reset_obsolete"
+                            delivery.version += 1
+                            return
                     if delivery.resource_type in INTERVIEW_EMAIL_STYLES:
                         body, attachment_content, superseded = _prepare_interview_delivery(
                             db,
@@ -290,10 +339,10 @@ class EmailDeliveryJobHandler:
                         )
                     message = MailMessage(
                         recipient=recipient,
-                        sender_email=delivery.sender_email,
-                        sender_name=delivery.sender_name,
-                        reply_to_email=delivery.reply_to_email,
-                        reply_to_name=delivery.reply_to_name,
+                        sender_email=(config.sender_address or delivery.sender_email) if delivery.resource_type == "password_reset" else delivery.sender_email,
+                        sender_name=(config.sender_name or delivery.sender_name) if delivery.resource_type == "password_reset" else delivery.sender_name,
+                        reply_to_email=config.default_reply_to_email if delivery.resource_type == "password_reset" else delivery.reply_to_email,
+                        reply_to_name=config.default_reply_to_name if delivery.resource_type == "password_reset" else delivery.reply_to_name,
                         subject=delivery.rendered_subject,
                         body=body,
                         message_id=f"<email-{delivery.id}@beyondcandidate.internal>",

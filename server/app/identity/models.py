@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import CheckConstraint, JSON, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Index, Integer, String, UniqueConstraint, Uuid
+from sqlalchemy import CheckConstraint, JSON, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Index, Integer, LargeBinary, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -194,6 +194,24 @@ class PasswordInvitation(Base):
             ["organization_id", "user_id"],
             ["users.organization_id", "users.id"],
             ondelete="CASCADE",
+        ),
+    )
+
+
+class PasswordRecoveryRequest(Base):
+    __tablename__ = "password_recovery_requests"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"))
+    email_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    network_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id"),
+        CheckConstraint(
+            "(processed_at IS NULL AND email_ciphertext IS NOT NULL) OR "
+            "(processed_at IS NOT NULL AND email_ciphertext IS NULL)",
+            name="ck_password_recovery_requests_processed",
         ),
     )
 
