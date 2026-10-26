@@ -39,3 +39,8 @@ test("selects only active interviews overlapping the next seven days and sorts t
     ["ongoing", "later"],
   );
 });
+
+test("awaiting evaluation is not listed as an upcoming interview", () => {
+  const record = { id: "feedback", status: "待评价", startsAt: "2026-09-02T08:00:00Z", endsAt: "2026-09-02T09:00:00Z" };
+  assert.deepEqual(selectUpcomingInterviews([record], new Date("2026-09-02T08:30:00Z")), []);
+});

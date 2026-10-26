@@ -27,6 +27,7 @@ from server.app.integrations.feishu.notifications import schedule_feishu_notific
 from server.app.integrations.feishu.sync import schedule_interview_sync
 from server.app.interviews.domain import CalendarContact, build_calendar_invitation
 from server.app.interviews.availability import INTERNAL_AVAILABILITY_PROVIDER, privacy_safe_availability
+from server.app.interviews.status import effective_status, effective_status_expression
 from server.app.llm.redaction import redact_screening_text
 from server.app.interviews.models import (
     Interview,
@@ -453,7 +454,9 @@ def _realtime_availability_conflicts(
     return list(dict.fromkeys(hard)), list(dict.fromkeys(soft)), list(dict.fromkeys(unconfirmed))
 
 
-def _interview_data(db, interview: Interview) -> dict:
+def _interview_data(db, interview: Interview, *, now: datetime | None = None) -> dict:
+    now = now if now is not None else datetime.now(timezone.utc)
+    status = effective_status(interview, now=now)
     application = db.get(Application, interview.application_id)
     candidate = db.get(Candidate, application.candidate_id)
     job = db.get(Job, application.job_id)
@@ -524,7 +527,8 @@ def _interview_data(db, interview: Interview) -> dict:
         "ends_at": _aware(interview.ends_at).isoformat(),
         "location": interview.location,
         "meeting_url": interview.meeting_url,
-        "status": interview.status,
+        "status": status,
+        **({"workflow_status": interview.status} if status != interview.status else {}),
         "notification_status": interview.notification_status,
         "invitation_status": interview.invitation_status,
         "email_delivery": delivery_data,
@@ -954,6 +958,7 @@ def list_interviews(
     principal = _principal(request)
     if isinstance(principal, JSONResponse):
         return principal
+    now = datetime.now(timezone.utc)
     assigned = (
         exists().where(
             InterviewParticipant.organization_id == Interview.organization_id,
@@ -996,7 +1001,7 @@ def list_interviews(
         if application_id is not None:
             statement = statement.where(Interview.application_id == application_id)
         if status is not None:
-            statement = statement.where(Interview.status == status)
+            statement = statement.where(effective_status_expression(now=now) == status)
         if interviewer_id is not None:
             statement = statement.where(
                 exists().where(
@@ -1036,7 +1041,7 @@ def list_interviews(
             interviews = interviews[:limit]
         response = JSONResponse(
             {
-                "data": [_interview_data(db, interview) for interview in interviews],
+                "data": [_interview_data(db, interview, now=now) for interview in interviews],
                 "meta": {"limit": limit, "next_cursor": next_cursor},
             }
         )
@@ -2416,6 +2421,7 @@ def my_tasks(request: Request):
     principal = _principal(request)
     if isinstance(principal, JSONResponse):
         return principal
+    now = datetime.now(timezone.utc)
     if not _has_assignment_access(principal):
         response = JSONResponse({"data": [], "meta": {"count": 0}})
         response.headers["Cache-Control"] = "no-store"
@@ -2457,17 +2463,19 @@ def my_tasks(request: Request):
         ).all()
         data = [
             {
-                "id": f"{('feedback' if interview.status == 'pending_feedback' else 'interview')}:{interview.id}",
-                "type": "interview_feedback" if interview.status == "pending_feedback" else "interview",
+                "id": f"{('feedback' if status == 'pending_feedback' else 'interview')}:{interview.id}",
+                "type": "interview_feedback" if status == "pending_feedback" else "interview",
                 "interview_id": str(interview.id),
                 "application_id": str(application.id),
                 "candidate": {"id": str(candidate.id), "display_name": candidate.display_name},
                 "job": {"id": str(job.id), "title": job.title},
                 "round_name": interview.round_name,
                 "starts_at": _aware(interview.starts_at).isoformat(),
-                "status": interview.status,
+                "ends_at": _aware(interview.ends_at).isoformat(),
+                "status": status,
             }
             for participant, interview, application, candidate, job in rows
+            for status in (effective_status(interview, now=now),)
         ]
         response = JSONResponse({"data": data, "meta": {"count": len(data)}})
         response.headers["Cache-Control"] = "no-store"

@@ -2,12 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Clock3, Users } from "lucide-react";
 import { buildWeekDays, moveWeek, parseLocalDate, weekLabel, weekRange } from "./interviewDateUtils.js";
 import { interviewStatusLabel } from "./recruitingTerminology.js";
+import { useInterviewAutoRefresh } from "./useInterviewAutoRefresh.js";
 
-export function InterviewCalendar({ query, status, mineOnly, canSchedule, interviewerId, onLoadRange, onOpen }) {
+export function InterviewCalendar({ query, status, mineOnly, canSchedule, interviewerId, onLoadRange, onOpen, controller }) {
   const [reference, setReference] = useState(new Date());
   const [selectedDay, setSelectedDay] = useState(() => buildWeekDays(new Date()).find((day) => day.isToday)?.key || buildWeekDays(new Date())[0].key);
   const [state, setState] = useState({ status: "loading", records: [], error: "" });
   const days = useMemo(() => buildWeekDays(reference), [reference]);
+  useInterviewAutoRefresh({ enabled: state.status === "ready", navigationKey: reference, records: state.records, setInterviewState: setState, controller });
 
   useEffect(() => {
     const abortController = new AbortController();
@@ -36,7 +38,7 @@ export function InterviewCalendar({ query, status, mineOnly, canSchedule, interv
     <div className="mobile-date-strip" aria-label="选择日历日期">{days.map((day) => <button type="button" key={day.key} className={selectedDay === day.key ? "active" : ""} onClick={() => setSelectedDay(day.key)}><span>{day.weekday}</span><strong>{day.date.getDate()}</strong></button>)}</div>
     {state.status === "error" && <div className="workbench-inline-error" role="alert">{state.error}<button type="button" onClick={() => selectReference(new Date(reference))}>重试</button></div>}
     {state.status === "loading" && !state.records.length && <div className="calendar-loading" role="status"><CalendarDays size={20} />正在加载所选周全部面试</div>}
-    <div className="week-calendar full-week">{days.map((day) => { const items = filtered.filter((item) => item.date === day.key); return <section key={day.key} className={selectedDay === day.key ? "selected-day" : ""}><header><strong>{day.label}</strong><span>{day.weekday} · {items.length} 场</span></header><div>{items.map((item) => <button type="button" className={`calendar-interview ${item.status === "已完成" ? "complete" : item.notification === "发送失败" ? "failed" : ""}`} key={item.id} onClick={() => onOpen(item)}><span><Clock3 size={13} />{item.time} · {item.duration} 分钟</span><strong>{item.candidate}</strong><small>{item.position} · {item.round}</small><small><Users size={12} />{item.interviewers.join("、")}</small><span className="interview-status info">{interviewStatusLabel(item.feedbackStatus === "待反馈" ? item.feedbackStatus : item.status)}</span></button>)}{!items.length && <div className="calendar-empty-slot">暂无面试</div>}</div></section>; })}</div>
+    <div className="week-calendar full-week">{days.map((day) => { const items = filtered.filter((item) => item.date === day.key); return <section key={day.key} className={selectedDay === day.key ? "selected-day" : ""}><header><strong>{day.label}</strong><span>{day.weekday} · {items.length} 场</span></header><div>{items.map((item) => <button type="button" className={`calendar-interview ${item.status === "已完成" ? "complete" : item.notification === "发送失败" ? "failed" : ""}`} key={item.id} onClick={() => onOpen(item)}><span><Clock3 size={13} />{item.time} · {item.duration} 分钟</span><strong>{item.candidate}</strong><small>{item.position} · {item.round}</small><small><Users size={12} />{item.interviewers.join("、")}</small><span className={`interview-status ${item.status === "待评价" ? "warning" : "info"}`}>{interviewStatusLabel(item.status === "待评价" ? item.status : item.feedbackStatus === "待反馈" ? item.feedbackStatus : item.status)}</span></button>)}{!items.length && <div className="calendar-empty-slot">暂无面试</div>}</div></section>; })}</div>
   </div>;
 }
 

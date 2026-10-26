@@ -28,6 +28,27 @@ docker run --rm ux09-server-test
 When a local Python 3.12 interpreter is available, installing
 `server/requirements-dev.txt` and running `python -m pytest server/tests` is equivalent.
 
+### Interview Evaluation Timing
+
+Scheduled, rescheduled and confirmed interviews become `pending_feedback` in
+API projections when `ends_at <=` the server's current UTC time. The interface
+labels these interviews as awaiting evaluation. This is a read-only projection:
+it does not confirm attendance, submit feedback, change the application stage,
+or send external notifications. Draft and terminal states keep their meaning.
+An optional `workflow_status` preserves the stored status only when projection
+differs, so existing HR cancellation, no-show and completion controls remain
+available without reopening genuinely completed interviews.
+
+| Contract | Durable Regression |
+| --- | --- |
+| Exact end boundary, UTC equivalence, list filters, personal task classification and read-only feedback access | `server/tests/test_interview_elapsed.py` |
+| Awaiting-evaluation label, completed/cancelled preservation and exclusion from upcoming interviews | `frontend/src/interviewController.test.js`, `frontend/src/interviewDateUtils.test.js` |
+| Consistent list filter/calendar label, live time-boundary switching, and preserved HR management only for projected statuses | `frontend/src/FrontendClosure.test.js` (`awaiting evaluation`, `open interview calendar and list`) |
+| Open-page time-boundary refresh, stale-response protection, preserved pagination and independent partial-failure recovery | `frontend/src/InterviewAutoRefresh.test.js` |
+
+These files participate in normal pytest/Node test discovery. Browser checks use
+mocked HTTP responses; they do not modify real interviews or validate Feishu.
+
 ### Invitation And Password Recovery
 
 The login page's **Forgot Password** action requests a reset email using the

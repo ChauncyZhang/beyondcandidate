@@ -16,7 +16,7 @@ import {
   Send,
   X,
 } from "lucide-react";
-import { buildWeekColumns, getInterviewPrimaryAction, isInWeek, isMyInterview } from "./interviewViewState.js";
+import { buildWeekColumns, getInterviewManagementStatus, getInterviewPrimaryAction, isInWeek, isMyInterview } from "./interviewViewState.js";
 import { InterviewCalendar } from "./InterviewCalendar.jsx";
 import { InterviewFeedbackWorkspace } from "./InterviewFeedbackWorkspace.jsx";
 import { ScheduleWorkspace } from "./ScheduleWorkspace.jsx";
@@ -108,8 +108,9 @@ export function isAmbiguousFeedbackSubmitError(error) {
 
 export function getInterviewTerminalActions(record, canSchedule) {
   if (!canSchedule || !record) return [];
-  if (record.status === "待确认") return [{ target: "cancelled", label: "取消面试" }];
-  if (["已安排", "已确认"].includes(record.status)) {
+  const status = getInterviewManagementStatus(record);
+  if (status === "待确认") return [{ target: "cancelled", label: "取消面试" }];
+  if (["已安排", "已确认"].includes(status)) {
     return [
       { target: "cancelled", label: "取消面试" },
       { target: "no_show", label: "标记未到场" },
@@ -119,7 +120,7 @@ export function getInterviewTerminalActions(record, canSchedule) {
 }
 
 function StatusTag({ status, title = "" }) {
-  const tone = status === "已完成" || status === "已提交" || status === "已发送" ? "success" : status === "发送失败" || status === "已取消" || status === "未到场" ? "danger" : status === "待反馈" || status === "待确认" || status === "未发送" ? "warning" : "info";
+  const tone = status === "已完成" || status === "已提交" || status === "已发送" ? "success" : status === "发送失败" || status === "已取消" || status === "未到场" ? "danger" : status === "待评价" || status === "待反馈" || status === "待确认" || status === "未发送" ? "warning" : "info";
   return <span className={`interview-status ${tone}`} title={title || undefined}>{interviewStatusLabel(status)}</span>;
 }
 
@@ -132,7 +133,7 @@ function InterviewDeliveryState({ record }) {
   </span>;
 }
 
-function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor, loadingMore, onLoadMore, onLoadRange, onSchedule, onFeedback, onDownload, onTransition, onResendEmail, resendState, canSchedule = true, interviewerId, pageActionHost }) {
+function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor, loadingMore, onLoadMore, onLoadRange, onSchedule, onFeedback, onDownload, onTransition, onResendEmail, resendState, canSchedule = true, interviewerId, pageActionHost, controller }) {
   const [view, setView] = useState("list");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("全部状态");
@@ -182,7 +183,7 @@ function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor
     {loadStatus === "ready" && records.length === 0 && <div className="workbench-status empty"><CalendarDays size={22} /><div><strong>暂无面试安排</strong><p>{canSchedule ? "可以从待安排候选人创建第一场面试。" : "当前没有分配给你的面试或反馈任务。"}</p></div></div>}
     {records.length > 0 && loadStatus === "error" && <div className="workbench-inline-error" role="alert"><CircleAlert size={17} /><span>{error}，当前展示上次成功数据。</span><button type="button" onClick={onRetry}>重新加载</button></div>}
     {(records.length > 0 || loadStatus === "ready") && <section className="interview-list-panel">
-      <div className="interview-toolbar"><div className="segmented-control" aria-label="面试视图"><button type="button" className={view === "list" ? "active" : ""} onClick={() => setView("list")}><List size={15} />列表</button><button type="button" className={view === "calendar" ? "active" : ""} onClick={() => setView("calendar")}><CalendarDays size={15} />周日历</button></div><label className="interview-search"><Search size={16} /><input aria-label="搜索面试" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索候选人、职位或面试官" /></label><label className="interview-select"><select aria-label="日期筛选" value={date} onChange={(event) => setDate(event.target.value)}><option>本周</option><option>全部日期</option></select><ChevronDown size={14} /></label><label className="interview-select"><select aria-label="状态筛选" value={status} onChange={(event) => setStatus(event.target.value)}><option>全部状态</option>{["已安排", "待确认", "已完成", "待反馈", "已提交", "已取消", "未到场"].map((item) => <option key={item} value={item}>{interviewStatusLabel(item)}</option>)}</select><ChevronDown size={14} /></label>{canSchedule && <label className="mine-toggle"><input type="checkbox" checked={mineOnly} onChange={(event) => setMineOnly(event.target.checked)} />仅看我的面试</label>}</div>
+      <div className="interview-toolbar"><div className="segmented-control" aria-label="面试视图"><button type="button" className={view === "list" ? "active" : ""} onClick={() => setView("list")}><List size={15} />列表</button><button type="button" className={view === "calendar" ? "active" : ""} onClick={() => setView("calendar")}><CalendarDays size={15} />周日历</button></div><label className="interview-search"><Search size={16} /><input aria-label="搜索面试" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索候选人、职位或面试官" /></label><label className="interview-select"><select aria-label="日期筛选" value={date} onChange={(event) => setDate(event.target.value)}><option>本周</option><option>全部日期</option></select><ChevronDown size={14} /></label><label className="interview-select"><select aria-label="状态筛选" value={status} onChange={(event) => setStatus(event.target.value)}><option>全部状态</option>{["已安排", "待确认", "待评价", "已完成", "待反馈", "已提交", "已取消", "未到场"].map((item) => <option key={item} value={item}>{interviewStatusLabel(item)}</option>)}</select><ChevronDown size={14} /></label>{canSchedule && <label className="mine-toggle"><input type="checkbox" checked={mineOnly} onChange={(event) => setMineOnly(event.target.checked)} />仅看我的面试</label>}</div>
       {view === "list" ? <div className="interview-table">
         <div className="interview-table-head"><span>候选人</span><span>职位与轮次</span><span>时间与方式</span><span>面试官</span><span>面试状态</span><span>邮件 / 日历 / 反馈</span><span>待办</span></div>
         {filtered.map((record) => {
@@ -200,13 +201,13 @@ function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor
               {primaryAction && <button className="interview-primary-action" type="button" onClick={() => runPrimaryAction(record)}>{primaryAction.label}<ChevronRight size={14} /></button>}
               {emailActions.resend && <button type="button" disabled={emailAction?.status === "loading"} onClick={() => void onResendEmail(record)}><RefreshCw size={13} />{emailAction?.status === "loading" ? "正在重新发送" : "重新发送"}</button>}
               {emailAction?.error && <small className="interview-action-error" role="alert">{emailAction.error}</small>}
-              {canSchedule && ["已安排", "已确认"].includes(record.status) && <button type="button" onClick={() => onSchedule(record)}>改期</button>}
+              {canSchedule && ["已安排", "已确认"].includes(getInterviewManagementStatus(record)) && <button type="button" onClick={() => onSchedule(record)}>改期</button>}
               {getInterviewTerminalActions(record, canSchedule).map((action) => <button type="button" className="danger-link" key={action.target} onClick={() => requestTerminalTransition(record, action)}>{action.label}</button>)}
             </span>
           </div>;
         })}
         {filtered.length === 0 && <div className="interview-empty"><CalendarDays size={24} /><strong>没有符合条件的面试</strong><span>调整筛选条件或安排新的面试。</span></div>}
-      </div> : <InterviewCalendar query={query} status={status} mineOnly={mineOnly} canSchedule={canSchedule} interviewerId={interviewerId} onLoadRange={onLoadRange} onOpen={openCalendarInterview} />}
+      </div> : <InterviewCalendar query={query} status={status} mineOnly={mineOnly} canSchedule={canSchedule} interviewerId={interviewerId} onLoadRange={onLoadRange} onOpen={openCalendarInterview} controller={controller} />}
       {nextCursor && <footer className="interview-pagination"><button className="button secondary" type="button" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? "正在加载" : "加载更多面试"}</button></footer>}
     </section>}
     {transitionDraft && <div className="modal-backdrop" role="presentation" onMouseDown={() => !transitioning && setTransitionDraft(null)}><section className="modal interview-transition-modal" role="dialog" aria-modal="true" aria-label={transitionDraft.label} onMouseDown={(event) => event.stopPropagation()}><header className="modal-header"><div><h2>{transitionDraft.label}</h2><p>{transitionDraft.record.candidate} · {transitionDraft.record.position}</p></div><button className="icon-button" type="button" aria-label="关闭" disabled={transitioning} onClick={() => setTransitionDraft(null)}><X size={20} /></button></header><div className="modal-body"><label>操作原因 <span>*</span><textarea rows="4" value={reason} disabled={transitioning} onChange={(event) => setReason(event.target.value)} placeholder="请填写操作原因" /></label>{!reason.trim() && <small className="field-hint">原因会写入面试历史，便于 HR 后续追踪。</small>}</div><footer className="modal-footer"><button className="button secondary" type="button" disabled={transitioning} onClick={() => setTransitionDraft(null)}>取消</button><button className="button danger" type="button" disabled={transitioning || !reason.trim()} onClick={() => void submitTerminalTransition()}>{transitioning ? "正在保存" : "确认操作"}</button></footer></section></div>}
@@ -508,5 +509,5 @@ export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSel
 
   if (mode === "schedule" && canSchedule) return <div className="interview-schedule-recovery">{correctionNotice}<ScheduleWorkspace key={selectedInterview?.id || scheduleCandidateId || "new-interview"} record={selectedInterview} candidateId={scheduleCandidateId} candidates={candidates} participantOptions={participantOptions} participantStatus={participantStatus} onRetryParticipants={() => setParticipantReloadKey((value) => value + 1)} onBack={backToList} backLabel={backLabel} onSave={saveRecord} onGetAvailability={(filters, options) => controller.availability(filters, options)} onNotify={onNotify} />{correctionDialog}</div>;
   if (mode === "feedback" && selectedInterview) return <FeedbackForm record={selectedInterview} onBack={backToList} backLabel={backLabel} onSaved={async (_record, feedback) => { await onRecordsChanged({ ...selectedInterview, feedback, feedbackStatus: "已提交" }); }} onNotify={onNotify} actorName={actorName} userId={actorId} controller={controller} />;
-  return <>{correctionNotice}<InterviewList records={records} status={status} error={error} onRetry={onRetry} nextCursor={nextCursor} loadingMore={loadingMore} onLoadMore={onLoadMore} onLoadRange={(range, options) => controller.listRange({ ...range, timezone: "Asia/Shanghai" }, options)} onSchedule={openSchedule} onFeedback={openFeedback} onDownload={(record) => void downloadCalendar(record)} onTransition={transitionRecord} onResendEmail={resendCandidateEmail} resendState={resendState} canSchedule={canSchedule} interviewerId={actorId} pageActionHost={pageActionHost} />{correctionDialog}</>;
+  return <>{correctionNotice}<InterviewList records={records} status={status} error={error} onRetry={onRetry} nextCursor={nextCursor} loadingMore={loadingMore} onLoadMore={onLoadMore} onLoadRange={(range, options) => controller.listRange({ ...range, timezone: "Asia/Shanghai" }, options)} onSchedule={openSchedule} onFeedback={openFeedback} onDownload={(record) => void downloadCalendar(record)} onTransition={transitionRecord} onResendEmail={resendCandidateEmail} resendState={resendState} canSchedule={canSchedule} interviewerId={actorId} pageActionHost={pageActionHost} controller={controller} />{correctionDialog}</>;
 }

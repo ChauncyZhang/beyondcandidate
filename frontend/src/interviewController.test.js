@@ -87,7 +87,8 @@ test("lists interviews from the server envelope and maps display fields", async 
     interviewers: ["张小北"],
     participants: [{ id: USER_ID, name: "张小北", role: "interviewer", requiredFeedback: true }],
     location: "https://meeting.example.com/one",
-    status: "已完成",
+    status: "待评价",
+    workflowStatus: "待评价",
     notification: "已发送",
     feishuNotification: "已发送",
     emailDelivery: null,
@@ -103,6 +104,39 @@ test("lists interviews from the server envelope and maps display fields", async 
   });
   assert.equal(result.count, 1);
   assert.equal(result.nextCursor, "CURSOR-2");
+});
+
+test("pending feedback is displayed as awaiting evaluation while terminal statuses remain unchanged", async () => {
+  const { client } = queuedClient([{ data: [
+    apiInterview({ status: "pending_feedback" }),
+    apiInterview({ id: "completed", status: "feedback_completed" }),
+    apiInterview({ id: "cancelled", status: "cancelled" }),
+    apiInterview({ id: "no-show", status: "no_show" }),
+  ] }]);
+  const { records } = await createInterviewController({ client }).list();
+  assert.deepEqual(records.map(({ status, feedbackStatus }) => [status, feedbackStatus]), [
+    ["待评价", "待反馈"], ["已完成", "已提交"], ["已取消", "未开始"], ["未到场", "未开始"],
+  ]);
+});
+
+test("interview tasks retain exact end time for automatic evaluation refresh", async () => {
+  const { client } = queuedClient([{ data: [{ id: `interview:${INTERVIEW_ID}`, interview_id: INTERVIEW_ID,
+    type: "interview", status: "scheduled", starts_at: "2026-10-26T02:00:00Z", ends_at: "2026-10-26T03:00:00Z" }] }]);
+  const [task] = await createInterviewController({ client }).listMyTasks();
+  assert.equal(task.endsAt, "2026-10-26T03:00:00Z");
+  assert.equal(task.status, "scheduled");
+  assert.equal(task.type, "interview");
+});
+
+test("elapsed display status retains the server workflow status for existing management actions", async () => {
+  const { client } = queuedClient([{ data: [apiInterview({ status: "pending_feedback", workflow_status: "confirmed" }), apiInterview({ status: "pending_feedback" })] }, { data: apiInterview({ status: "feedback_completed" }) }]);
+  const controller = createInterviewController({ client });
+  const { records } = await controller.list();
+  assert.equal(records[0].status, "待评价");
+  assert.equal(records[0].workflowStatus, "已确认");
+  assert.equal(records[1].workflowStatus, "待评价");
+  const completed = { ...records[0], ...await controller.get(INTERVIEW_ID) };
+  assert.equal(completed.workflowStatus, "已完成", "completion must clear the earlier management capability during merges");
 });
 
 test("loads every interview for one application without relying on the global first page", async () => {

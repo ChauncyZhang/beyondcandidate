@@ -527,6 +527,94 @@ test("candidate list keeps long stage labels separate from AI scores", { timeout
   } finally { await context.close(); }
 });
 
+test("awaiting evaluation is labeled consistently in list filters and calendar without completion actions", { timeout: 30000 }, async () => {
+  const interview = {
+    id: "11111111-1111-4111-8111-111111111111", application_id: "22222222-2222-4222-8222-222222222222",
+    candidate: { id: "33333333-3333-4333-8333-333333333333", display_name: "待评价候选人" },
+    job: { id: notificationJobId, title: "AI 工程师" }, round_name: "一面", method: "phone", timezone: "Asia/Shanghai",
+    starts_at: "2026-10-26T02:00:00Z", ends_at: "2026-10-26T03:00:00Z", status: "pending_feedback", version: 1,
+    participants: [{ user_id: users[0].id, display_name: "面试官", role: "interviewer", required_feedback: true }],
+  };
+  const writes = [];
+  const { context, page } = await openPage({ interviews: [interview], onRequest(_path, request) { if (request.method() !== "GET") writes.push(request.method()); } });
+  try {
+    await page.clock.setFixedTime(new Date("2026-10-26T04:00:00Z"));
+    await page.goto(`${baseUrl}interviews`);
+    await page.getByLabel("日期筛选").selectOption("全部日期");
+    await page.getByLabel("状态筛选").selectOption("待评价");
+    const row = page.locator(".interview-table-row");
+    await row.getByText("待评价", { exact: true }).waitFor();
+    assert.equal(await row.getByRole("button", { name: "填写评价", exact: false }).count(), 1);
+    assert.equal(await row.getByRole("button", { name: /确认面试|完成面试|改期/ }).count(), 0);
+    await page.getByRole("button", { name: "周日历", exact: true }).click();
+    await page.locator(".calendar-interview .interview-status.warning").getByText("待评价", { exact: true }).waitFor();
+    assert.deepEqual(writes, []);
+  } finally { await context.close(); }
+});
+
+test("elapsed awaiting evaluation retains HR management without granting it to completed interviews", { timeout: 30000 }, async () => {
+  const base = {
+    application_id: "22222222-2222-4222-8222-222222222222", job: { id: notificationJobId, title: "AI 工程师" },
+    round_name: "一面", method: "phone", timezone: "Asia/Shanghai", starts_at: "2026-10-26T02:00:00Z", ends_at: "2026-10-26T03:00:00Z",
+    status: "pending_feedback", participants: [{ user_id: "other", display_name: "面试官", role: "interviewer", required_feedback: true }], version: 1,
+  };
+  const { context, page } = await openPage({ interviews: [
+    { ...base, id: "elapsed", workflow_status: "confirmed", candidate: { id: "candidate-1", display_name: "自动到期待评价" } },
+    { ...base, id: "completed", candidate: { id: "candidate-2", display_name: "已手动完成面试" } },
+  ] });
+  try {
+    await page.goto(`${baseUrl}interviews`);
+    await page.getByLabel("日期筛选").selectOption("全部日期");
+    const elapsed = page.locator(".interview-table-row").filter({ has: page.getByText("自动到期待评价", { exact: true }) });
+    await elapsed.getByText("待评价", { exact: true }).waitFor();
+    for (const name of ["完成面试", "改期", "取消面试", "标记未到场"]) {
+      assert.equal(await elapsed.getByRole("button", { name, exact: false }).count(), 1);
+    }
+    const completed = page.locator(".interview-table-row").filter({ has: page.getByText("已手动完成面试", { exact: true }) });
+    assert.equal(await completed.locator(".interview-row-actions").getByRole("button", { name: /完成面试|改期|取消面试|标记未到场/ }).count(), 0);
+    await elapsed.getByRole("button", { name: "标记未到场", exact: true }).click();
+    await page.getByRole("dialog", { name: "标记未到场", exact: true }).getByLabel(/操作原因/).waitFor();
+  } finally { await context.close(); }
+});
+
+test("an open interview calendar and list switch to evaluation at the end without manual completion", { timeout: 30000 }, async () => {
+  let elapsed = false;
+  const requests = [];
+  const interview = {
+    id: "11111111-1111-4111-8111-111111111111", application_id: "22222222-2222-4222-8222-222222222222",
+    candidate: { id: "33333333-3333-4333-8333-333333333333", display_name: "自动评价候选人" },
+    job: { id: notificationJobId, title: "AI 工程师" }, round_name: "一面", method: "phone", timezone: "Asia/Shanghai",
+    starts_at: "2026-10-26T02:00:00Z", ends_at: "2026-10-26T03:00:00Z", status: "scheduled", version: 1,
+    participants: [{ user_id: users[0].id, display_name: "面试官", role: "interviewer", required_feedback: true }],
+  };
+  const response = () => ({ ...interview, status: elapsed ? "pending_feedback" : "scheduled" });
+  const { context, page } = await openPage({ interviews: [interview], interviewRoute: () => ({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [response()], meta: { next_cursor: null } }) }), onRequest(_path, request) { requests.push(request.method()); } });
+  page.setDefaultTimeout(5000);
+  await context.route(`**/api/v1/interviews/${interview.id}`, route => {
+    requests.push(route.request().method());
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: response() }) });
+  });
+  try {
+    const now = Date.parse("2026-10-26T02:59:59Z");
+    await page.clock.install({ time: now });
+    await page.clock.pauseAt(now);
+    await page.goto(`${baseUrl}interviews`);
+    await page.locator(".interview-table-row").getByText("面试已安排", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "周日历", exact: true }).evaluate(element => element.click());
+    const card = page.locator(".calendar-interview");
+    await card.getByText("面试已安排", { exact: true }).waitFor();
+    await page.clock.runFor(999);
+    assert.equal(await card.getByText("待评价", { exact: true }).count(), 0);
+    elapsed = true;
+    await page.clock.runFor(1);
+    await card.getByText("待评价", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "列表", exact: true }).evaluate(element => element.click());
+    await page.getByLabel("状态筛选").selectOption("待评价");
+    await page.locator(".interview-table-row").getByText("待评价", { exact: true }).waitFor();
+    assert.equal(requests.some(method => method !== "GET"), false);
+  } finally { await context.close(); }
+});
+
 test("interview list keeps delivery and task columns separate with desktop horizontal scrolling", { timeout: 60_000 }, async () => {
   const interviews = [{
     id: "11111111-1111-4111-8111-111111111111",

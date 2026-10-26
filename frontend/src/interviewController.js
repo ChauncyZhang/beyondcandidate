@@ -8,7 +8,7 @@ const API_TO_UI_STATUS = {
   rescheduled: "已安排",
   confirmed: "已确认",
   completed: "已完成",
-  pending_feedback: "已完成",
+  pending_feedback: "待评价",
   feedback_completed: "已完成",
   cancelled: "已取消",
   no_show: "未到场",
@@ -198,6 +198,7 @@ export function normalizeInterview(value) {
     participants,
     location: safeString(value?.meeting_url) || safeString(value?.location, "未填写"),
     status: API_TO_UI_STATUS[value?.status] || "未知状态",
+    workflowStatus: API_TO_UI_STATUS[value?.workflow_status] || API_TO_UI_STATUS[value?.status] || "未知状态",
     notification: feishuNotification,
     feishuNotification,
     emailDelivery: normalizeEmailDelivery(value?.email_delivery),
@@ -349,6 +350,7 @@ function normalizeTask(value) {
     position: safeString(value?.job?.title, "职位未记录"),
     round: safeString(value?.round_name, "面试"),
     startsAt: safeString(value?.starts_at),
+    endsAt: safeString(value?.ends_at),
     status: safeString(value?.status),
   };
 }

@@ -94,3 +94,10 @@ test("recruiting management actions remain available to an unassigned administra
   assert.deepEqual(getInterviewPrimaryAction(scheduled, { canSchedule: true, userId: "admin-1", now: new Date("2026-07-16T03:00:00Z") }), { kind: "confirm", label: "确认面试" });
   assert.deepEqual(getInterviewPrimaryAction(confirmed, { canSchedule: true, userId: "admin-1", now: new Date("2026-07-16T03:00:00Z") }), { kind: "complete", label: "完成面试" });
 });
+
+test("projected pending evaluation retains HR completion but genuine pending feedback does not gain it", () => {
+  const pending = { status: "待评价", feedbackStatus: "待反馈", interviewerIds: ["interviewer-1"] };
+  assert.deepEqual(getInterviewPrimaryAction({ ...pending, workflowStatus: "已确认" }, { canSchedule: true, userId: "admin-1" }), { kind: "complete", label: "完成面试" });
+  assert.equal(getInterviewPrimaryAction(pending, { canSchedule: true, userId: "admin-1" }), null);
+  assert.deepEqual(getInterviewPrimaryAction({ ...pending, workflowStatus: "已确认" }, { canSchedule: false, userId: "interviewer-1" }), { kind: "feedback", label: "填写评价" });
+});

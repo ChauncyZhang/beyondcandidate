@@ -62,6 +62,7 @@ import { aggregateWorkbenchJobs, workbenchController as defaultWorkbenchControll
 import { deriveCandidateInterviews, interviewController as defaultInterviewController, selectSchedulableCandidates } from "./interviewController.js";
 import { selectUpcomingInterviews, upcomingInterviewWindow } from "./interviewDateUtils.js";
 import { mergeScheduleCandidateOptions } from "./interviewViewState.js";
+import { useInterviewAutoRefresh } from "./useInterviewAutoRefresh.js";
 import {
   isTalentPoolRoleMismatch,
   selectExactTalentPool,
@@ -356,6 +357,17 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
   const interviewCandidateLoadRef = useRef(null);
   const [scheduleCandidateId, setScheduleCandidateId] = useState(null);
   const [interviewOrigin, setInterviewOrigin] = useState(null);
+  useInterviewAutoRefresh({
+    enabled: ["工作台", "面试", "候选人"].includes(activeNav) && interviewState.status === "ready" && !(route.kind === "interviews" && interviewMode !== "list"),
+    navigationKey: `${location.pathname}:${session.user?.id || ""}`,
+    records: interviewState.records,
+    upcomingRecords: interviewState.upcomingRecords,
+    tasks: interviewState.tasks,
+    candidateRecords: candidateInterviewRecords,
+    setInterviewState,
+    setCandidateRecords: setCandidateInterviewRecords,
+    controller: interviewController,
+  });
   const talentMode = route.kind === "talent" && route.mode === "detail" ? "detail" : "list";
   const [talentPools, setTalentPools] = useState([]);
   const [talentMemberships, setTalentMemberships] = useState([]);
@@ -1192,7 +1204,7 @@ function AuthenticatedApp({ session, onLogout, accountClient, screeningControlle
           {interviewState.status === "loading" && interviewState.tasks.length === 0 && <section className="workbench-unavailable" role="status"><CalendarDays size={24} /><div><strong>正在加载面试任务</strong><p>请稍候。</p></div></section>}
           {interviewState.status === "error" && interviewState.tasks.length === 0 && <section className="workbench-unavailable" role="alert"><CircleAlert size={24} /><div><strong>面试任务加载失败</strong><p>{interviewState.error}</p><button className="button secondary" type="button" onClick={() => void loadInterviews()}>重试</button></div></section>}
           {interviewState.status === "ready" && interviewState.tasks.length === 0 && <section className="workbench-unavailable"><CalendarDays size={24} /><div><strong>暂无待处理面试任务</strong><p>新的安排和反馈任务会在这里显示。</p></div></section>}
-          {interviewState.tasks.length > 0 && <section className="rail-section">{interviewState.tasks.map((task) => <button className="rail-item" type="button" key={task.id} onClick={() => task.type === "interview_feedback" ? openFeedbackInterview(task.interviewId) : openInterviewList()}><strong>{task.candidate} · {task.round}</strong><small>{task.position} · {task.startsAt ? new Date(task.startsAt).toLocaleString("zh-CN", { hour12: false }) : "时间未记录"}</small></button>)}</section>}
+          {interviewState.tasks.length > 0 && <section className="rail-section">{interviewState.tasks.map((task) => <button className="rail-item" type="button" key={task.id} onClick={() => task.type === "interview_feedback" ? openFeedbackInterview(task.interviewId) : openInterviewList()}><strong>{task.candidate} · {task.round}</strong>{task.type === "interview_feedback" && <span className="interview-status warning">待评价</span>}<small>{task.position} · {task.startsAt ? new Date(task.startsAt).toLocaleString("zh-CN", { hour12: false }) : "时间未记录"}</small></button>)}</section>}
         </div>}
 
         {!screeningTask && route.kind === "offer" && <div className="offer-route-page"><button className="back-link" type="button" onClick={() => navigate(route.returnTo || "/workbench", { replace: true })}>返回工作台</button><CandidateOfferView offerId={route.offerId} approvalId={route.approvalId} role={currentRole} controller={offerController} onNotify={notify} /></div>}

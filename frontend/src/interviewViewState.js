@@ -47,13 +47,18 @@ export function canSubmitInterviewFeedback(record) {
   return ["待确认", "已安排", "已确认"].includes(record?.status);
 }
 
+export function getInterviewManagementStatus(record) {
+  return record?.workflowStatus || record?.status;
+}
+
 export function getInterviewPrimaryAction(record, { canSchedule = true, userId = "", now = new Date() } = {}) {
   if (!record) return null;
   const assigned = isMyInterview(record, userId);
+  const managementStatus = getInterviewManagementStatus(record);
   if (assigned && record.feedbackStatus === "已提交") return { kind: "feedback", label: "查看评价" };
   if (assigned && canSubmitInterviewFeedback(record, now)) return { kind: "feedback", label: "填写评价" };
-  if (canSchedule && ["待确认", "已安排"].includes(record.status)) return { kind: "confirm", label: "确认面试" };
-  if (canSchedule && record.status === "已确认") return { kind: "complete", label: "完成面试" };
+  if (canSchedule && ["待确认", "已安排"].includes(managementStatus)) return { kind: "confirm", label: "确认面试" };
+  if (canSchedule && managementStatus === "已确认") return { kind: "complete", label: "完成面试" };
   if (assigned && ["待确认", "已安排", "已确认"].includes(record.status)) return { kind: "feedback", label: "查看材料" };
   return null;
 }

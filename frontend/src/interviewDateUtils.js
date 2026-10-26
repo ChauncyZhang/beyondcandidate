@@ -67,7 +67,7 @@ export function upcomingInterviewWindow(reference = new Date(), days = 7) {
 export function selectUpcomingInterviews(records, reference = new Date(), days = 7) {
   const window = upcomingInterviewWindow(reference, days);
   if (!window || !Array.isArray(records)) return [];
-  const inactiveStatuses = new Set(["已完成", "已取消", "未到场"]);
+  const inactiveStatuses = new Set(["待评价", "已完成", "已取消", "未到场"]);
   return records
     .filter((record) => {
       if (inactiveStatuses.has(record?.status)) return false;
