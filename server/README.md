@@ -133,6 +133,7 @@ rather than becoming a false success on its next execution.
 | Live responsibilities, explicit grants, current approval rounds, historical preservation, blocked external work and scoped fingerprints | `server/tests/test_member_handover.py` |
 | Late parsing/routing/talent work, successor chains, unavailable destinations and LLM retry recovery | `server/tests/test_member_offboarding_producers.py` |
 | API/controller race handling, explicit confirmation, pending/resume, errors and desktop/mobile layout | `frontend/src/memberOffboarding.test.js`, `frontend/src/MemberOffboardingUi.test.js`, `frontend/src/MemberStatusFilterUi.test.js` |
+| Confirmation text contrast on normal/hover/focus and unchanged disabled hover, at desktop/mobile widths; pointer/focus never submits | `frontend/src/MemberOffboardingUi.test.js` (`offboarding confirmation stays readable`); local mocked API browser coverage, not a production removal |
 | Forward migration preserves rows/grants; reciprocal removal and producer-lock races are safe | `server/tests/test_member_offboarding_postgres.py` |
 
 Normal discovery includes the new tests. Focused entries from the repository root:

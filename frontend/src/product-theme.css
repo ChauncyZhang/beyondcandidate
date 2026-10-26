@@ -188,7 +188,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .button.primary { color: #fff; border-color: var(--blue); background: var(--blue); }
 .button.primary:hover:not(:disabled) { border-color: var(--blue-dark); background: var(--blue-dark); }
 .button.secondary { color: #333338; background: #fff; }
-.button.danger { border-color: var(--red); background: var(--red); }
+.button.danger { color: #fff; border-color: var(--red); background: var(--red); }
+.button.danger:hover:not(:disabled) { border-color: #b4232f; background: #b4232f; }
 .icon-button { width: 38px; height: 38px; border-radius: 7px; }
 .icon-button:hover { background: #eeeeF1; }
 

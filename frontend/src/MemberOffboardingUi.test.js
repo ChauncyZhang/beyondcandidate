@@ -51,6 +51,42 @@ async function openPage({ width = 1440, noSuccessor = false, conflict = false } 
 }
 
 for (const width of [1440, 390]) {
+  test(`offboarding confirmation stays readable on hover and focus at ${width}px`, { timeout: 30000 }, async () => {
+    const { context, page, dialog, writes } = await openPage({ width });
+    try {
+      await dialog.getByLabel("统一接任人").selectOption("next");
+      await dialog.getByRole("button", { name: "移除成员并交接", exact: true }).click();
+      const confirm = dialog.getByRole("button", { name: "确认移除并交接", exact: true });
+      const colors = () => confirm.evaluate(async (element) => {
+        await Promise.all(element.getAnimations().map((animation) => animation.finished));
+        const style = getComputedStyle(element);
+        return { color: style.color, background: style.backgroundColor };
+      });
+      const disabledColors = await colors();
+      await confirm.hover({ force: true });
+      assert.equal(await confirm.isDisabled(), true);
+      assert.deepEqual(await colors(), disabledColors, "disabled hover must not change its colors");
+      await dialog.getByRole("checkbox").check();
+      await page.mouse.move(0, 0);
+      const contrast = ({ color, background }) => {
+        const luminance = (rgb) => rgb.match(/[\d.]+/g).slice(0, 3).map(Number).map((value) => {
+          const channel = value / 255;
+          return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+        }).reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+        const values = [luminance(color), luminance(background)].sort((a, b) => b - a);
+        return (values[0] + 0.05) / (values[1] + 0.05);
+      };
+      assert.ok(contrast(await colors()) >= 4.5, "normal text must have readable contrast");
+      await confirm.hover();
+      assert.ok(contrast(await colors()) >= 4.5, "hover text must have readable contrast");
+      await page.screenshot({ path: fileURLToPath(new URL(`../.tmp/member-offboarding-hover-${width}.png`, import.meta.url)), fullPage: true });
+      await page.mouse.move(0, 0);
+      await confirm.focus();
+      assert.ok(contrast(await colors()) >= 4.5, "focused text must have readable contrast");
+      assert.equal(writes.length, 0, "hover and focus must never submit the removal");
+    } finally { await context.close(); }
+  });
+
   test(`single-successor confirmation, partial result and pending resume at ${width}px`, { timeout: 30000 }, async () => {
     const { context, page, dialog, writes } = await openPage({ width });
     try {
