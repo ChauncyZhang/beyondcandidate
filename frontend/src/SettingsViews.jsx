@@ -4,7 +4,8 @@ import { canEditAiSettings, canEditOrganizationSettings, canEditRetentionSetting
 import { createLlmSettingsController, getTestDisabledReason, releaseLlmSettingsSubscription } from "./llmSettings.js";
 import { createOcrSettingsController, getOcrTestDisabledReason, releaseOcrSettingsSubscription } from "./ocrSettings.js";
 import { createGovernanceSettingsController, releaseGovernanceSettingsSubscription } from "./governanceSettings.js";
-import { canReinviteUser, canResetUserPassword, getInviteRoleOptions, getRecruitingScopeLabel, isRecruitingScopeValid, organizationSettingsController, roleUsesRecruitingScope } from "./organizationSettings.js";
+import { canReinviteUser, canResetUserPassword, canOffboardUser, matchesMemberFilter, getInviteRoleOptions, getRecruitingScopeLabel, isRecruitingScopeValid, organizationSettingsController, roleUsesRecruitingScope } from "./organizationSettings.js";
+import { MemberOffboardingDialog } from "./MemberOffboardingDialog.jsx";
 import { FeishuIntegrationSettings } from "./FeishuIntegrationSettings.jsx";
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { workflowTemplateController } from "./workflowTemplateController.js";
@@ -96,7 +97,7 @@ function PermissionNotice({ children }) {
   return <div className="settings-permission-notice"><LockKeyhole size={18} /><span>{children}</span></div>;
 }
 
-function OrganizationDrawer({ title, description, busy, onClose, children, footer }) {
+function OrganizationDrawer({ title, description, busy, onClose, children, footer, surfaceClassName = "" }) {
   const drawerRef = useRef(null);
   const restoreTargetRef = useRef(typeof document === "undefined" ? null : document.activeElement);
   const busyRef = useRef(busy);
@@ -111,7 +112,7 @@ function OrganizationDrawer({ title, description, busy, onClose, children, foote
     document.addEventListener("keydown", handleKeyDown);
     return () => { document.removeEventListener("keydown", handleKeyDown); manager.restoreFocus(); };
   }, []);
-  return <aside ref={drawerRef} className="settings-drawer organization-drawer" role="dialog" aria-modal="true" aria-label={title}><header><div><h2>{title}</h2><p>{description || (title === "邀请成员" ? "发送一次性激活邀请，成员状态将显示为待激活。" : "创建一级部门供成员和职位归属使用。")}</p></div><button className="icon-button" type="button" aria-label="关闭" disabled={busy} onClick={onClose}><X size={20} /></button></header><div className="settings-drawer-body">{children}</div><footer>{footer}</footer></aside>;
+  return <aside ref={drawerRef} className={`settings-drawer organization-drawer ${surfaceClassName}`} role="dialog" aria-modal="true" aria-label={title}><header><div><h2>{title}</h2><p>{description || (title === "邀请成员" ? "发送一次性激活邀请，成员状态将显示为待激活。" : "创建一级部门供成员和职位归属使用。")}</p></div><button className="icon-button" type="button" aria-label="关闭" disabled={busy} onClick={onClose}><X size={20} /></button></header><div className="settings-drawer-body">{children}</div><footer>{footer}</footer></aside>;
 }
 
 function RecruitingScopeFields({ value, departments, onChange, role }) {
@@ -182,6 +183,8 @@ function OrganizationSettings({
   const [copied, setCopied] = useState(false);
   const [reinviteMember, setReinviteMember] = useState(null);
   const [resetMember, setResetMember] = useState(null);
+  const [offboardingMember, setOffboardingMember] = useState(null);
+  const [memberFilter, setMemberFilter] = useState("active");
   const inviteRoles = getInviteRoleOptions(role);
   const activeDepartments = state.departments.filter((department) => department.status === "active");
   const busy = state.actionStatus === "saving";
@@ -203,7 +206,7 @@ function OrganizationSettings({
         <p>面试官不能查看公司成员或部门。</p>
       </section>
     );
-  const visibleUsers = state.users.filter((user) =>
+  const visibleUsers = state.users.filter((user) => matchesMemberFilter(user, memberFilter) &&
     `${user.name}${user.email}${user.department}${user.role}`
       .toLowerCase()
       .includes(query.toLowerCase()),
@@ -410,6 +413,7 @@ function OrganizationSettings({
       {state.status === "ready" && tab === "成员" && (
         <>
           <div className="settings-toolbar">
+            <label className="offboarding-member-filter">成员状态<select aria-label="成员状态" value={memberFilter} onChange={(event) => setMemberFilter(event.target.value)}><option value="active">在职成员</option><option value="removed">已移除</option><option value="pending">待交接</option><option value="all">全部成员</option></select></label>
             <label className="settings-search">
               <Search size={16} />
               <input
@@ -434,21 +438,23 @@ function OrganizationSettings({
                 <span>
                   <strong>{user.name}</strong>
                   <small>{user.email}</small>
+                  {user.offboarding && <small className="offboarding-member-summary"><span>移除于 <time dateTime={user.offboarding.removed_at}>{user.offboarding.removed_at ? new Date(user.offboarding.removed_at).toLocaleString("zh-CN", { hour12: false }) : "未记录"}</time></span><span>接任人：{state.users.find((item) => item.id === user.offboarding.successor_user_id)?.name || (user.offboarding.successor_user_id ? "未在当前列表中" : "尚未指定")}</span></small>}
                 </span>
                 <span><small className="mobile-field-label">所属部门</small>{user.department}</span>
                 <span><small className="mobile-field-label">角色</small>{user.role}</span>
                 <span><small className="mobile-field-label">负责范围</small>{getRecruitingScopeLabel(user)}</span>
                 <span
                   className={
-                    user.status === "启用" ? "status-ok" : "status-muted"
+                    user.offboarding ? "offboarding-member-status" : user.status === "启用" ? "status-ok" : "status-muted"
                   }
                 >
-                  {user.status}
+                  {user.offboarding ? <><span className="status-muted">已移除</span><small className="offboarding-handover-status">{user.offboarding.handover_status === "completed" ? "交接完成" : `待交接 ${user.offboarding.pending_count ?? 0} 项`}</small></> : user.status}
                 </span>
                 <span className="member-row-action">
                   {canReinviteUser(role, user) && <button className="text-button" type="button" disabled={busy} onClick={() => openReinvite(user)}><RefreshCw size={14} aria-hidden="true" />重新邀请</button>}
                   {canResetUserPassword(role, user, currentUserId) && <button className="text-button" type="button" disabled={busy} onClick={() => openPasswordReset(user)}><KeyRound size={14} aria-hidden="true" />重置密码</button>}
-                  {editable && (user.roleValues.some(roleUsesRecruitingScope) || (role === "系统管理员" && !user.roleValues.includes("system_admin"))) && <button className="text-button" type="button" onClick={() => openRecruitingScope(user)}>{role === "系统管理员" ? "配置成员" : "配置负责范围"}</button>}
+                  {editable && !user.offboarding && (user.roleValues.some(roleUsesRecruitingScope) || (role === "系统管理员" && !user.roleValues.includes("system_admin"))) && <button className="text-button" type="button" onClick={() => openRecruitingScope(user)}>{role === "系统管理员" ? "配置成员" : "配置负责范围"}</button>}
+                  {canOffboardUser(role, user, currentUserId) && <button className="text-button" type="button" disabled={busy} onClick={() => setOffboardingMember(user)}><Users size={14} aria-hidden="true" />{user.offboarding ? "继续交接" : "移除成员并交接"}</button>}
                 </span>
               </div>
             ))}
@@ -473,6 +479,7 @@ function OrganizationSettings({
           )}
         </div>
       )}
+      {offboardingMember && <MemberOffboardingDialog member={offboardingMember} Drawer={OrganizationDrawer} onClose={() => setOffboardingMember(null)} onComplete={(detail) => { controller.applyOffboardingResult(detail); onNotify(detail.handover_status === "completed" ? "账号已收回，交接已完成" : "账号已收回，仍有待交接事项"); }} />}
       {drawer === "password-reset" && <OrganizationDrawer
         title="重置成员密码"
         description={`${resetMember.name}（${resetMember.email}）：重置链接仅可使用一次，有效期为 1 小时。`}

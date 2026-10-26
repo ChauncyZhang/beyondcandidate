@@ -26,6 +26,7 @@ from server.app.offers import models as offer_models  # noqa: F401 - registers i
 from server.app.onboarding import models as onboarding_models  # noqa: F401 - registers onboarding FKs
 from server.app.identity.api import allowed_origin, problem, router as identity_router, session_token
 from server.app.identity.admin_api import router as identity_admin_router
+from server.app.identity.offboarding_api import router as member_offboarding_router
 from server.app.identity.service import Clock, IdentityService, TokenSource
 from server.app.identity.store import IdentityStore
 from server.app.recruiting.api import router as recruiting_router
@@ -189,6 +190,7 @@ def create_app(
     app.state.offer_token_codec = OfferTokenCodec(email_key.encode())
     app.include_router(identity_router)
     app.include_router(identity_admin_router)
+    app.include_router(member_offboarding_router)
     app.include_router(recruiting_router)
     from server.app.screening.api import router as screening_router
     app.include_router(screening_router)

@@ -8,6 +8,7 @@ from server.app.llm.gateway import GatewayError
 from server.app.llm.models import LlmInvocation, LlmProviderConfig, LlmScreeningEvaluation, PromptVersion
 from server.app.llm.screening import MAX_JD_CHARS, MAX_RESUME_CHARS, ScreeningRequest
 from server.app.llm.redaction import redact_screening_text
+from server.app.identity.offboarding_resolver import OperationalOwnerUnavailable
 from server.app.queue.models import BackgroundJob
 from server.app.queue.service import PermanentJobError, RetryableJobError
 from server.app.recruiting.models import Candidate, JobJdVersion, Resume
@@ -40,6 +41,39 @@ class LlmScreeningPipeline:
         self.cipher = cipher
 
     async def evaluate_item(self, job):
+        try:
+            return await self._evaluate_item(job)
+        except OperationalOwnerUnavailable:
+            self._reset_ownership_blocked_attempt(job)
+            raise
+
+    def _reset_ownership_blocked_attempt(self, job):
+        ids = self._ids(job.payload)
+        with self.sessions() as db:
+            candidate_id = db.scalar(select(ScreeningItem.candidate_id).where(
+                ScreeningItem.organization_id == ids["organization_id"],
+                ScreeningItem.id == ids["screening_item_id"],
+            ))
+            if candidate_id is None:
+                return
+            try:
+                _, item, _ = lock_candidate_screening_item(
+                    db, ids["organization_id"], ids["screening_item_id"], candidate_id
+                )
+            except CandidateTombstoned:
+                return
+            # The failed final transaction was rolled back. Do not overwrite a
+            # concurrent terminal result, but let this attempt be retried.
+            if item.status == "scored" and item.llm_status == "running":
+                item.llm_status = "queued"
+                item.llm_safe_error_code = "operational_owner_unavailable"
+                item.llm_finished_at = None
+                item.finished_at = None
+                run = db.get(ScreeningRun, item.run_id)
+                aggregate_run(db, run)
+                db.commit()
+
+    async def _evaluate_item(self, job):
         ids = self._ids(job.payload)
         attempt_no = max(1, int(getattr(job, "attempts", 1)))
         max_attempts = max(1, int(getattr(job, "max_attempts", 3)))

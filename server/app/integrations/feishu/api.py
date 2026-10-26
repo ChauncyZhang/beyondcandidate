@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 
 from server.app.identity.api import cookie_name, problem, session_token
 from server.app.identity.models import AuditLog, Organization, User, UserStatus
-from server.app.identity.service import InvalidSession
+from server.app.identity.service import AuthenticationFailed, InvalidSession
 from server.app.integrations.feishu.models import (
     FeishuIdentityBinding,
     FeishuEventReceipt,
@@ -381,7 +381,10 @@ def oauth_callback(request: Request, code: str = Query(min_length=1, max_length=
     if purpose == "bind":
         response = _app_redirect(status="bound")
     else:
-        token, _csrf = request.app.state.identity_service.issue_session(user_id, trace_id=request.state.trace_id, network=request.client.host if request.client else None, event="authentication.feishu_login")
+        try:
+            token, _csrf = request.app.state.identity_service.issue_session(user_id, trace_id=request.state.trace_id, network=request.client.host if request.client else None, event="authentication.feishu_login")
+        except AuthenticationFailed:
+            return problem(request, 403, "feishu_account_unavailable", "The linked account is unavailable.")
         response = _app_redirect(status="connected")
         response.set_cookie(cookie_name(request), token, httponly=True, secure=request.app.state.settings.environment == "production", samesite="lax", path="/")
     return response

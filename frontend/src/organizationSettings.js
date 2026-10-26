@@ -95,6 +95,7 @@ function normalizeUser(value) {
     recruitingDepartmentIds,
     status,
     rawStatus: safeString(value?.status),
+    ...(value?.offboarding ? { offboarding: { ...value.offboarding }, status: "已移除" } : {}),
   };
 }
 
@@ -103,17 +104,96 @@ export function getInviteRoleOptions(currentRole) {
 }
 
 export function canReinviteUser(currentRole, user) {
-  if (!["系统管理员", "招聘管理员"].includes(currentRole) || user?.rawStatus !== "invited" || !user?.id) return false;
+  if (user?.offboarding || !["系统管理员", "招聘管理员"].includes(currentRole) || user?.rawStatus !== "invited" || !user?.id) return false;
   const allowed = new Set(getInviteRoleOptions(currentRole).map(({ value }) => value));
   return user.roleValues.length > 0 && user.roleValues.every((role) => allowed.has(role));
 }
 
 export function canResetUserPassword(currentRole, user, currentUserId) {
-  if (user?.rawStatus !== "active" || !user?.id || user.id === currentUserId) return false;
+  if (user?.offboarding || user?.rawStatus !== "active" || !user?.id || user.id === currentUserId) return false;
   if (currentRole === "系统管理员") return true;
   if (currentRole !== "招聘管理员") return false;
   const allowed = new Set(getInviteRoleOptions(currentRole).map(({ value }) => value));
   return user.roleValues.length > 0 && user.roleValues.every((role) => allowed.has(role));
+}
+
+export function canOffboardUser(currentRole, user, currentUserId) {
+  if (!user?.id || user.id === currentUserId) return false;
+  if (!user.offboarding && !["active", "invited", "disabled"].includes(user.rawStatus)) return false;
+  if (currentRole === "系统管理员") return true;
+  if (currentRole !== "招聘管理员") return false;
+  const allowed = new Set(getInviteRoleOptions(currentRole).map(({ value }) => value));
+  return user.roleValues.length > 0 && user.roleValues.every((role) => allowed.has(role));
+}
+
+export function matchesMemberFilter(user, filter) {
+  if (filter === "removed") return Boolean(user.offboarding);
+  if (filter === "pending") return user.offboarding?.handover_status === "pending";
+  return filter === "all" || !user.offboarding;
+}
+
+function offboardingError(error) {
+  if (error?.code === "offboarding_preview_changed") return "交接预览已变化，本次未提交。请刷新预览并重新确认。";
+  if (error?.status === 403) return "权限不足，无法执行成员移除或交接。请联系系统管理员。";
+  if (["last_system_admin_required", "last_system_admin_forbidden", "last_active_system_admin"].includes(error?.code)) return "不能移除最后一位启用的系统管理员。";
+  if (error?.code === "offboarding_successor_invalid") return "接任人已不可用，请重新选择启用的成员，或清除选择后仅收回账号。";
+  return error?.detail || (error?.kind === "unavailable" ? "服务暂时不可用，未能确认操作结果。请刷新预览核对账号和交接状态后再继续。" : "操作未能完成，请刷新预览核对权限、账号和交接状态后重试。");
+}
+
+export function createMemberOffboardingController({ client = apiClient } = {}) {
+  let state = Object.freeze({ status: "idle", userId: null, successorId: null, preview: null, error: "" });
+  let sequence = 0;
+  let abortController = null;
+  const listeners = new Set();
+  const patch = (next) => { state = Object.freeze({ ...state, ...next }); listeners.forEach((listener) => listener()); };
+  function validate(value) {
+    if (!value || value.user_id !== state.userId || value.preview_version == null || !Array.isArray(value.items) || !Array.isArray(value.counts) || !Array.isArray(value.successors)) throw new Error("Invalid offboarding preview");
+    return value;
+  }
+  const controller = {
+    getSnapshot: () => state,
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    async load(userId, successorId = null) {
+      if (state.status === "saving") return null;
+      const requestId = ++sequence;
+      abortController?.abort();
+      abortController = new AbortController();
+      patch({ status: "loading", userId, successorId, preview: state.userId === userId ? state.preview : null, error: "" });
+      try {
+        const result = await client.getMemberOffboarding(userId, { successorId, signal: abortController.signal });
+        if (requestId !== sequence) return null;
+        const detail = validate(result);
+        patch({ status: "ready", preview: detail, successorId: successorId || detail.successor_user_id || null });
+        return detail;
+      } catch (error) {
+        if (requestId !== sequence) return null;
+        patch({ status: "error", error: offboardingError(error) });
+        return null;
+      }
+    },
+    refresh() { return controller.load(state.userId, state.successorId); },
+    cancel() {
+      if (state.status === "saving") return false;
+      sequence++; abortController?.abort();
+      patch({ status: "idle", userId: null, successorId: null, preview: null, error: "" });
+      return true;
+    },
+    async submit(revokeOnly = false) {
+      if (state.status !== "ready" || !state.preview) return null;
+      if (!revokeOnly && !state.preview.successors.some((user) => user.id === state.successorId && user.eligible)) return null;
+      const body = { successor_user_id: state.successorId, preview_version: state.preview.preview_version, revoke_only: revokeOnly };
+      patch({ status: "saving", error: "" });
+      try {
+        const result = validate(await client.submitMemberOffboarding(state.userId, body));
+        patch({ status: "success", preview: result });
+        return result;
+      } catch (error) {
+        patch({ status: error?.status === 409 && error?.code === "offboarding_preview_changed" ? "conflict" : "error", error: offboardingError(error) });
+        return null;
+      }
+    },
+  };
+  return controller;
 }
 
 export function createOrganizationSettingsController({ client = apiClient, createIdempotencyKey = () => globalThis.crypto.randomUUID() } = {}) {
@@ -128,6 +208,9 @@ export function createOrganizationSettingsController({ client = apiClient, creat
   return {
     getSnapshot: () => state,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    applyOffboardingResult(detail) {
+      patchState({ users: state.users.map((user) => user.id === detail.user_id ? { ...user, rawStatus: "disabled", status: "已移除", offboarding: { removed_at: detail.removed_at, successor_user_id: detail.successor_user_id, handover_status: detail.handover_status, pending_count: detail.items.length } } : user) });
+    },
     async load() {
       patchState({ status: "loading", error: "" });
       try {

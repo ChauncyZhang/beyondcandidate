@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from server.app.governance.models import RetentionPolicy
 from server.app.identity.models import User, UserRole, UserStatus
+from server.app.identity.offboarding_resolver import resolve_operational_user_id
 from server.app.recruiting.models import Candidate
 from server.app.talent.models import TalentPool, TalentPoolMembership
 
@@ -63,7 +64,7 @@ def _refresh_pool_retention(pool, retention_days):
     return pool
 
 
-def _ensure_system_pool(db, organization_id, fallback_owner_id):
+def _ensure_system_pool(db, organization_id, fallback_owner_id, *, prefer_fallback_owner=False):
     retention_days = db.scalar(
         select(RetentionPolicy.talent_pool_days).where(
             RetentionPolicy.organization_id == organization_id
@@ -75,7 +76,8 @@ def _ensure_system_pool(db, organization_id, fallback_owner_id):
     if pool is not None:
         return _refresh_pool_retention(pool, retention_days)
 
-    owner_id = _pool_owner_id(db, organization_id, fallback_owner_id)
+    owner_id = fallback_owner_id if prefer_fallback_owner else _pool_owner_id(db, organization_id, fallback_owner_id)
+    owner_id = resolve_operational_user_id(db, organization_id, owner_id)
     for name in _system_pool_names(organization_id):
         pool = TalentPool(
             organization_id=organization_id,
@@ -127,6 +129,9 @@ def ensure_deferred_membership(
         or not 0 <= score < 60
     ):
         raise ValueError("deferred_membership_context_mismatch")
+    operational_owner_id = resolve_operational_user_id(
+        db, application.organization_id, run.created_by, job_id=job.id
+    )
     locked_candidate = db.scalar(
         select(Candidate)
         .where(
@@ -139,7 +144,10 @@ def ensure_deferred_membership(
     if locked_candidate is None:
         raise ValueError("candidate_unavailable")
 
-    pool = _ensure_system_pool(db, application.organization_id, run.created_by)
+    pool = _ensure_system_pool(
+        db, application.organization_id, operational_owner_id,
+        prefer_fallback_owner=operational_owner_id != run.created_by,
+    )
     membership = db.scalar(
         select(TalentPoolMembership)
         .where(
@@ -157,7 +165,7 @@ def ensure_deferred_membership(
             pool_id=pool.id,
             candidate_id=locked_candidate.id,
             source_application_id=application.id,
-            owner_id=run.created_by,
+            owner_id=operational_owner_id,
             suitable_roles=[],
             tags=tags,
             reason="LLM 初筛分低于 60",
@@ -168,7 +176,7 @@ def ensure_deferred_membership(
         return membership
 
     membership.source_application_id = application.id
-    membership.owner_id = run.created_by
+    membership.owner_id = operational_owner_id
     membership.tags = tags
     membership.reason = "LLM 初筛分低于 60"
     if _aware(membership.retention_until) < retention_until:

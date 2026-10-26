@@ -212,6 +212,15 @@ export function createApiClient({ fetchImpl = globalThis.fetch } = {}) {
       const response = await request("/api/v1/settings/users");
       return Array.isArray(response?.data) ? response.data : [];
     },
+    async getMemberOffboarding(id, { successorId = null, signal } = {}) {
+      const query = successorId ? `?successor_id=${encodeURIComponent(successorId)}` : "";
+      const response = await request(`/api/v1/settings/users/${encodeURIComponent(id)}/offboarding${query}`, { signal });
+      return response?.data ?? null;
+    },
+    async submitMemberOffboarding(id, body) {
+      const response = await request(`/api/v1/settings/users/${encodeURIComponent(id)}/offboarding`, { method: "POST", body });
+      return response?.data ?? null;
+    },
     async inviteUser(body, { idempotencyKey } = {}) {
       const response = await request("/api/v1/settings/users", { method: "POST", body, idempotencyKey });
       return response?.data ?? null;

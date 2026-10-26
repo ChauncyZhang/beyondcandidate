@@ -99,6 +99,64 @@ PostgreSQL database. Run
 repository root; it upgrades that isolated database and retains synthetic data.
 It does not contact a real mailbox or production database.
 
+### Member Removal And Unified Handover
+
+Administrators use **Settings > Organization > Members > Remove Member And
+Handover**. Removal retains the user row and original historical attribution,
+disables login, revokes sessions, expires activation/reset grants, and prevents
+bootstrap from silently restoring the account. Administrator hierarchy, tenant
+scope, self-removal and last-active-administrator protections remain enforced.
+
+One active same-tenant successor receives eligible operational responsibilities.
+Roles and global department scope are not copied. Any job or talent-pool grant
+addition is explicit in the preview. Ineligible work remains visible in the
+removed member's pending-handover view. **Revoke Access Only** does not activate a
+new successor mapping, even if a successor was selected in the preview.
+
+Candidate notes, feedback authors, decided approvals, uploaded-file authors and
+original screening requesters are not rewritten. Existing Feishu instance
+identities and calendar snapshots are not transferred through direct database
+edits. Their manual follow-up items do not mean the remote transfer was completed.
+Durable pending snapshots contain routing references, not copied candidate names
+or content; previews calculate current responsibility and eligibility again.
+
+Late screening and talent producers resolve the latest valid successor while
+retaining original authorship. An unavailable destination or a lock conflict is a
+retryable ownership failure, not a successful completion or an arbitrary fallback
+to an administrator. An ownership-blocked LLM attempt returns to a retryable state
+rather than becoming a false success on its next execution.
+
+| Contract | Durable Regression |
+| --- | --- |
+| Revocation, current RBAC/tenant checks, stale previews, partial handover, history, revoke-only, pending visibility and failed-write rollback | `server/tests/test_member_offboarding.py` |
+| Bound and unbound Feishu login cannot reactivate a removed member | `server/tests/test_member_offboarding_feishu.py` |
+| Live responsibilities, explicit grants, current approval rounds, historical preservation, blocked external work and scoped fingerprints | `server/tests/test_member_handover.py` |
+| Late parsing/routing/talent work, successor chains, unavailable destinations and LLM retry recovery | `server/tests/test_member_offboarding_producers.py` |
+| API/controller race handling, explicit confirmation, pending/resume, errors and desktop/mobile layout | `frontend/src/memberOffboarding.test.js`, `frontend/src/MemberOffboardingUi.test.js`, `frontend/src/MemberStatusFilterUi.test.js` |
+| Forward migration preserves rows/grants; reciprocal removal and producer-lock races are safe | `server/tests/test_member_offboarding_postgres.py` |
+
+Normal discovery includes the new tests. Focused entries from the repository root:
+
+```powershell
+python -m pytest server/tests/test_member_offboarding.py server/tests/test_member_offboarding_feishu.py server/tests/test_member_handover.py server/tests/test_member_offboarding_producers.py server/tests/test_identity_management.py server/tests/test_bootstrap.py -q
+cd frontend
+node --test --test-concurrency=1 src/memberOffboarding.test.js src/MemberOffboardingUi.test.js src/MemberStatusFilterUi.test.js
+```
+
+On Windows with a Node version that does not expand the test glob, the full
+frontend gate can be run as
+`node --test --test-concurrency=1 (Get-ChildItem src/*.test.js | Select-Object -ExpandProperty FullName)`.
+Browser gates mock HTTP; API gates use isolated SQLite and fake Feishu providers.
+They do not remove real accounts or modify a live Feishu instance.
+
+For the named migration/locking risk, set `MEMBER_OFFBOARDING_POSTGRES_URL` to an
+initially empty disposable PostgreSQL database and run
+`python -m pytest server/tests/test_member_offboarding_postgres.py -q`. It refuses
+nonempty databases and retains synthetic data for caller-owned disposal. Revision
+`0045_member_offboarding` is additive and forward-only. A rollback to workers
+without successor resolution requires stopping or draining affected screening
+work; do not downgrade the database or restore removed accounts as a workaround.
+
 ### Interview adjacency regression
 
 Ordinary scheduling uses zero implicit buffer. A 14:00-15:00 interview may touch

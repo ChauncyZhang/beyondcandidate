@@ -4,6 +4,7 @@ from pathlib import PurePath
 from sqlalchemy import and_,func,select
 from server.app.queue.repository import QueueRepository
 from server.app.queue.service import PermanentJobError,RetryableJobError
+from server.app.identity.offboarding_resolver import resolve_operational_user_id
 from server.app.governance.retention import recalculate_candidate_retention
 from server.app.recruiting.models import Application,Candidate,FileObject,JobJdVersion,Resume,ResumeProfile,ScreeningRuleVersion
 from server.app.recruiting.profile_builder import PROFILE_VERSION,ProfileBuild,ResumeProfileBuilder
@@ -127,6 +128,7 @@ class ScreeningPipeline:
             profile_data["source"]=profile_source
             profile=ProfileBuild(profile_data,str(profile_data["status"]),profile_source)
         with self.sessions() as db:
+            operational_owner_id=resolve_operational_user_id(db,organization_id,run_context.created_by,job_id=job_id)
             try: candidate,item,blocked=lock_candidate_screening_item(db,organization_id,item_id,candidate_id,allow_unassociated=True,allow_missing_candidate=True,allow_blocked=True)
             except CandidateTombstoned: raise PermanentJobError("screening_item_missing") from None
             if item.status in {"parsed","scored","cancelled"}: return
@@ -136,7 +138,7 @@ class ScreeningPipeline:
                 self._aggregate(db,run); db.commit(); return
             resume_id,application_id=_uuid(item.id,"resume"),_uuid(item.id,"application")
             if candidate is None:
-                candidate=Candidate(id=candidate_id,organization_id=organization_id,display_name=candidate_name,owner_id=run.created_by)
+                candidate=Candidate(id=candidate_id,organization_id=organization_id,display_name=candidate_name,owner_id=operational_owner_id)
             if candidate not in db: db.add(candidate)
             persist_extracted_emails(
                 db,
@@ -160,7 +162,7 @@ class ScreeningPipeline:
                     profile_version=PROFILE_VERSION,
                     safe_error_code=profile.safe_error_code or enriched.safe_error_code,
                 ))
-            application=db.get(Application,application_id) or Application(id=application_id,organization_id=organization_id,candidate_id=candidate_id,job_id=run.job_id,resume_id=resume_id,owner_id=run.created_by,stage="new",source="screening")
+            application=db.get(Application,application_id) or Application(id=application_id,organization_id=organization_id,candidate_id=candidate_id,job_id=run.job_id,resume_id=resume_id,owner_id=operational_owner_id,stage="new",source="screening")
             if application not in db:
                 db.add(application); db.flush(); recalculate_candidate_retention(db,organization_id,candidate_id)
             item.candidate_id=candidate_id; item.resume_id=resume_id; item.application_id=application_id; item.status="parsed"; item.parser_version=parsed.parser_version; item.parse_quality=enriched.assessment.quality; item.safe_error_code=None

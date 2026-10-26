@@ -16,7 +16,11 @@ def bootstrap_system_admin(store: IdentityStore, organization_slug: str, organiz
             organization = Organization(slug=organization_slug, name=organization_name, status="active")
             db.add(organization)
             db.flush()
-        user = db.scalar(select(User).options(selectinload(User.roles)).where(User.organization_id == organization.id, User.normalized_email == normalized))
+        user = db.scalar(select(User).options(selectinload(User.roles)).where(User.organization_id == organization.id, User.normalized_email == normalized).with_for_update(of=User))
+        if user:
+            from server.app.identity.offboarding_models import MemberOffboarding
+            if db.scalar(select(MemberOffboarding.id).where(MemberOffboarding.organization_id == organization.id, MemberOffboarding.user_id == user.id)):
+                raise ValueError("The account is offboarded; bootstrap cannot restore it.")
         encoded = PasswordService().hash(password)
         if user:
             event_type = "bootstrap.admin_rotated"

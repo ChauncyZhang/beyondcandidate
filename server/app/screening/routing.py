@@ -7,6 +7,7 @@ from sqlalchemy import select
 from server.app.governance.audit import append_audit
 from server.app.governance.retention import recalculate_candidate_retention
 from server.app.identity.models import AuditLog, Job, User
+from server.app.identity.offboarding_resolver import resolve_operational_user_id
 from server.app.recruiting.models import (
     Application,
     ApplicationStageEvent,
@@ -198,8 +199,21 @@ def route_llm_screening_terminal(
     if actor is None or run is None or job is None:
         raise ScreeningRoutingConflict("routing_context_unavailable")
 
+    operational_owner_id = resolve_operational_user_id(
+        db, organization_id, run.created_by, job_id=job.id
+    )
+    application_owner_changed = False
+    if operational_owner_id != run.created_by:
+        if candidate.owner_id == run.created_by:
+            candidate.owner_id = operational_owner_id
+            candidate.version += 1
+            candidate.updated_at = datetime.now(timezone.utc)
+        if application.owner_id == run.created_by:
+            application.owner_id = operational_owner_id
+            application_owner_changed = True
     if not is_fail_open_retry:
         application.stage = outcome.stage
+    if not is_fail_open_retry or application_owner_changed:
         application.version += 1
         application.updated_at = datetime.now(timezone.utc)
     routed_stage = "review" if is_fail_open_retry else outcome.stage

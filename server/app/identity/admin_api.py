@@ -676,7 +676,24 @@ def list_users(request: Request):
             .where(User.organization_id == principal.organization_id)
             .order_by(User.display_name, User.id)
         ).all()
-        return {"data": [_user_data(user, name) for user, name in rows]}
+        from server.app.identity.offboarding_models import MemberOffboarding, handover_destination, offboarding_summary
+        removed = {record.user_id: record for record in db.scalars(select(MemberOffboarding).where(MemberOffboarding.organization_id == principal.organization_id))}
+        data = []
+        for user, name in rows:
+            item = _user_data(user, name)
+            if user.id in removed:
+                record = removed[user.id]
+                summary = offboarding_summary(record)
+                from server.app.identity.offboarding_handover import build_handover_plan
+                successor = handover_destination(db, principal.organization_id, user.id)
+                current = build_handover_plan(db, principal.organization_id, user, successor,
+                    now=request.app.state.identity_service.clock.current_time())
+                summary["successor_user_id"] = str(successor.id) if successor else None
+                summary["pending_count"] = len(current["items"])
+                summary["handover_status"] = "pending" if current["items"] else "completed"
+                item["offboarding"] = summary
+            data.append(item)
+        return {"data": data}
 
 
 @router.post("/users", status_code=201)

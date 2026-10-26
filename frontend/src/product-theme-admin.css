@@ -1485,3 +1485,50 @@
   font-weight: 500;
   vertical-align: middle;
 }
+
+.settings-drawer.member-offboarding-drawer { width: min(620px, 100vw); grid-template-rows: auto minmax(0, 1fr) auto; }
+.member-offboarding { display: grid; gap: 16px; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.member-offboarding h3 { margin: 0 0 8px; font-size: 14px; }
+.member-offboarding p { margin: 0; line-height: 1.6; }
+.member-offboarding svg { flex-shrink: 0; }
+.member-offboarding .offboarding-impact,
+.member-offboarding .offboarding-result { display: flex; align-items: flex-start; gap: 9px; padding: 12px; border-radius: 6px; background: #fff7e5; color: #73530b; }
+.member-offboarding .offboarding-result { background: var(--green-soft); color: var(--green); }
+.member-offboarding .offboarding-facts { margin: 0; display: grid; gap: 8px; }
+.member-offboarding .offboarding-facts > div { display: flex; justify-content: space-between; gap: 12px; }
+.member-offboarding .offboarding-facts dt { color: var(--muted); }
+.member-offboarding .offboarding-facts dd { margin: 0; text-align: right; }
+.member-offboarding .offboarding-successor { display: grid; gap: 7px; font-weight: 600; }
+.member-offboarding .offboarding-successor select { width: 100%; min-width: 0; font-weight: 400; }
+.member-offboarding .offboarding-unavailable { margin: 0; padding-left: 18px; color: var(--muted); }
+.member-offboarding .offboarding-counts > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.member-offboarding .offboarding-counts span { color: var(--muted); }
+.member-offboarding .offboarding-items { list-style: none; margin: 0; padding: 0; }
+.member-offboarding .offboarding-items li { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.member-offboarding .offboarding-items li > div { display: flex; justify-content: space-between; gap: 10px; }
+.member-offboarding .offboarding-items li strong { min-width: 0; }
+.member-offboarding .offboarding-items li span { flex-shrink: 0; }
+.member-offboarding .offboarding-items small { color: var(--muted); }
+.member-offboarding .offboarding-items a { display: inline-block; margin-top: 6px; color: var(--blue); }
+.member-offboarding .offboarding-warning { color: #996700; }
+.member-offboarding .offboarding-empty { padding: 12px 0; color: var(--muted); }
+.member-offboarding .offboarding-manual { padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); }
+.member-offboarding .offboarding-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.member-offboarding .offboarding-actions .button { white-space: normal; height: auto; min-height: 36px; text-align: left; }
+.member-offboarding .offboarding-confirm { border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 10px; }
+.member-offboarding .offboarding-confirm label { display: flex; align-items: flex-start; gap: 8px; }
+.member-offboarding .offboarding-confirm input { flex-shrink: 0; margin-top: 3px; }
+.settings-page .organization-settings .settings-toolbar > .offboarding-member-filter { display: grid; grid-template-columns: auto minmax(120px, 1fr); align-items: center; flex: 0 0 auto; width: auto; min-width: 0; height: auto; min-height: 40px; padding: 0; border: 0; border-radius: 0; gap: 8px; font-size: 13px; }
+.settings-page .organization-settings .offboarding-member-filter select { width: 100%; min-width: 0; height: 40px; min-height: 40px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; background: #fff; color: var(--ink); appearance: auto; }
+.settings-page .offboarding-member-summary { display: block; white-space: normal; overflow-wrap: anywhere; font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+.settings-page .offboarding-member-summary > span { display: block; }
+.settings-page .offboarding-member-summary time { display: inline-block; white-space: nowrap; }
+.settings-page .offboarding-member-status { display: grid; justify-items: start; gap: 4px; }
+.settings-page .offboarding-member-status > .status-muted,
+.settings-page .offboarding-handover-status { white-space: nowrap; }
+@media (max-width: 600px) {
+  .settings-page .offboarding-member-status { justify-items: end; }
+  .settings-drawer.member-offboarding-drawer { width: 100%; }
+  .member-offboarding-drawer > footer .button { white-space: normal; height: auto; min-height: 40px; }
+  .member-offboarding .offboarding-actions .button { flex: 1 1 100%; justify-content: center; }
+}
