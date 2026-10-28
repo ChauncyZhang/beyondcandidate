@@ -25,6 +25,8 @@ import { candidateEmailCorrectionContext, getInterviewEmailActions, requiresCand
 import { feedbackRatingDimensions, formatSubmittedFeedbackRatings } from "./feedbackRatings.js";
 import { PagePrimaryAction } from "./PagePrimaryAction.jsx";
 import { interviewStatusLabel } from "./recruitingTerminology.js";
+import { TerminationDialog, TerminationEntry } from "./TerminationViews.jsx";
+import { canManageTermination } from "./terminationController.js";
 export { copyInterviewText, getScheduleConflictType, getScheduleSavedMessage } from "./ScheduleWorkspace.jsx";
 
 const PARTICIPANT_DIRECTORY_TIMEOUT_MS = 5_000;
@@ -109,7 +111,8 @@ export function isAmbiguousFeedbackSubmitError(error) {
 export function getInterviewTerminalActions(record, canSchedule) {
   if (!canSchedule || !record) return [];
   const status = getInterviewManagementStatus(record);
-  if (status === "待确认") return [{ target: "cancelled", label: "取消面试" }];
+  if (["待确认", "待评价", "待反馈"].includes(status)) return [{ target: "cancelled", label: "取消面试" }];
+  if (status === "已完成" && record.feedbackStatus !== "已提交") return [{ target: "cancelled", label: "取消面试" }];
   if (["已安排", "已确认"].includes(status)) {
     return [
       { target: "cancelled", label: "取消面试" },
@@ -133,7 +136,7 @@ function InterviewDeliveryState({ record }) {
   </span>;
 }
 
-function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor, loadingMore, onLoadMore, onLoadRange, onSchedule, onFeedback, onDownload, onTransition, onResendEmail, resendState, canSchedule = true, interviewerId, pageActionHost, controller }) {
+function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor, loadingMore, onLoadMore, onLoadRange, onSchedule, onFeedback, onDownload, onTransition, onResendEmail, resendState, canSchedule = true, role, interviewerId, pageActionHost, controller }) {
   const [view, setView] = useState("list");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("全部状态");
@@ -142,6 +145,7 @@ function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor
   const [transitionDraft, setTransitionDraft] = useState(null);
   const [reason, setReason] = useState("");
   const [transitioning, setTransitioning] = useState(false);
+  const [terminationRecord, setTerminationRecord] = useState(null);
   const dayColumns = useMemo(() => buildWeekColumns(), []);
 
   const filtered = useMemo(() => records.filter((item) => {
@@ -155,7 +159,7 @@ function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor
   }
 
   async function submitTerminalTransition() {
-    if (!reason.trim() || !transitionDraft) return;
+    if (transitioning || !reason.trim() || !transitionDraft) return;
     setTransitioning(true);
     const succeeded = await onTransition(transitionDraft.record, transitionDraft.target, reason.trim());
     setTransitioning(false);
@@ -203,6 +207,7 @@ function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor
               {emailAction?.error && <small className="interview-action-error" role="alert">{emailAction.error}</small>}
               {canSchedule && ["已安排", "已确认"].includes(getInterviewManagementStatus(record)) && <button type="button" onClick={() => onSchedule(record)}>改期</button>}
               {getInterviewTerminalActions(record, canSchedule).map((action) => <button type="button" className="danger-link" key={action.target} onClick={() => requestTerminalTransition(record, action)}>{action.label}</button>)}
+              {canSchedule && <TerminationEntry applicationId={record.applicationId} candidateName={record.candidate} jobTitle={record.position} role={role} onChanged={onRetry} />}
             </span>
           </div>;
         })}
@@ -210,7 +215,12 @@ function InterviewList({ records, status: loadStatus, error, onRetry, nextCursor
       </div> : <InterviewCalendar query={query} status={status} mineOnly={mineOnly} canSchedule={canSchedule} interviewerId={interviewerId} onLoadRange={onLoadRange} onOpen={openCalendarInterview} controller={controller} />}
       {nextCursor && <footer className="interview-pagination"><button className="button secondary" type="button" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? "正在加载" : "加载更多面试"}</button></footer>}
     </section>}
-    {transitionDraft && <div className="modal-backdrop" role="presentation" onMouseDown={() => !transitioning && setTransitionDraft(null)}><section className="modal interview-transition-modal" role="dialog" aria-modal="true" aria-label={transitionDraft.label} onMouseDown={(event) => event.stopPropagation()}><header className="modal-header"><div><h2>{transitionDraft.label}</h2><p>{transitionDraft.record.candidate} · {transitionDraft.record.position}</p></div><button className="icon-button" type="button" aria-label="关闭" disabled={transitioning} onClick={() => setTransitionDraft(null)}><X size={20} /></button></header><div className="modal-body"><label>操作原因 <span>*</span><textarea rows="4" value={reason} disabled={transitioning} onChange={(event) => setReason(event.target.value)} placeholder="请填写操作原因" /></label>{!reason.trim() && <small className="field-hint">原因会写入面试历史，便于 HR 后续追踪。</small>}</div><footer className="modal-footer"><button className="button secondary" type="button" disabled={transitioning} onClick={() => setTransitionDraft(null)}>取消</button><button className="button danger" type="button" disabled={transitioning || !reason.trim()} onClick={() => void submitTerminalTransition()}>{transitioning ? "正在保存" : "确认操作"}</button></footer></section></div>}
+    {transitionDraft && <div className="modal-backdrop" role="presentation" onMouseDown={() => !transitioning && setTransitionDraft(null)}><section className="modal interview-transition-modal" role="dialog" aria-modal="true" aria-label={transitionDraft.target === "cancelled" ? "仅取消本场面试" : transitionDraft.label} onMouseDown={(event) => event.stopPropagation()}><header className="modal-header"><div><h2>{transitionDraft.target === "cancelled" ? "仅取消本场面试" : transitionDraft.label}</h2><p>{transitionDraft.record.candidate} · {transitionDraft.record.position}</p></div><button className="icon-button" type="button" aria-label="关闭" disabled={transitioning} onClick={() => setTransitionDraft(null)}><X size={20} /></button></header><div className="modal-body">
+      {transitionDraft.target === "cancelled" && <p>仅取消本场，可重新安排；不结束当前职位申请，保留已提交评价。</p>}
+      <label>操作原因 <span>*</span><textarea rows="4" required maxLength={1000} value={reason} disabled={transitioning} onChange={(event) => setReason(event.target.value)} placeholder="请填写操作原因" /></label>{!reason.trim() && <small className="field-hint">原因会写入面试历史，便于 HR 后续追踪。</small>}
+      {transitionDraft.target === "cancelled" && canSchedule && canManageTermination(role) && transitionDraft.record.applicationId && <button className="button secondary" type="button" disabled={transitioning} onClick={() => { setTerminationRecord(transitionDraft.record); setTransitionDraft(null); }}>候选人退出，终止本次招聘</button>}
+    </div><footer className="modal-footer"><button className="button secondary" type="button" disabled={transitioning} onClick={() => setTransitionDraft(null)}>返回</button><button className="button danger" type="button" disabled={transitioning || !reason.trim()} onClick={() => void submitTerminalTransition()}>{transitioning ? "正在保存" : transitionDraft.target === "cancelled" ? "仅取消本场面试" : "确认操作"}</button></footer></section></div>}
+    {terminationRecord && canSchedule && canManageTermination(role) && <TerminationDialog applicationId={terminationRecord.applicationId} candidateName={terminationRecord.candidate} jobTitle={terminationRecord.position} onClose={() => setTerminationRecord(null)} onChanged={onRetry} />}
   </div>;
 }
 
@@ -362,7 +372,7 @@ function FeedbackForm({ record, onBack, backLabel, onSaved, onNotify, actorName 
       <section className="feedback-form-section"><header><h3>结构化评价</h3><p>仅当前面试官可编辑自己的草稿和反馈。</p></header>{feedbackRatingDimensions.map(([key, label]) => <div className="rating-row" key={key}><strong>{label}<span>*</span></strong><div>{ratingOptions.slice(1).map((option) => <button type="button" disabled={!editing || submitting} className={form.ratings[key] === option ? "active" : ""} key={option} onClick={() => rate(key, option)}>{option}</button>)}</div>{errors[key] && <small className="field-error">{errors[key]}</small>}</div>)}<label>候选人优点 <span>*</span><textarea disabled={!editing || submitting} rows="4" value={form.strengths} onChange={(event) => update("strengths", event.target.value)} placeholder="记录与岗位相关的优势和证据" />{errors.strengths && <small className="field-error">{errors.strengths}</small>}</label><label>风险与待确认项 <span>*</span><textarea disabled={!editing || submitting} rows="4" value={form.risks} onChange={(event) => update("risks", event.target.value)} placeholder="记录风险、信息缺口或后续建议" />{errors.risks && <small className="field-error">{errors.risks}</small>}</label><div className="feedback-conclusion"><strong>面试结论 <span>*</span></strong><div>{["强烈推荐", "推荐", "待补充评估", "不推荐"].map((option) => <button type="button" disabled={!editing || submitting} className={form.conclusion === option ? "active" : ""} key={option} onClick={() => update("conclusion", option)}>{option}</button>)}</div>{errors.conclusion && <small className="field-error">{errors.conclusion}</small>}</div><label>补充说明<textarea disabled={!editing || submitting} rows="3" value={form.notes} onChange={(event) => update("notes", event.target.value)} placeholder="可选：给 HR 或下一轮面试官的建议" /></label>{existing && editing && <label className="edit-reason">修改原因 <span>*</span><input disabled={submitting} value={editReason} onChange={(event) => { setEditReason(event.target.value); setErrors((current) => ({ ...current, editReason: "" })); }} placeholder="说明为什么需要修改已提交反馈" />{errors.editReason && <small className="field-error">{errors.editReason}</small>}</label>}{submitError && <div className="feedback-submit-error" role="alert"><CircleAlert size={18} /><div><strong>反馈请求失败</strong><p>{submitError}</p></div><button type="button" disabled={submitting || loading} onClick={() => void submit()}><RefreshCw size={14} />重试提交</button></div>}{editing && <footer><span><Check size={14} />{draftState}</span><button className="button primary" type="button" disabled={submitting || loading || !ownsFeedback} onClick={() => void submit()}><Send size={16} />{submitting ? "正在提交" : "提交反馈"}</button></footer>}</section></main><aside className="feedback-aside"><section><h3>面试信息</h3><dl><div><dt>方式</dt><dd>{record.method}</dd></div><div><dt>时长</dt><dd>{record.duration} 分钟</dd></div><div><dt>面试官</dt><dd>{record.interviewers.join("、")}</dd></div><div><dt>面试安排负责人</dt><dd>{record.owner}</dd></div></dl></section><section><h3>提交后</h3><p>HR 将汇总本轮反馈，并决定推进、追加面试、淘汰或加入人才库。</p></section>{!ownsFeedback && <section className="permission-note"><AlertTriangle size={17} /><div><strong>只读反馈</strong><p>你不是该面试的反馈参与人。</p></div></section>}</aside></div></InterviewFeedbackWorkspace></div>;
 }
 
-export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSelectedInterviewId, scheduleCandidateId, records, status, error, onRetry, nextCursor, loadingMore, onLoadMore, candidates, onNotify, onBack, backLabel = "返回面试列表", onOpenSubView, onRecordsChanged, canSchedule = true, canCorrectCandidateEmail = false, candidateEmailController, actorName = "张小北", actorId, controller, pageActionHost }) {
+export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSelectedInterviewId, scheduleCandidateId, records, status, error, onRetry, nextCursor, loadingMore, onLoadMore, candidates, onNotify, onBack, backLabel = "返回面试列表", onOpenSubView, onRecordsChanged, canSchedule = true, role, canCorrectCandidateEmail = false, candidateEmailController, actorName = "张小北", actorId, controller, pageActionHost }) {
   const selectedInterview = records.find((item) => item.id === selectedInterviewId) || null;
   const scheduleCandidate = candidates.find((item) => item.id === scheduleCandidateId || item.candidateId === scheduleCandidateId) || candidates[0] || null;
   const participantApplicationId = selectedInterview?.applicationId || scheduleCandidate?.applicationId || scheduleCandidate?.application?.id || "";
@@ -509,5 +519,5 @@ export function InterviewsWorkspace({ mode, setMode, selectedInterviewId, setSel
 
   if (mode === "schedule" && canSchedule) return <div className="interview-schedule-recovery">{correctionNotice}<ScheduleWorkspace key={selectedInterview?.id || scheduleCandidateId || "new-interview"} record={selectedInterview} candidateId={scheduleCandidateId} candidates={candidates} participantOptions={participantOptions} participantStatus={participantStatus} onRetryParticipants={() => setParticipantReloadKey((value) => value + 1)} onBack={backToList} backLabel={backLabel} onSave={saveRecord} onGetAvailability={(filters, options) => controller.availability(filters, options)} onNotify={onNotify} />{correctionDialog}</div>;
   if (mode === "feedback" && selectedInterview) return <FeedbackForm record={selectedInterview} onBack={backToList} backLabel={backLabel} onSaved={async (_record, feedback) => { await onRecordsChanged({ ...selectedInterview, feedback, feedbackStatus: "已提交" }); }} onNotify={onNotify} actorName={actorName} userId={actorId} controller={controller} />;
-  return <>{correctionNotice}<InterviewList records={records} status={status} error={error} onRetry={onRetry} nextCursor={nextCursor} loadingMore={loadingMore} onLoadMore={onLoadMore} onLoadRange={(range, options) => controller.listRange({ ...range, timezone: "Asia/Shanghai" }, options)} onSchedule={openSchedule} onFeedback={openFeedback} onDownload={(record) => void downloadCalendar(record)} onTransition={transitionRecord} onResendEmail={resendCandidateEmail} resendState={resendState} canSchedule={canSchedule} interviewerId={actorId} pageActionHost={pageActionHost} controller={controller} />{correctionDialog}</>;
+  return <>{correctionNotice}<InterviewList records={records} status={status} error={error} onRetry={onRetry} nextCursor={nextCursor} loadingMore={loadingMore} onLoadMore={onLoadMore} onLoadRange={(range, options) => controller.listRange({ ...range, timezone: "Asia/Shanghai" }, options)} onSchedule={openSchedule} onFeedback={openFeedback} onDownload={(record) => void downloadCalendar(record)} onTransition={transitionRecord} onResendEmail={resendCandidateEmail} resendState={resendState} canSchedule={canSchedule} role={role} interviewerId={actorId} pageActionHost={pageActionHost} controller={controller} />{correctionDialog}</>;
 }

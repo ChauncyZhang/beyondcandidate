@@ -4,6 +4,7 @@ import { apiClient } from "./apiClient.js";
 import { getSessionMessage } from "./session.js";
 import { getFeishuCallbackErrorCode, getFeishuLoginErrorMessage, startFeishuAuthorization } from "./feishuIntegration.js";
 import "./product-theme-admin.css";
+import { BrandMark, useBranding } from "./Branding.jsx";
 
 export function SessionLoadingView() {
   return (
@@ -41,6 +42,7 @@ export function formatLockoutDuration(totalSeconds) {
 }
 
 export function LoginView({ error, retryAfterSeconds, submitting, onLogin, initialEmail = "", loadAuthContext = apiClient.getAuthContext, client = apiClient }) {
+  const branding = useBranding();
   const [form, setForm] = useState({ organization_slug: "", email: initialEmail, password: "" });
   const [authContextStatus, setAuthContextStatus] = useState("loading");
   const [feishuStatus, setFeishuStatus] = useState("idle");
@@ -169,9 +171,9 @@ export function LoginView({ error, retryAfterSeconds, submitting, onLogin, initi
     <main className="login-page">
       <section className="login-card" aria-labelledby="login-title">
         <header className="login-heading">
-          <div className="login-mark" aria-hidden="true"><img src="/favicon.svg" alt="" /></div>
+          <BrandMark className="login-mark" />
           <div>
-            <p>BeyondCandidate · 候选人全流程招聘平台</p>
+            <p>{branding.name} · 候选人全流程招聘平台</p>
             <h1 id="login-title">{recoveryOpen ? "找回密码" : "登录工作台"}</h1>
           </div>
         </header>

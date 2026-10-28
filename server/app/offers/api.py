@@ -21,6 +21,9 @@ from server.app.offers.service import (
     OfferNotFound,
     OfferVersionConflict,
     _audit,
+    _lock_application,
+    _require_forward_application,
+    _application_terminated,
     create_offer,
     decide_approval,
     submit_offer,
@@ -111,7 +114,11 @@ def _offer(db, principal, offer_id, action=RecruitingAction.READ, *, lock=False)
         Offer.organization_id == principal.organization_id, Offer.id == offer_id,
         job_scope,
     )
-    return db.scalar(query.with_for_update() if lock else query)
+    offer = db.scalar(query)
+    if offer is not None and lock:
+        _lock_application(db, principal.organization_id, offer.application_id)
+        offer = db.scalar(query.with_for_update(of=Offer).execution_options(populate_existing=True))
+    return offer
 
 
 def _can_manage(db, principal, offer):
@@ -157,7 +164,11 @@ def _offer_view(db, offer, principal):
     job = db.scalar(select(Job).where(Job.organization_id == offer.organization_id, Job.id == offer.job_id))
     can_manage = _can_manage(db, principal, offer)
     can_view_sensitive = can_manage or _is_approval_participant(db, principal, offer)
+    terminated = _application_terminated(db, offer.organization_id, offer.application_id)
+    can_manage = can_manage and not terminated
     pending_approval_id = db.scalar(select(OfferApproval.id).where(OfferApproval.organization_id == offer.organization_id, OfferApproval.offer_id == offer.id, OfferApproval.assignee_id == principal.user_id, OfferApproval.status == "pending"))
+    if terminated:
+        pending_approval_id = None
     is_assignee = pending_approval_id is not None
     response = db.scalar(select(OfferResponse).where(OfferResponse.organization_id == offer.organization_id, OfferResponse.offer_id == offer.id))
     content = current.content if current and can_view_sensitive else {"redacted": True}
@@ -192,7 +203,7 @@ def _offer_view(db, offer, principal):
             "manage_attachment": can_manage and offer.status == "ready_to_send" and current is not None and not deadline_expired and not send_queued and candidate is not None and candidate.deleted_at is None,
             "update": can_manage and offer.status in {"draft", "changes_requested", "ready_to_send", "sent"},
             "submit": can_manage and offer.status in {"draft", "changes_requested"},
-            "withdraw": can_manage and offer.status not in {"withdrawn", "expired"},
+            "withdraw": can_manage and offer.status not in {"accepted", "withdrawn", "expired"},
             "send": can_manage and offer.status == "ready_to_send" and current is not None and content_ready and not deadline_expired and not send_queued,
             "decide": is_assignee and offer.status == "pending_approval",
             "proxy_response": can_manage and offer.status == "sent" and current is not None and current.id == offer.current_version_id,
@@ -327,6 +338,7 @@ def _attachment_mutation(db, request, principal, offer_id, expected, content=Non
     offer = _offer(db, principal, offer_id, lock=True)
     if offer is None or not _can_manage(db, principal, offer):
         raise OfferNotFound
+    _require_forward_application(db, offer.organization_id, offer.application_id)
     if offer.version != expected:
         raise OfferVersionConflict
     candidate = db.scalar(select(Candidate).join(Application, (Application.organization_id == Candidate.organization_id) & (Application.candidate_id == Candidate.id)).where(
@@ -480,9 +492,10 @@ def set_offer_default_approver(
 
     def action(db):
         def configure():
-            offer = _offer(db, principal, offer_id)
+            offer = _offer(db, principal, offer_id, lock=True)
             if offer is None or not _can_manage(db, principal, offer):
                 raise OfferNotFound
+            _require_forward_application(db, offer.organization_id, offer.application_id)
             job = db.scalar(select(Job).where(
                 Job.organization_id == principal.organization_id,
                 Job.id == offer.job_id,
@@ -678,7 +691,9 @@ def pending_approvals(request: Request):
             "sequence": approval.sequence,
             "round_number": approval.round_number,
             "version_number": approval.version_number,
-        } for approval, offer, application, job, candidate in rows])
+        } for approval, offer, application, job, candidate in rows
+            if offer.status == "pending_approval"
+            and not _application_terminated(db, offer.organization_id, application.id)])
 
 
 @router.post("/api/v1/offers/{offer_id}/send")
@@ -690,6 +705,7 @@ def send_offer(offer_id: UUID, request: Request, if_match: str | None = Header(N
             def action():
                 offer = _offer(db, principal, offer_id, lock=True)
                 if offer is None or not _can_manage(db, principal, offer): raise OfferNotFound
+                _require_forward_application(db, offer.organization_id, offer.application_id)
                 if offer.version != expected: raise OfferVersionConflict
                 current = db.scalar(select(OfferVersion).where(OfferVersion.organization_id == offer.organization_id, OfferVersion.id == offer.current_version_id).with_for_update())
                 now = datetime.now(timezone.utc)
@@ -777,7 +793,9 @@ def get_public_offer(token: str, request: Request):
             JobJdVersion.job_id == offer.job_id,
         ).order_by(JobJdVersion.version_number.desc(), JobJdVersion.id.desc()).limit(1))
         expiry = access.expires_at.replace(tzinfo=timezone.utc) if access.expires_at.tzinfo is None else access.expires_at
-        if offer.status in {"accepted", "declined", "withdrawn"}: status = offer.status
+        if offer.status in {"accepted", "declined"}: status = offer.status
+        elif _application_terminated(db, offer.organization_id, application.id): status = "withdrawn"
+        elif offer.status == "withdrawn": status = offer.status
         elif offer.current_version_id != version.id or access.revoked_at is not None: status = "superseded"
         elif expiry <= datetime.now(timezone.utc): status = "expired"
         elif offer.status == "sent" and access.delivered_at is not None: status = "sent"

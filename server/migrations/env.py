@@ -13,6 +13,7 @@ from server.app.llm import models as llm_models  # noqa: F401
 from server.app.interviews import models as interview_models  # noqa: F401
 from server.app.integrations.feishu import models as feishu_models  # noqa: F401
 from server.app.recruiting import models as recruiting_models  # noqa: F401
+from server.app.recruiting import termination_models  # noqa: F401
 from server.app.talent import models as talent_models  # noqa: F401
 from server.app.notifications import models as notification_models  # noqa: F401
 from server.app.offers import models as offer_models  # noqa: F401

@@ -25,6 +25,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { apiClient } from "./apiClient.js";
+import { TerminationEntry } from "./TerminationViews.jsx";
 import { displayOfferDeadline, offerDeadlineDateValue, offerDeadlineEndOfDay } from "./offerDeadline.js";
 import { canPerformAction } from "./roleCapabilities.js";
 import { applyOfferTemplate, createProxyResponsePayload, filterEligibleSpecialApprovers, offerDraftFieldIssue, offerTemplateSyntaxIssue, renderOfferTemplateText } from "./offerController.js";
@@ -68,6 +69,8 @@ export function canRenderOfferAction(role, offer, action) {
 }
 
 export function offerErrorMessage(error, action = "操作") {
+  if (error?.code === "application_termination_required") return "候选人已接受 Offer，请使用“放弃入职 / 终止本次招聘”，不能仅撤回 Offer。";
+  if (error?.code === "application_terminated") return "本次申请已终止，不能继续办理。历史记录仍可查看。";
   const attachmentErrors = {
     offer_attachment_invalid: "请选择有效的 PDF 文件。",
     offer_attachment_invalid_type: "请选择有效的 PDF 文件。",
@@ -184,10 +187,11 @@ function OfferHistory({ history }) {
     <header><History size={18} /><div><h4 id="offer-history-title">审批记录</h4><p>保留每次审批结果和退回意见，便于后续核对。</p></div></header>
     {approvals.length > 0 && <ol className="offer-approval-history">
       {approvals.map((approval) => {
-        const statusLabel = approval.status === "approved" ? "已批准" : approval.status === "rejected" ? "已退回修改" : approval.status === "waiting" ? "等待前序审批" : "待审批";
+        const statusLabel = approval.status === "cancelled" ? "已取消" : approval.status === "approved" ? "已批准" : approval.status === "rejected" ? "已退回修改" : approval.status === "waiting" ? "等待前序审批" : "待审批";
         const decidedAt = approval.decidedAt || approval.decided_at;
         return <li key={approval.id} className={`offer-approval-entry ${approval.status}`}>
-          <div className="offer-approval-entry-heading"><span>第 {approval.roundNumber ?? approval.round_number ?? 1} 轮 · 第 {approval.sequence} 步</span><strong>{statusLabel}</strong><small>{decidedAt ? displayDate(decidedAt) : "尚未处理"}</small></div>
+          <div className="offer-approval-entry-heading"><span>第 {approval.roundNumber ?? approval.round_number ?? 1} 轮 · 第 {approval.sequence} 步</span><strong>{statusLabel}</strong><small>{decidedAt ? displayDate(decidedAt) : approval.status === "cancelled" ? "无需审批" : "尚未处理"}</small></div>
+          {approval.status === "cancelled" && <div>{(approval.assigneeName || approval.assigneeId || approval.assignee_id) && <p>原审批人：{approval.assigneeName || approval.assigneeId || approval.assignee_id}</p>}{approval.reason && <p>取消说明：{approval.reason}</p>}</div>}
           {approval.status === "rejected" && <div className="offer-rejection-reason"><strong>退回原因</strong><p>{approval.reason || "审批人未填写具体原因，请联系审批人确认。"}</p><small>请根据以上意见修改 Offer，保存新内容后重新提交审批。</small></div>}
         </li>;
       })}
@@ -525,6 +529,7 @@ const ONBOARDING_STATUS_LABELS = Object.freeze({
 });
 
 const ONBOARDING_ERROR_MESSAGES = Object.freeze({
+  application_terminated: "本次申请已终止，不能继续办理。历史资料和外部审批记录仍可查看。",
   candidate_deletion_pending: "该候选人正在等待数据删除处理，不能办理入职。",
   feishu_approver_required: "尚未配置固定审批人，请管理员前往“设置 → 飞书集成 → 入职审批”选择审批人并重新校验。",
   feishu_approver_unavailable: "固定审批人已停用或未绑定飞书账号，请管理员重新选择并校验。",
@@ -636,9 +641,10 @@ function OnboardingSection({ onboarding, loadingError, controller, onChanged, on
   const submitted = onboarding.status === "submitted";
   const submitting = onboarding.status === "submitting";
   const failed = onboarding.status === "failed";
-  const canStart = onboarding.complete && onboarding.canSubmit && !submitted && !submitting;
+  const terminated = onboarding.blockingReason === "application_terminated";
+  const canStart = !terminated && onboarding.complete && onboarding.canSubmit && !submitted && !submitting;
   const statusText = ONBOARDING_STATUS_LABELS[onboarding.status] || "待准备";
-  const blocker = !onboarding.complete
+  const blocker = terminated ? onboardingErrorMessage("application_terminated") : !onboarding.complete
     ? onboardingErrorMessage(onboarding.blockingReason, "入职资料尚未完整，请先补充后再办理。")
     : !onboarding.canSubmit && !submitted && !submitting
       ? `预计到岗日 ${displayDate(onboarding.expectedStartDate, true)} 到达后可办理入职。`
@@ -668,7 +674,7 @@ function OnboardingSection({ onboarding, loadingError, controller, onChanged, on
     </dl>
     <div className={`onboarding-message${failed ? " is-error" : submitted ? " is-success" : ""}`} role={failed ? "alert" : "status"}>
       {failed ? <AlertTriangle size={17} /> : submitted ? <CheckCircle2 size={17} /> : <Clock3 size={17} />}
-      <span>{submitted ? `飞书审批已创建${onboarding.instanceCode ? `，实例编号：${onboarding.instanceCode}` : ""}。` : blocker}</span>
+      <span>{terminated ? `${blocker}${onboarding.instanceCode ? ` 原飞书实例编号：${onboarding.instanceCode}。` : ""}` : submitted ? `飞书审批已创建${onboarding.instanceCode ? `，实例编号：${onboarding.instanceCode}` : ""}。` : blocker}</span>
     </div>
     {error && <div className="offer-error" role="alert"><AlertTriangle size={17} />{error}</div>}
     <footer>
@@ -797,7 +803,8 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
   if (state.status === "error" && !state.offer) return <div className="offer-state error" role="alert"><AlertTriangle size={24} /><strong>Offer 无法加载</strong><span>{state.error}</span><button className="button secondary" type="button" onClick={() => void load()}><RefreshCw size={16} />重试</button></div>;
 
   const offer = state.offer;
-  if (!offer) return <div className="offer-workspace"><header className="offer-heading"><div><h3>Offer 管理</h3><p>填写并提交审批；审批通过后由 HR 核对并发送给候选人。</p></div></header><OfferProgress />{canPerformAction(role, "管理 Offer") ? <OfferDraftForm applicationId={applicationId} templates={state.templates} defaultTemplateId={state.defaultTemplateId} context={templateContext} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} /> : <div className="offer-state"><FileText size={24} /><strong>暂无 Offer</strong><span>当前角色不能创建 Offer。</span></div>}</div>;
+  const terminationEntry = <TerminationEntry applicationId={offer?.applicationId || applicationId} candidateName={offer?.candidateName || candidate?.name} jobTitle={offer?.jobTitle || candidate?.position} role={role} stage={candidate?.application?.stage || candidate?.stage} label={offer?.status === "accepted" ? "放弃入职 / 终止本次招聘" : undefined} onChanged={() => void load()} />;
+  if (!offer) return <div className="offer-workspace"><header className="offer-heading"><div><h3>Offer 管理</h3><p>填写并提交审批；审批通过后由 HR 核对并发送给候选人。</p></div>{terminationEntry}</header><OfferProgress />{canPerformAction(role, "管理 Offer") ? <OfferDraftForm applicationId={applicationId} templates={state.templates} defaultTemplateId={state.defaultTemplateId} context={templateContext} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} /> : <div className="offer-state"><FileText size={24} /><strong>暂无 Offer</strong><span>当前角色不能创建 Offer。</span></div>}</div>;
 
   const sensitive = Boolean(offer.canViewSensitiveContent ?? offer.can_view_sensitive_content);
   const contentReady = Boolean(offer.contentReady ?? offer.content_ready);
@@ -820,6 +827,7 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
     {offer.status === "sent" && <div className="offer-sent-notice" role="status"><CheckCircle2 size={20} /><div className="offer-notice-content"><strong>Offer 已发送</strong><small>邮件已投递，正在等待候选人确认；候选人需在 {deadline} 前回复。</small></div></div>}
     {offer.status === "changes_requested" && <div className="offer-changes-notice" role="alert"><Undo2 size={20} /><div className="offer-notice-content"><strong>审批未通过，需要修改 Offer</strong><p><b>退回原因：</b>{latestRejectionReason || "审批人未填写具体原因，请联系审批人确认。"}</p><small>请在下方修改内容，保存后重新提交审批。</small></div></div>}
     {["accepted", "declined"].includes(offer.status) && <section className="offer-result" aria-labelledby="offer-result-title"><h4 id="offer-result-title">最终确认结果</h4><OfferResponseRecord response={offer.response || state.history?.responses?.at(-1)} current /></section>}
+    {terminationEntry}
     {offer.status === "accepted" && <OnboardingSection onboarding={state.onboarding || offer.onboarding} loadingError={state.onboardingError} controller={controller} onChanged={(onboarding) => setState((current) => ({ ...current, onboarding, onboardingError: "" }))} onNotify={onNotify} />}
     {!sensitive ? <div className="offer-redacted" role="status"><ShieldCheck size={22} /><strong>敏感内容已由服务端隐藏</strong><span>当前账号只能查看 Offer 状态，薪酬和正文不会在浏览器中展示。</span></div> : <>
       {(["draft", "changes_requested"].includes(offer.status) || (offer.status === "ready_to_send" && deadlineExpired)) && canRenderOfferAction(role, offer, "update") && <OfferDraftForm offer={offer} templates={state.templates} defaultTemplateId={state.defaultTemplateId} applicationId={applicationId} context={templateContext} controller={controller} role={role} onSaved={(saved) => saved ? setState((current) => ({ ...current, offer: saved })) : void load()} onNotify={onNotify} />}
@@ -828,7 +836,7 @@ export function CandidateOfferView({ candidate, offerId, role, controller, appro
     {canDecide && <ApprovalDecision offer={offer} approvalId={decisionApprovalId} controller={controller} onSaved={(saved) => setState((current) => ({ ...current, offer: saved }))} onNotify={onNotify} />}
     {sensitive && (offer.status === "ready_to_send" || offer.attachment) && <OfferAttachment offer={offer} action={action} manageable={offer.status === "ready_to_send" && !sendQueued && !deadlineExpired && canRenderOfferAction(role, offer, "manage_attachment")} onUpload={(file) => void run("uploadAttachment", () => controller.uploadAttachment(offer, file), "正式 Offer 附件已上传", "上传附件")} onRemove={() => void run("removeAttachment", () => controller.removeAttachment(offer), "正式 Offer 附件已移除", "移除附件")} />}
     <div className="offer-actions">
-      {canRenderOfferAction(role, offer, "withdraw") && <button className="button secondary" type="button" disabled={Boolean(action)} onClick={() => void run("withdraw", () => controller.withdraw(offer), "Offer 已撤回")}><XCircle size={16} />{action === "withdraw" ? "撤回中…" : "撤回 Offer"}</button>}
+      {offer.status !== "accepted" && canRenderOfferAction(role, offer, "withdraw") && <button className="button secondary" type="button" disabled={Boolean(action)} onClick={() => void run("withdraw", () => controller.withdraw(offer), "Offer 已撤回")}><XCircle size={16} />{action === "withdraw" ? "撤回中…" : "撤回 Offer"}</button>}
       {canRenderOfferAction(role, offer, "send") && <button className="button primary" type="button" disabled={Boolean(action)} onClick={() => void run("send", () => controller.send(offer), "已加入发送队列", "Offer 发送")}><Send size={16} />{action === "send" ? "提交中…" : "确认并发送 Offer"}</button>}
       {offer.status === "sent" && canRenderOfferAction(role, offer, "proxy_response") && <button ref={proxyButtonRef} className="button primary" type="button" disabled={Boolean(action)} onClick={() => setProxyOpen(true)}><CheckCircle2 size={16} />代候选人确认</button>}
       {offer.status === "ready_to_send" && !canRenderOfferAction(role, offer, "send") && <button className="button secondary" type="button" disabled aria-disabled="true"><Send size={16} />{sendQueued ? "邮件发送中" : deadlineExpired ? "请先更新截止时间" : contentReady ? "当前账号无发送权限" : "请先补全 Offer"}</button>}

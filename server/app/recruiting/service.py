@@ -199,6 +199,7 @@ def transition_application_record(db, organization_id, application_id, target, *
             Application.id == application_id,
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if (
         application is None
@@ -297,6 +298,7 @@ def apply_application_workflow_action_record(
             Application.id == application_id,
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if application is None or application.version != expected_version:
         raise ResourceVersionConflict

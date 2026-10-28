@@ -14,8 +14,11 @@ test("the product shell uses the BeyondCandidate identity instead of a prototype
     readFile(new URL("../../deploy/nginx/Dockerfile", import.meta.url), "utf8"),
   ]);
 
-  for (const source of [index, app, login, invite]) {
-    assert.match(source, /BeyondCandidate/);
+  assert.match(index, /BeyondCandidate/);
+  for (const source of [app, login, invite]) {
+    assert.match(source, /BrandMark/);
+    assert.match(source, /branding\.name/);
+    assert.doesNotMatch(source, /BeyondCandidate|\/favicon\.svg/);
     assert.doesNotMatch(source, />Prototype</i);
   }
   assert.match(index, /favicon\.svg/);

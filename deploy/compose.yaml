@@ -20,6 +20,7 @@ x-app-environment: &app-environment
   EMAIL_ENCRYPTION_KEY: ${EMAIL_ENCRYPTION_KEY}
   EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-careers@beyondcandidate.com}
   EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-BeyondCandidate}
+  PRODUCT_BRANDING_FILE: /run/product-branding.json
   EMAIL_SMTP_TIMEOUT_SECONDS: ${EMAIL_SMTP_TIMEOUT_SECONDS:-10}
   OFFER_PUBLIC_BASE_URL: ${OFFER_PUBLIC_BASE_URL:-http://localhost:8080}
   LLM_PROVIDER_ALLOWLIST_JSON: ${LLM_PROVIDER_ALLOWLIST_JSON:-{}}
@@ -47,6 +48,8 @@ x-app-service: &app-service
     dockerfile: server/Dockerfile
     target: runtime
   environment: *app-environment
+  volumes:
+    - ../frontend/public/branding.json:/run/product-branding.json:ro
   depends_on:
     postgres:
       condition: service_healthy
@@ -68,6 +71,7 @@ services:
       - "${HTTP_PORT:-8080}:8080"
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../frontend/public/branding.json:/usr/share/nginx/html/branding.json:ro
     depends_on:
       api:
         condition: service_healthy

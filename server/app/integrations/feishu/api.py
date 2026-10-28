@@ -231,7 +231,7 @@ def test_config(request: Request):
                 request.app.state.feishu_provider.send_message(
                     credentials,
                     binding_open_id,
-                    "BeyondCandidate 飞书招聘提醒测试成功。",
+                    f"{request.app.state.product_branding.name} 飞书招聘提醒测试成功。",
                     idempotency_key=str(uuid4()),
                 )
             except FeishuProviderError as error:

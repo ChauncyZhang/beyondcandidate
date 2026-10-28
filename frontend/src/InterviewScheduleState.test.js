@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { getInterviewManagementStatus } from "./interviewViewState.js";
 
 const source = readFileSync(new URL("./ScheduleWorkspace.jsx", import.meta.url), "utf8");
 const viewsSource = readFileSync(new URL("./InterviewViews.jsx", import.meta.url), "utf8");
@@ -139,7 +140,22 @@ test("reschedules keep the existing candidate visible and immutable", () => {
 });
 
 test("HR can cancel eligible interviews and mark arrived interviews as no-show", () => {
-  assert.match(viewsSource, /record\.status === "待确认"/);
+  const helper = viewsSource.match(/export function getInterviewTerminalActions\(record, canSchedule\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(helper, "terminal actions must expose the status contract");
+  const actions = vm.runInNewContext(`(${helper.replace("export ", "")})`, { getInterviewManagementStatus });
+  for (const status of ["待确认", "待评价", "待反馈", "已完成"]) {
+    const result = actions({ status, feedbackStatus: "待反馈" }, true);
+    assert.deepEqual(Array.from(result, (action) => action.target), ["cancelled"]);
+  }
+  for (const status of ["已安排", "已确认"]) {
+    const result = actions({ status }, true);
+    assert.deepEqual(Array.from(result, (action) => action.target), ["cancelled", "no_show"]);
+  }
+  for (const record of [{ status: "已完成", feedbackStatus: "已提交" }, { status: "已取消" }, { status: "未到场" }]) {
+    assert.equal(actions(record, true).length, 0);
+  }
+  assert.equal(actions({ status: "待确认" }, false).length, 0);
+  assert.deepEqual(Array.from(actions({ status: "待评价", workflowStatus: "已确认" }, true), (action) => action.target), ["cancelled", "no_show"]);
   assert.match(viewsSource, /target: "no_show", label: "标记未到场"/);
   assert.match(viewsSource, /请填写操作原因/);
   assert.match(viewsSource, /onTransition\(transitionDraft\.record, transitionDraft\.target, reason\.trim\(\)\)/);

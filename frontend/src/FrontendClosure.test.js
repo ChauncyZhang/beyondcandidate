@@ -552,7 +552,7 @@ test("awaiting evaluation is labeled consistently in list filters and calendar w
   } finally { await context.close(); }
 });
 
-test("elapsed awaiting evaluation retains HR management without granting it to completed interviews", { timeout: 30000 }, async () => {
+test("elapsed interviews retain HR management while completed interviews only permit cancellation before feedback", { timeout: 30000 }, async () => {
   const base = {
     application_id: "22222222-2222-4222-8222-222222222222", job: { id: notificationJobId, title: "AI 工程师" },
     round_name: "一面", method: "phone", timezone: "Asia/Shanghai", starts_at: "2026-10-26T02:00:00Z", ends_at: "2026-10-26T03:00:00Z",
@@ -571,7 +571,8 @@ test("elapsed awaiting evaluation retains HR management without granting it to c
       assert.equal(await elapsed.getByRole("button", { name, exact: false }).count(), 1);
     }
     const completed = page.locator(".interview-table-row").filter({ has: page.getByText("已手动完成面试", { exact: true }) });
-    assert.equal(await completed.locator(".interview-row-actions").getByRole("button", { name: /完成面试|改期|取消面试|标记未到场/ }).count(), 0);
+    assert.equal(await completed.locator(".interview-row-actions").getByRole("button", { name: /完成面试|改期|标记未到场/ }).count(), 0);
+    assert.equal(await completed.getByRole("button", { name: "取消面试", exact: true }).count(), 1);
     await elapsed.getByRole("button", { name: "标记未到场", exact: true }).click();
     await page.getByRole("dialog", { name: "标记未到场", exact: true }).getByLabel(/操作原因/).waitFor();
   } finally { await context.close(); }

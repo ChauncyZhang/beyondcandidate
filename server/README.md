@@ -16,6 +16,34 @@ genuinely off-host backup destination with a complete restore drill, and the act
 This Phase 6C foundation is fail-closed and is not production ready; do not open production traffic
 until every runbook blocker and environment gate has passed.
 
+## Product Display Branding
+
+`frontend/public/branding.json` is the community runtime default. It configures
+`name`, `short_name`, `logo_url` and optional `favicon_url`; the default remains
+BeyondCandidate / BC. The browser reads `/branding.json` before mounting the
+application and applies it to the shell, login/invitation pages, document title
+and favicon. Image paths are same-origin absolute paths, or `null` for a
+short-name monogram. External URLs, query/fragment, backslash and traversal are
+not permitted. There is no new anonymous API or database branding record.
+
+Compose mounts that same file read-only into proxy, API and worker. The backend
+loads `PRODUCT_BRANDING_FILE` at process startup for product-facing Feishu
+messages. An explicitly configured unreadable or invalid file is an error;
+standalone processes with no branding file use the community default. Website
+branding does not change organization/legal names, SMTP sender identity,
+cryptographic derivation identifiers, database names or repository paths.
+
+Deployment layers may replace this JSON and provide same-origin logo assets
+without modifying public product code. Recreate the affected containers when
+changing runtime branding; do not rely on a running process re-reading the file.
+Use a new logo filename when replacing an asset to avoid browser image caches.
+
+The real Compose-model regression is `server/tests/test_branding_compose.py`.
+`frontend/src/BrandingCsp.test.js` renders null/broken-logo favicons under the
+actual public Nginx content security policy in Chromium.
+Frontend branding/controller/browser tests participate in the normal Node gate;
+backend branding/settings and Feishu tests participate in `server/tests`.
+
 ## Local tests
 
 The reproducible test path uses the project's Python 3.12 Docker target:
@@ -48,6 +76,79 @@ available without reopening genuinely completed interviews.
 
 These files participate in normal pytest/Node test discovery. Browser checks use
 mocked HTTP responses; they do not modify real interviews or validate Feishu.
+
+### Interview Cancellation And Application Termination
+
+HR may cancel one unfinished interview (including pending evaluation) without
+ending an application or inferring a hiring decision. Reasons are required;
+submitted feedback and its authors remain historical. Missing or invalid email
+configuration produces a manual-contact notice, not a rollback of cancellation.
+
+Terminating recruitment applies only to one job application. It becomes
+`withdrawn`, retains history, closes unfinished work, revokes effective Offer
+links and stops new forward actions. A hired/accepted application requires an
+explicit confirmation that the candidate has not actually joined. Rehiring
+creates a new application; it cannot restore old tasks or tokens.
+
+| Contract | Durable Regression |
+| --- | --- |
+| Single cancellation, pending feedback, history, reason/authorization and manual notification | `server/tests/test_interview_cancellation.py`, `server/tests/test_interview_api.py` |
+| Scoped termination, versioned preview, idempotency, cleanup and external acknowledgments | `server/tests/test_application_termination.py`, `server/tests/test_application_termination_core.py` |
+| Forward transitions refresh identities cached before a stop and cannot overwrite the terminal row | `server/tests/test_application_termination_stale.py` |
+| Offer/approval/token and queued or in-flight mail boundaries | `server/tests/test_offer_termination_boundaries.py`, `server/tests/test_email_termination_boundaries.py` |
+| Onboarding/Feishu generation fences and late external results | `server/tests/test_onboarding_termination.py`, `server/tests/test_feishu_termination.py` |
+| Late screening results cannot recreate work or advance the old application | `server/tests/test_screening_termination.py` |
+| Migration/grants/redaction and actual termination-vs-accept/feedback/reschedule/onboarding lock waits | `server/tests/test_application_termination_postgres.py` |
+| Existing calendar serialization, known remote cancellation, old-generation replay | `server/tests/test_feishu_termination_postgres.py` |
+| Preview/reason/prearrival confirmation, conflict/refetch preservation, versioned external resolution, independent pending-external workbench and pending-feedback single cancellation at desktop/mobile widths | `frontend/src/RecruitingTermination.test.js`, `frontend/src/terminationController.test.js` |
+| Actual candidate/application/interview and accepted-Offer/onboarding entries, manager history without termination privileges, enabled danger-button hover contrast and modal overflow at 1440/390px | `frontend/src/TerminationEntries.test.js` |
+| Cancelled approval history says cancelled/no approval needed, preserves original assignee/reason, and retains normal approval labels | `frontend/src/OfferTerminationHistory.test.js` |
+
+These cases run in the normal `python -m pytest server/tests` gate. Focused
+development checks may select the files above. The frontend's normal
+`src/*.test.js` gate includes termination controller and browser regressions.
+From `frontend` in PowerShell, run the focused browser/controller gate with
+`$tests = Get-ChildItem src/RecruitingTermination.test.js,src/TerminationEntries.test.js,src/terminationController.test.js,src/OfferTerminationHistory.test.js | Select-Object -ExpandProperty FullName; node --test --test-concurrency=1 $tests`,
+then `npm.cmd run build`. These browser cases use intercepted HTTP and local
+fixtures; they do not prove deployed API authorization, database locking or
+real Feishu/email effects. Hover screenshots are written to
+`.tmp/termination-confirm-hover-1440.png` and `.tmp/termination-confirm-hover-390.png`.
+Use the host Python 3.12 test environment described above; HTTP fixtures are
+isolated SQLite and provider substitutes, not production integrations.
+
+An already-sent or in-flight email cannot be recalled. A Feishu onboarding
+instance is not automatically withdrawn: pending external cleanup remains
+visible separately in the workbench and terminated application. Unknown or
+in-flight creates block manual completion; a new late remote fact reopens
+cleanup without restoring recruitment. Manual completion is an audited HR
+attestation, not provider verification. External calls in tests are synthetic;
+live delivery and Feishu acceptance require separately authorized verification.
+
+For an uncertain onboarding create, **Check Feishu Result** queues a read-only
+lookup of the original request UUID; **Refresh Processing Status** reads its
+latest facts. The lookup uses durable actual-create attempt times, not the
+user's submission time, so queue backlogs and later retries do not move the
+original instance outside the adapter's bounded search windows. It never
+submits a second approval. A found instance enables the
+usual external handling/attestation; a missing result or lookup failure remains
+unknown and cannot be acknowledged. Retry the lookup later or contact the
+Feishu approval administrator with the displayed request generation. Legacy
+requests without an original app/template snapshot and actual-attempt timing,
+or a changed app identity,
+fail closed: restore/verify the original integration identity with an
+administrator rather than starting a new onboarding request or editing status.
+The durable queue permits only organization/onboarding/generation IDs for this
+read-only topic (`test_termination_reconciliation_payload.py`); worker and API
+recovery cases are in `test_onboarding_reconciliation.py`.
+
+For the database gates, set `TERMINATION_POSTGRES_URL` and
+`TERMINATION_CALENDAR_POSTGRES_URL` to two separate, initially empty disposable
+PostgreSQL databases and run the corresponding test file. Both refuse nonempty
+databases, migrate with Alembic and use controlled providers. The caller owns
+bounded database/container cleanup. Calendar synchronization retains its existing
+serialization: termination waits for an already-running calendar request, then
+queues cancellation using the recorded remote ID. Provider HTTP operations have
+timeouts, but there is no strict whole-handler deadline across multiple requests.
 
 ### Invitation And Password Recovery
 

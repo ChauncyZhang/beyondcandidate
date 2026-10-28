@@ -98,6 +98,10 @@ def _authorized_record(db, principal, onboarding_id, *, lock=False):
     if record is None:
         return None
     lock_onboarding_candidate(db, record.organization_id, record.candidate_id)
+    db.scalar(select(Application).where(
+        Application.organization_id == record.organization_id,
+        Application.id == record.application_id,
+    ).with_for_update().execution_options(populate_existing=True))
     return db.scalar(query.with_for_update(of=OnboardingRecord).execution_options(populate_existing=True))
 
 

@@ -13,6 +13,10 @@ services:
       SERVER_NAME: "${SERVER_NAME:?Set SERVER_NAME to the production hostname}"
     volumes: !override
       - type: bind
+        source: ../frontend/public/branding.json
+        target: /usr/share/nginx/html/branding.json
+        read_only: true
+      - type: bind
         source: ./nginx/production.conf.template
         target: /etc/nginx/templates/default.conf.template
         read_only: true

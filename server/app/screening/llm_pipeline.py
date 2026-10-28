@@ -15,7 +15,7 @@ from server.app.recruiting.models import Candidate, JobJdVersion, Resume
 from server.app.recruiting.tasks import normalize_llm_terminal_safe_error_code
 from server.app.screening.models import ScreeningItem, ScreeningResult, ScreeningRun
 from server.app.screening.progress import aggregate_run
-from server.app.screening.actions import CandidateTombstoned, lock_candidate_screening_item
+from server.app.screening.actions import CandidateTombstoned, lock_candidate_screening_item, screening_application_is_terminated
 from server.app.screening.routing import derive_screening_outcome, route_llm_screening_terminal
 
 
@@ -107,6 +107,15 @@ class LlmScreeningPipeline:
                 return
             if item.llm_status != "queued":
                 db.rollback()
+                return
+            if screening_application_is_terminated(db, item):
+                item.llm_status = "skipped"
+                item.llm_safe_error_code = "application_terminated"
+                finished_at = datetime.now(timezone.utc)
+                item.llm_finished_at = item.llm_finished_at or finished_at
+                item.finished_at = item.finished_at or finished_at
+                aggregate_run(db, run)
+                db.commit()
                 return
             if skip_code:
                 if config is not None:
@@ -228,6 +237,8 @@ class LlmScreeningPipeline:
                 self._discard_for_deletion(db,item,run)
                 db.commit()
                 return
+            if screening_application_is_terminated(db, item):
+                retryable = False
             existing = db.scalar(
                 select(LlmInvocation).where(
                     LlmInvocation.organization_id == ids["organization_id"],

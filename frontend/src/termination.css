@@ -1,0 +1,32 @@
+.termination-backdrop { z-index: 1600; padding: 16px; overflow-y: auto; }
+.termination-dialog { width: min(640px, 100%); max-height: calc(100dvh - 32px); overflow-y: auto; border-radius: 8px; min-width: 0; }
+.termination-dialog .modal-header { height: auto; min-height: 68px; padding-block: 14px; gap: 12px; align-items: flex-start; }
+.termination-dialog .modal-header p { margin: 6px 0 0; overflow-wrap: anywhere; }
+.termination-dialog h2 { font-size: 20px; }
+.termination-dialog h3 { font-size: 16px; }
+.termination-body { display: grid; gap: 16px; overflow-wrap: anywhere; }
+.termination-body p { margin: 0; line-height: 1.65; }
+.termination-notice { padding: 12px; background: #fff5d8; color: #674c0d; border-left: 3px solid #bd8a16; }
+.termination-error { color: #ab2637; display: flex; gap: 8px; align-items: flex-start; }
+.termination-counts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 20px; margin: 0; }
+.termination-counts > div { display: flex; justify-content: space-between; border-bottom: 1px solid #e1e4e8; padding: 8px 0; gap: 8px; }
+.termination-counts dd { margin: 0; font-weight: 700; }
+.termination-reason { display: grid; gap: 8px; }
+.termination-reason textarea { width: 100%; box-sizing: border-box; min-width: 0; resize: vertical; }
+.termination-checkbox { display: flex; gap: 10px; align-items: flex-start; line-height: 1.5; }
+.termination-checkbox input { flex: 0 0 auto; margin-top: 4px; }
+.termination-external-items { padding-left: 20px; margin: 0; overflow-wrap: anywhere; }
+.termination-external-items li { margin: 8px 0; }
+.termination-external-items span, .termination-external-items strong { display: block; }
+.pending-termination-panel { border-top: 1px solid #dce1e5; padding: 20px 0; margin: 16px 0; }
+.pending-termination-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pending-termination-panel h2 { font-size: 17px; margin: 0; }
+.pending-termination-row { display: flex; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e1e4e8; padding: 16px 0; }
+.pending-termination-row > div { min-width: 0; }
+.pending-termination-row > div:last-child { display: flex; gap: 8px; flex-wrap: wrap; align-content: flex-start; }
+@media (max-width: 600px) {
+  .termination-dialog .modal-header, .termination-dialog .modal-body, .termination-dialog .modal-footer { padding: 16px; }
+  .termination-dialog .modal-footer { flex-wrap: wrap; }
+  .termination-dialog button { white-space: normal; overflow-wrap: anywhere; }
+  .pending-termination-row { flex-direction: column; }
+}

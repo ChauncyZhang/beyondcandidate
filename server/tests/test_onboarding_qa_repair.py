@@ -193,7 +193,9 @@ def test_service_update_start_and_worker_all_lock_candidate_first(distinct_conte
         return DEFINITION
     ctx.provider.get_approval_definition = definition
     def create(credentials, request, *, idempotency_key):
-        assert any(transaction.is_active and model is Candidate for transaction, model in lock_trace)
+        # Approved termination design: persist the attempt, then release local
+        # locks before remote creation so termination can proceed in flight.
+        assert all(not transaction.is_active for transaction, _ in lock_trace)
         from server.app.integrations.feishu.provider import ApprovalInstance
         return ApprovalInstance("qa_instance")
     ctx.provider.create_approval_instance = create

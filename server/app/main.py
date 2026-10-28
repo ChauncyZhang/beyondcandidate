@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from server.app.core.logging import configure_logging
+from server.app.core.branding import load_product_branding
 from server.app.core.probes import ReadinessProbe, check_readiness
 from server.app.core.settings import Settings
 from server.app.observability.http_metrics import (
@@ -24,12 +25,14 @@ from server.app.observability.http_metrics import (
 )
 from server.app.offers import models as offer_models  # noqa: F401 - registers identity FKs
 from server.app.onboarding import models as onboarding_models  # noqa: F401 - registers onboarding FKs
+from server.app.recruiting import termination_models  # noqa: F401 - registers termination schema before test initialization
 from server.app.identity.api import allowed_origin, problem, router as identity_router, session_token
 from server.app.identity.admin_api import router as identity_admin_router
 from server.app.identity.offboarding_api import router as member_offboarding_router
 from server.app.identity.service import Clock, IdentityService, TokenSource
 from server.app.identity.store import IdentityStore
 from server.app.recruiting.api import router as recruiting_router
+from server.app.recruiting.termination_api import router as termination_router
 from server.app.recruiting.cursor import CursorCodec
 from server.app.recruiting.security import ContactCipher
 from server.app.recruiting.service import SystemClock, SystemTokens
@@ -50,6 +53,8 @@ def _is_governance_path(path: str) -> bool:
 
 
 def _requires_no_store(path: str) -> bool:
+    if (path.startswith("/api/v1/applications/") and "/termination" in path) or path.startswith("/api/v1/application-terminations/"):
+        return True
     return path.startswith("/api/public/v1/offers/") or path.startswith("/api/v1/onboardings") or path.endswith("/onboarding") or _is_governance_path(path) or path.startswith("/api/v1/offers") or path.startswith("/api/v1/offer-approvals") or path.startswith("/api/v1/offer-templates") or path.startswith("/api/v1/email-deliveries") or path.startswith("/api/v1/email-templates") or path.startswith("/api/v1/notifications/") or path.startswith("/api/v1/auth/feishu") or path == "/api/v1/settings" or path.startswith(
         "/api/v1/settings/"
     )
@@ -85,6 +90,7 @@ def create_app(
     export_storage=None,
 ) -> FastAPI:
     settings = settings or Settings.from_environment()
+    product_branding = load_product_branding(settings.product_branding_file)
     from server.app.governance.orm import register_governance_orm
 
     register_governance_orm()
@@ -123,6 +129,7 @@ def create_app(
     http_metrics = HttpMetrics()
     app.state.http_metrics = http_metrics
     app.state.settings = settings
+    app.state.product_branding = product_branding
     app.state.identity_store = IdentityStore(settings.database_url)
     app.state.identity_service = IdentityService(
         app.state.identity_store, clock or Clock(), token_source or TokenSource()
@@ -192,6 +199,7 @@ def create_app(
     app.include_router(identity_admin_router)
     app.include_router(member_offboarding_router)
     app.include_router(recruiting_router)
+    app.include_router(termination_router)
     from server.app.screening.api import router as screening_router
     app.include_router(screening_router)
     from server.app.llm.api import router as llm_router

@@ -31,6 +31,7 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     environment: Literal["development", "test", "production"] = "development"
+    product_branding_file: str | None = None
     database_url: str = "postgresql+asyncpg://app:change-me@postgres/app"
     object_storage_endpoint: str = "minio:9000"
     object_storage_access_key: str = "change-me"
@@ -178,6 +179,7 @@ class Settings(BaseModel):
         values: dict[str, object] = {}
         mapping = {
             "APP_ENVIRONMENT": "environment",
+            "PRODUCT_BRANDING_FILE": "product_branding_file",
             "DATABASE_URL": "database_url",
             "OBJECT_STORAGE_ENDPOINT": "object_storage_endpoint",
             "OBJECT_STORAGE_ACCESS_KEY": "object_storage_access_key",

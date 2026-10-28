@@ -11,6 +11,7 @@ from server.app.identity.models import AuditLog, Job
 from server.app.identity.models import Department
 from server.app.onboarding.models import OnboardingRecord
 from server.app.recruiting.models import Application, Candidate
+from server.app.recruiting.termination_models import ApplicationTermination  # noqa: F401 - register schema
 from server.app.recruiting.service import ResourceVersionConflict
 from server.app.offers.models import Offer, OfferAccessToken, OfferApproval, OfferEvent, OfferResponse, OfferTemplate, OfferVersion, OrganizationSpecialOfferApprover
 from server.app.offers.pdf import offer_pdf_storage_key, render_offer_pdf
@@ -70,6 +71,7 @@ class OfferTokenCodec:
 
 def issue_offer_access_token(db, organization_id, offer, version, *, codec: OfferTokenCodec, now: datetime):
     """Replace every capability for an offer; the raw capability never leaves this call."""
+    _require_forward_application(db, organization_id, offer.application_id)
     for previous in db.scalars(select(OfferAccessToken).where(OfferAccessToken.organization_id == organization_id, OfferAccessToken.offer_id == offer.id, OfferAccessToken.revoked_at.is_(None)).with_for_update()):
         previous.revoked_at = now
     token, raw = codec.issue(organization_id=organization_id, offer_id=offer.id, offer_version_id=version.id, expires_at=version.candidate_response_deadline)
@@ -81,12 +83,12 @@ def issue_offer_access_token(db, organization_id, offer, version, *, codec: Offe
 def public_offer_access(db, raw_token: str, *, codec: OfferTokenCodec, now: datetime, lock: bool = False, allow_inactive: bool = False):
     digest = hashlib.sha256(raw_token.encode("ascii")).hexdigest()
     query = select(OfferAccessToken).where(OfferAccessToken.token_hash == digest)
-    token = db.scalar(query.with_for_update() if lock else query)
+    token = db.scalar(query)
     if token is None or not codec.matches(token, raw_token):
         raise OfferNotFound
     offer_query = select(Offer).where(Offer.organization_id == token.organization_id, Offer.id == token.offer_id)
     version_query = select(OfferVersion).where(OfferVersion.organization_id == token.organization_id, OfferVersion.id == token.offer_version_id, OfferVersion.offer_id == token.offer_id)
-    offer = db.scalar(offer_query.with_for_update() if lock else offer_query)
+    offer = _offer(db, token.organization_id, token.offer_id) if lock else db.scalar(offer_query)
     version = db.scalar(version_query.with_for_update() if lock else version_query)
     if offer is None or version is None:
         raise OfferNotFound
@@ -100,6 +102,7 @@ def public_offer_access(db, raw_token: str, *, codec: OfferTokenCodec, now: date
         or _utc(token.expires_at) <= _utc(now)
         or offer.current_version_id != version.id
         or offer.status != "sent"
+        or _application_terminated(db, token.organization_id, application.id)
     ):
         raise OfferNotFound
     return token, offer, version, application
@@ -157,6 +160,9 @@ def record_offer_response(
         if existing.request_hash and hmac.compare_digest(existing.request_hash, request_hash):
             return existing, True
         raise OfferVersionConflict("conflicting response")
+
+    if _application_terminated(db, organization_id, offer.application_id):
+        raise OfferResponseUnavailable("application is terminated")
 
     version = db.scalar(select(OfferVersion).where(
         OfferVersion.organization_id == organization_id,
@@ -285,12 +291,15 @@ def record_proxy_offer_response(db, offer, payload, *, actor_user_id, onboarding
 
 def mark_offer_delivery_sent(db, delivery, *, now: datetime):
     token = db.scalar(select(OfferAccessToken).where(OfferAccessToken.organization_id == delivery.organization_id, OfferAccessToken.id == delivery.resource_id).with_for_update())
-    if token is None or token.revoked_at is not None:
-        raise OfferApprovalError("offer delivery is unavailable")
-    offer = db.scalar(select(Offer).where(Offer.organization_id == token.organization_id, Offer.id == token.offer_id).with_for_update())
-    if offer is None or offer.status != "ready_to_send" or offer.current_version_id != token.offer_version_id:
-        raise OfferApprovalError("offer delivery is unavailable")
+    if token is None:
+        return
+    # Delivery is a fact even if its capability was revoked while SMTP ran.
     token.delivered_at = now
+    offer = db.scalar(select(Offer).where(Offer.organization_id == token.organization_id, Offer.id == token.offer_id).with_for_update())
+    if (offer is None or token.revoked_at is not None or offer.status != "ready_to_send"
+            or offer.current_version_id != token.offer_version_id
+            or _application_terminated(db, token.organization_id, offer.application_id)):
+        return
     offer.status = "sent"; offer.version += 1
     _audit(db, offer, None, "offer.sent", f"email-{str(delivery.id)[:8]}", {})
 
@@ -323,10 +332,40 @@ def _audit(db, offer, actor_user_id, event_type, trace_id, payload):
 
 def _offer(db, organization_id, offer_id, *, lock=True):
     statement = select(Offer).where(Offer.organization_id == organization_id, Offer.id == offer_id)
-    offer = db.scalar(statement.with_for_update() if lock else statement)
+    offer = db.scalar(statement)
     if offer is None:
         raise OfferNotFound
+    if lock:
+        _lock_application(db, organization_id, offer.application_id)
+        offer = db.scalar(statement.with_for_update().execution_options(populate_existing=True))
     return offer
+
+
+def _application_terminated(db, organization_id, application_id):
+    from server.app.recruiting.termination import application_is_terminated
+    return application_is_terminated(db, organization_id, application_id)
+
+
+def _lock_application(db, organization_id, application_id):
+    from server.app.governance.retention import lock_candidate_retention_facts
+    application = db.scalar(select(Application).where(
+        Application.organization_id == organization_id, Application.id == application_id,
+    ))
+    if application is None:
+        raise OfferNotFound
+    candidate = lock_candidate_retention_facts(db, organization_id, application.candidate_id)
+    if candidate is None or candidate.deleted_at is not None:
+        raise OfferNotFound
+    return db.scalar(select(Application).where(
+        Application.organization_id == organization_id, Application.id == application_id,
+    ).with_for_update().execution_options(populate_existing=True))
+
+
+def _require_forward_application(db, organization_id, application_id):
+    application = _lock_application(db, organization_id, application_id)
+    if _application_terminated(db, organization_id, application_id):
+        raise OfferApprovalError("application is terminated", code="application_terminated")
+    return application
 
 
 def _require_version(offer, expected_version):
@@ -391,10 +430,7 @@ def _require_active_template(db, organization_id, template_id):
 
 
 def create_offer(db, organization_id, actor_user_id, command, *, trace_id):
-    application = db.scalar(select(Application).where(
-        Application.organization_id == organization_id,
-        Application.id == command.application_id,
-    ).with_for_update())
+    application = _require_forward_application(db, organization_id, command.application_id)
     if application is None:
         raise OfferNotFound
     if application.stage != "passed":
@@ -421,6 +457,7 @@ def create_offer(db, organization_id, actor_user_id, command, *, trace_id):
 
 def update_offer_version(db, organization_id, offer_id, actor_user_id, command, *, expected_version, trace_id):
     offer = _offer(db, organization_id, offer_id)
+    _require_forward_application(db, organization_id, offer.application_id)
     _require_version(offer, expected_version)
     if offer.status not in REVISION_SOURCE_STATUSES:
         raise OfferVersionConflict
@@ -463,6 +500,7 @@ def update_offer_version(db, organization_id, offer_id, actor_user_id, command, 
 
 def submit_offer(db, organization_id, offer_id, actor_user_id, *, expected_version, trace_id):
     offer = _offer(db, organization_id, offer_id)
+    _require_forward_application(db, organization_id, offer.application_id)
     _require_version(offer, expected_version)
     if offer.status not in {"draft", "changes_requested"}:
         raise OfferApprovalError("offer is not editable")
@@ -505,6 +543,7 @@ def submit_offer(db, organization_id, offer_id, actor_user_id, *, expected_versi
 
 def decide_approval(db, organization_id, offer_id, actor_user_id, decision, *, expected_version, reason=None, trace_id):
     offer = _offer(db, organization_id, offer_id)
+    _require_forward_application(db, organization_id, offer.application_id)
     _require_version(offer, expected_version)
     if offer.status != "pending_approval" or decision not in {"approved", "rejected"}:
         raise OfferApprovalError
@@ -537,6 +576,8 @@ def decide_approval(db, organization_id, offer_id, actor_user_id, decision, *, e
 def withdraw_offer(db, organization_id, offer_id, actor_user_id, *, trace_id, expected_version):
     offer = _offer(db, organization_id, offer_id)
     _require_version(offer, expected_version)
+    if offer.status == "accepted":
+        raise OfferApprovalError("accepted Offer requires full application termination", code="application_termination_required")
     if offer.status in FINAL_OFFER_STATUSES:
         raise OfferApprovalError("offer is final")
     revoke_offer_access_tokens(db, offer, now=datetime.now(timezone.utc))

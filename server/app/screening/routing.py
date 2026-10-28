@@ -17,6 +17,7 @@ from server.app.recruiting.tasks import (
     ensure_review_task,
     normalize_llm_terminal_safe_error_code,
 )
+from server.app.recruiting.termination import application_is_terminated
 from server.app.screening.models import ScreeningItem, ScreeningRun
 from server.app.talent.service import ensure_deferred_membership
 
@@ -139,6 +140,7 @@ def route_llm_screening_terminal(
             Candidate.deleted_at.is_(None),
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if candidate is None:
         raise ScreeningRoutingConflict("candidate_unavailable")
@@ -151,6 +153,7 @@ def route_llm_screening_terminal(
             ScreeningItem.application_id == item_identity.application_id,
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if item is None:
         raise ScreeningRoutingConflict("screening_item_changed")
@@ -162,10 +165,15 @@ def route_llm_screening_terminal(
             Application.candidate_id == candidate.id,
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if application is None:
         raise ScreeningRoutingConflict("application_unavailable")
     previous_audit = _latest_route_audit(db, application)
+    if application.stage == "withdrawn" or application_is_terminated(
+        db, organization_id, application.id
+    ):
+        return _previous_result(application, previous_audit)
     is_fail_open_retry = application.stage != "new" and _is_fail_open_success_retry(
         previous_audit, item, ai_status
     )

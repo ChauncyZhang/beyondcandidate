@@ -10,7 +10,7 @@ from server.app.recruiting.models import Application,Candidate,FileObject,JobJdV
 from server.app.recruiting.profile_builder import PROFILE_VERSION,ProfileBuild,ResumeProfileBuilder
 from server.app.recruiting.resume_profile import extract_resume_profile
 from server.app.recruiting.candidate_identity import resolve_candidate_name
-from server.app.screening.actions import CandidateTombstoned,lock_candidate_screening_item
+from server.app.screening.actions import CandidateTombstoned,lock_candidate_screening_item,screening_application_is_terminated
 from server.app.screening.models import ScreeningItem,ScreeningResult,ScreeningRun
 from server.app.screening.progress import aggregate_run
 from server.app.screening.parsers import ParserLimits
@@ -190,6 +190,7 @@ class ScreeningPipeline:
         except Exception: return await self._retry_or_finish(job,organization_id,item_id,"scoring_failed","score")
         with self.sessions() as db:
             _,item,blocked=lock_candidate_screening_item(db,organization_id,item_id,candidate_id,allow_blocked=True)
+            terminated=not blocked and screening_application_is_terminated(db,item)
             run=db.scalar(select(ScreeningRun).where(ScreeningRun.organization_id==organization_id,ScreeningRun.id==item.run_id).with_for_update())
             if blocked:
                 item.status="cancelled"; item.safe_error_code="candidate_unavailable"; item.finished_at=item.finished_at or datetime.now(timezone.utc); self._aggregate(db,run); db.commit(); raise PermanentJobError("screening_item_missing")
@@ -199,7 +200,9 @@ class ScreeningPipeline:
             config=db.scalar(select(LlmProviderConfig).where(LlmProviderConfig.organization_id==organization_id))
             allowed=config and (not config.allowed_job_ids or str(run.job_id) in config.allowed_job_ids)
             item.status="scored"; item.safe_error_code=None
-            if config and config.enabled and config.encrypted_api_key is not None and allowed:
+            if terminated:
+                item.llm_status="skipped"; item.llm_safe_error_code="application_terminated"; item.llm_finished_at=item.llm_finished_at or datetime.now(timezone.utc); item.finished_at=item.finished_at or datetime.now(timezone.utc)
+            elif config and config.enabled and config.encrypted_api_key is not None and allowed:
                 prompt=_ensure_screening_prompt(db,organization_id,config.updated_by)
                 QueueRepository(db).enqueue(organization_id,"screening.llm_score_item",{"organization_id":str(organization_id),"screening_item_id":str(item.id),"screening_result_id":str(existing.id),"application_id":str(item.application_id),"config_id":str(config.id),"config_version":config.version,"prompt_version_id":str(prompt.id)},dedupe_key=f"llm:{item.id}:{config.version}:{prompt.id}",trace_id=getattr(job,"trace_id",None),max_attempts=3)
                 item.llm_status="queued"; item.llm_safe_error_code=None; item.llm_finished_at=None; item.finished_at=None

@@ -114,6 +114,14 @@ class InterviewTransition(StrictModel):
     target: Literal["confirmed", "completed", "cancelled", "no_show"]
     reason: str | None = Field(default=None, max_length=1000)
 
+    @model_validator(mode="after")
+    def validate_cancellation_reason(self):
+        if self.target == "cancelled":
+            if not self.reason or not self.reason.strip():
+                raise ValueError("A cancellation reason is required")
+            self.reason = self.reason.strip()
+        return self
+
 
 class FeedbackDraft(StrictModel):
     ratings: dict[str, int] = Field(default_factory=dict)

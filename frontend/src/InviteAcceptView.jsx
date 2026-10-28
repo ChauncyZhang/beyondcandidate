@@ -4,8 +4,10 @@ import { apiClient } from "./apiClient.js";
 import { startFeishuAuthorization } from "./feishuIntegration.js";
 import { invitationAcceptErrorMessage, passwordResetErrorMessage } from "./invitationErrors.js";
 import "./product-theme-admin.css";
+import { BrandMark, useBranding } from "./Branding.jsx";
 
 export function InviteAcceptView({ token, onAccepted, client = apiClient, mode = "invitation" }) {
+  const branding = useBranding();
   const [form, setForm] = useState({ password: "", confirmation: "" });
   const [status, setStatus] = useState("idle");
   const [error, setError] = useState("");
@@ -45,7 +47,7 @@ export function InviteAcceptView({ token, onAccepted, client = apiClient, mode =
 
   const busy = status === "saving" || status === "binding";
   return <main className="login-page invite-accept-page"><section className="login-card" aria-labelledby="invite-title">
-    <header className="login-heading"><div className="login-mark" aria-hidden="true"><img src="/favicon.svg" alt="" /></div><div><p>BeyondCandidate · 候选人全流程招聘平台</p><h1 id="invite-title">{reset ? "重置登录密码" : "设置登录密码"}</h1></div></header>
+    <header className="login-heading"><BrandMark className="login-mark" /><div><p>{branding.name} · 候选人全流程招聘平台</p><h1 id="invite-title">{reset ? "重置登录密码" : "设置登录密码"}</h1></div></header>
     {reset && status === "success" ? <>
       <p className="login-intro" role="status">密码已重置</p>
       <p>请使用新密码登录。该账号的旧登录会话已退出。</p>

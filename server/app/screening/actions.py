@@ -7,6 +7,7 @@ from server.app.queue.models import BackgroundJob
 from server.app.queue.repository import QueueRepository
 from server.app.recruiting.models import Application,ApplicationStageEvent,Candidate,FileObject,JobJdVersion,Resume
 from server.app.recruiting.service import transition_application_record,undo_bulk_advance_record
+from server.app.recruiting.termination import application_is_terminated
 from server.app.screening.models import ScreeningItem,ScreeningResult,ScreeningRun
 from server.app.screening.progress import aggregate_run
 from server.app.screening.rules import ENGINE_VERSION
@@ -22,7 +23,7 @@ class CandidateTombstoned(ScreeningActionConflict): pass
 ACTIVE_DELETION_STATUSES=("approved","executing","completed")
 
 def lock_screening_candidate(db,organization_id,candidate_id,*,allow_missing=False):
-    candidate=db.scalar(select(Candidate).where(Candidate.organization_id==organization_id,Candidate.id==candidate_id).with_for_update())
+    candidate=db.scalar(select(Candidate).where(Candidate.organization_id==organization_id,Candidate.id==candidate_id).with_for_update().execution_options(populate_existing=True))
     blocked=candidate is not None and (candidate.deleted_at is not None or db.scalar(select(DeletionRequest.id).where(DeletionRequest.organization_id==organization_id,DeletionRequest.candidate_id==candidate_id,DeletionRequest.status.in_(ACTIVE_DELETION_STATUSES)).limit(1)) is not None)
     if (candidate is None and not allow_missing) or blocked: raise CandidateTombstoned
     return candidate
@@ -35,11 +36,19 @@ def lock_candidate_screening_item(db,organization_id,item_id,candidate_id,*,allo
         if not allow_blocked: raise
         candidate=db.scalar(select(Candidate).where(Candidate.organization_id==organization_id,Candidate.id==candidate_id).with_for_update())
         blocked=True
-    item=db.scalar(select(ScreeningItem).where(ScreeningItem.organization_id==organization_id,ScreeningItem.id==item_id).with_for_update())
+    item=db.scalar(select(ScreeningItem).where(ScreeningItem.organization_id==organization_id,ScreeningItem.id==item_id).with_for_update().execution_options(populate_existing=True))
     allowed_candidate_ids={candidate_id}
     if allow_unassociated: allowed_candidate_ids.add(None)
     if item is None or item.candidate_id not in allowed_candidate_ids: raise CandidateTombstoned
     return candidate,item,blocked
+
+
+def screening_application_is_terminated(db,item):
+    # Caller holds the candidate/item locks; serialize with termination before
+    # enqueueing new work. Refresh an application already in the identity map.
+    if item.application_id is None: return False
+    application=db.scalar(select(Application).where(Application.organization_id==item.organization_id,Application.id==item.application_id,Application.candidate_id==item.candidate_id).with_for_update().execution_options(populate_existing=True))
+    return application is None or application.stage=="withdrawn" or application_is_terminated(db,item.organization_id,application.id)
 
 def llm_error_code(code):
     return code[4:] if isinstance(code,str) and code.startswith("llm_") else code
@@ -72,6 +81,7 @@ def retry_screening_item(db,organization_id,item_id,trace_id,actor_user_id=None)
     candidate_id=db.scalar(select(ScreeningItem.candidate_id).where(ScreeningItem.organization_id==organization_id,ScreeningItem.id==item_id))
     candidate_id=candidate_id or uuid.uuid5(uuid.UUID(str(item_id)),"candidate")
     _,item,_=lock_candidate_screening_item(db,organization_id,item_id,candidate_id,allow_unassociated=True,allow_missing_candidate=True)
+    if screening_application_is_terminated(db,item): raise ScreeningItemNotRetryable
     active_jobs=_active_retry_jobs(db,organization_id,item_id)
     run=db.scalar(select(ScreeningRun).where(ScreeningRun.organization_id==organization_id,ScreeningRun.id==item.run_id).with_for_update()); stored_file=db.scalar(select(FileObject).where(FileObject.organization_id==organization_id,FileObject.id==item.file_object_id).with_for_update())
     if run is None or stored_file is None: raise ScreeningItemNotRetryable

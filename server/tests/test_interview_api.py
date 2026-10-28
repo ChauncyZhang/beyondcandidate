@@ -1955,7 +1955,7 @@ def test_interview_resend_without_current_confirmed_email_creates_no_delivery(tm
         ) is None
 
 
-def test_reschedule_and_cancel_without_confirmed_email_leave_interview_unchanged(tmp_path) -> None:
+def test_reschedule_requires_email_but_cancel_stops_with_manual_notification(tmp_path) -> None:
     app = make_app(tmp_path)
     seed = seed_application(app)
     with TestClient(app) as client:
@@ -1985,10 +1985,11 @@ def test_reschedule_and_cancel_without_confirmed_email_leave_interview_unchanged
         )
 
     assert (rescheduled.status_code, rescheduled.json()["code"]) == (409, "candidate_email_unconfirmed")
-    assert (cancelled.status_code, cancelled.json()["code"]) == (409, "candidate_email_unconfirmed")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["data"]["email_delivery"]["safe_error_code"] == "candidate_email_unconfirmed"
     with app.state.identity_store.sync_session() as database:
         interview = database.get(Interview, UUID(interview_id))
-        assert (interview.status, interview.version, interview.calendar_sequence) == ("scheduled", 1, 0)
+        assert (interview.status, interview.version, interview.calendar_sequence) == ("cancelled", 2, 1)
         assert interview.starts_at.replace(tzinfo=timezone.utc).isoformat() == original_start
         assert len(database.scalars(select(EmailDelivery).where(EmailDelivery.resource_id == interview.id)).all()) == 1
 
@@ -2775,7 +2776,7 @@ def feedback_payload(conclusion="recommend"):
     }
 
 
-def test_application_waits_for_all_active_interview_rounds_before_decision(tmp_path) -> None:
+def test_cancel_does_not_infer_decision_from_previously_completed_round(tmp_path) -> None:
     app = make_app(tmp_path)
     seed = seed_application(app)
     with TestClient(app) as client:
@@ -2833,7 +2834,7 @@ def test_application_waits_for_all_active_interview_rounds_before_decision(tmp_p
         assert cancelled.status_code == 200
 
     with app.state.identity_store.sync_session() as database:
-        assert database.get(Application, seed["application_id"]).stage == "decision"
+        assert database.get(Application, seed["application_id"]).stage == "interviewing"
 
 
 def test_interview_without_required_feedback_advances_application_on_completion(tmp_path) -> None:

@@ -16,6 +16,8 @@ const API_TO_UI_STATUS = {
 const API_TO_UI_NOTIFICATION = { sent: "已发送", failed: "发送失败", queued: "待发送", not_sent: "待发送" };
 const API_TO_UI_EMAIL_DELIVERY = { queued: "待发送", sending: "待发送", sent: "已发送", failed: "发送失败", cancelled: "已取消", not_sent: "未发送" };
 const EMAIL_DELIVERY_ERROR_TEXT = {
+  candidate_email_unconfirmed: "候选人邮箱尚未确认，取消已生效，请人工通知候选人。",
+  candidate_email_missing: "候选人邮箱缺失，取消已生效，请人工通知候选人。",
   email_not_configured: "邮件服务尚未配置，请人工通知候选人。",
   email_configuration_unavailable: "邮件服务配置不可用，请联系系统管理员。",
   smtp_authentication_failed: "邮件服务认证失败，请联系系统管理员。",
@@ -128,7 +130,7 @@ export function normalizeEmailDelivery(value) {
   const status = safeString(value?.status);
   if (!id && status !== "not_sent") return null;
   const safeErrorCode = safeString(value?.safe_error_code) || null;
-  const manualNotificationRequired = status === "not_sent" && safeErrorCode === "email_not_configured";
+  const manualNotificationRequired = status === "not_sent";
   return {
     id,
     recipient: manualNotificationRequired ? "请人工通知候选人" : maskedRecipient(value?.recipient),
@@ -228,6 +230,8 @@ export function deriveCandidateInterviews(candidateId, records, applicationId = 
       interviewer: safeArray(record.interviewers).join("、") || "未分配",
       interviewerIds: safeArray(record.interviewerIds),
       status: record.status,
+      ...(record.workflowStatus ? { workflowStatus: record.workflowStatus } : {}),
+      ...(Number.isInteger(record.version) ? { version: record.version } : {}),
       feedbackStatus: record.feedbackStatus,
       result: record.feedback?.conclusion || record.feedbackStatus || record.status,
       feedback: record.feedback?.strengths || "暂无已提交反馈",

@@ -144,7 +144,7 @@ class OfferApproval(OfferRecord, Base):
         UniqueConstraint("organization_id", "id"),
         UniqueConstraint("organization_id", "offer_id", "round_number", "sequence"),
         CheckConstraint("round_number >= 1 and version_number >= 1 and sequence >= 1", name="ck_offer_approvals_order"),
-        CheckConstraint("status in ('waiting','pending','approved','rejected')", name="ck_offer_approvals_status"),
+        CheckConstraint("status in ('waiting','pending','approved','rejected','cancelled')", name="ck_offer_approvals_status"),
         CheckConstraint("status != 'rejected' or (reason is not null and length(trim(reason)) > 0)", name="ck_offer_approvals_rejection_reason"),
         ForeignKeyConstraint(["organization_id", "offer_id"], ["offers.organization_id", "offers.id"], ondelete="CASCADE"),
         ForeignKeyConstraint(["organization_id", "offer_id", "offer_version_id", "version_number"], ["offer_versions.organization_id", "offer_versions.offer_id", "offer_versions.id", "offer_versions.version_number"]),

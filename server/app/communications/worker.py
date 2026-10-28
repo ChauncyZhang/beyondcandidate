@@ -36,6 +36,92 @@ INTERVIEW_MEETING_LINK_EMAIL_TYPES = {
 }
 
 
+def _delivery_application_id(db, delivery):
+    from server.app.offers.models import Offer, OfferAccessToken, OfferResponse
+    if delivery.resource_type in INTERVIEW_EMAIL_STYLES:
+        return db.scalar(select(Interview.application_id).where(
+            Interview.organization_id == delivery.organization_id, Interview.id == delivery.resource_id))
+    model = {"offer_access_token": OfferAccessToken, "offer_response": OfferResponse}.get(delivery.resource_type)
+    if model is not None:
+        return db.scalar(select(Offer.application_id).join(model,
+            (model.organization_id == Offer.organization_id) & (model.offer_id == Offer.id)).where(
+                model.organization_id == delivery.organization_id, model.id == delivery.resource_id))
+    return None
+
+
+def _lock_delivery(db, organization_id, delivery_id):
+    from server.app.governance.retention import lock_candidate_retention_facts
+    from server.app.recruiting.models import Application
+    delivery = db.scalar(select(EmailDelivery).where(
+        EmailDelivery.organization_id == organization_id, EmailDelivery.id == delivery_id))
+    if delivery is None:
+        return None, None
+    application_id = _delivery_application_id(db, delivery)
+    application = db.scalar(select(Application).where(
+        Application.organization_id == organization_id, Application.id == application_id)) if application_id else None
+    if application is not None:
+        lock_candidate_retention_facts(db, organization_id, application.candidate_id)
+        application = db.scalar(select(Application).where(
+            Application.organization_id == organization_id, Application.id == application_id
+        ).with_for_update().execution_options(populate_existing=True))
+    delivery = db.scalar(select(EmailDelivery).where(
+        EmailDelivery.organization_id == organization_id, EmailDelivery.id == delivery_id
+    ).with_for_update().execution_options(populate_existing=True))
+    return delivery, application
+
+
+def _delivery_obsolete(db, delivery, application, now):
+    from server.app.offers.models import Offer, OfferAccessToken, OfferResponse
+    from server.app.recruiting.termination import application_is_terminated
+    if application is not None and application_is_terminated(db, delivery.organization_id, application.id):
+        return True
+    if delivery.resource_type in INTERVIEW_MEETING_LINK_EMAIL_TYPES:
+        if application is not None and application.stage in {"withdrawn", "rejected", "hired"}:
+            return True
+        interview = db.scalar(select(Interview).where(Interview.organization_id == delivery.organization_id,
+            Interview.id == delivery.resource_id).execution_options(populate_existing=True))
+        return interview is not None and interview.status in {"cancelled", "no_show", "feedback_completed"}
+    if delivery.resource_type == "offer_access_token":
+        token = db.scalar(select(OfferAccessToken).where(OfferAccessToken.organization_id == delivery.organization_id,
+            OfferAccessToken.id == delivery.resource_id).execution_options(populate_existing=True))
+        offer = db.scalar(select(Offer).where(Offer.organization_id == delivery.organization_id,
+            Offer.id == token.offer_id).execution_options(populate_existing=True)) if token else None
+        expires = token.expires_at if token and token.expires_at.tzinfo else token.expires_at.replace(tzinfo=timezone.utc) if token else now
+        return (token is None or token.revoked_at is not None or expires <= now or offer is None
+            or offer.status != "ready_to_send" or offer.current_version_id != token.offer_version_id
+            or application is None or application.stage != "passed")
+    if delivery.resource_type == "offer_response":
+        response = db.scalar(select(OfferResponse).where(OfferResponse.organization_id == delivery.organization_id,
+            OfferResponse.id == delivery.resource_id))
+        offer = db.scalar(select(Offer).where(Offer.organization_id == delivery.organization_id,
+            Offer.id == response.offer_id).execution_options(populate_existing=True)) if response else None
+        return (response is None or offer is None or application is None
+            or offer.status != response.status or offer.current_version_id != response.offer_version_id)
+    return False
+
+
+def _cancel_obsolete(db, delivery, cipher):
+    delivery.status = "cancelled"
+    delivery.safe_error_code = "email_delivery_obsolete"
+    if delivery.resource_type in INTERVIEW_MEETING_LINK_EMAIL_TYPES and delivery.attachment_ciphertext is not None:
+        interview = db.scalar(select(Interview).where(
+            Interview.organization_id == delivery.organization_id, Interview.id == delivery.resource_id))
+        try:
+            sequence = _calendar_sequence(cipher.decrypt_attachment(delivery.attachment_ciphertext))
+        except ValueError:
+            sequence = None
+        if interview is not None and sequence is not None and sequence != interview.calendar_sequence:
+            delivery.safe_error_code = "interview_message_superseded"
+    delivery.version += 1
+
+
+def _record_email_fact(db, delivery, application, state, reference=None):
+    if application is not None:
+        from server.app.recruiting.termination import record_external_fact
+        record_external_fact(db, delivery.organization_id, application.id, kind="email",
+            resource_id=delivery.id, state=state, reference=reference, generation=str(delivery.attempts))
+
+
 def _render_offer_link(body: str, token_id: uuid.UUID, codec, public_base_url: str) -> str:
     """Materialize a capability only in the transient provider message."""
     return body.replace("{{offer_public_link}}", f"{public_base_url}/offer/{codec.raw_token(token_id)}")
@@ -263,12 +349,15 @@ class EmailDeliveryJobHandler:
 
         setup_error = None
         with self._sessions.begin() as db:
-            delivery = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == organization_id, EmailDelivery.id == delivery_id).with_for_update())
+            delivery, application = _lock_delivery(db, organization_id, delivery_id)
             if delivery is None:
                 raise PermanentJobError("email_delivery_unavailable")
             if delivery.status == "sent":
                 return
             if delivery.status == "cancelled":
+                return
+            if _delivery_obsolete(db, delivery, application, self._clock.current_time()):
+                _cancel_obsolete(db, delivery, self._cipher)
                 return
             if delivery.status == "failed":
                 raise PermanentJobError(delivery.safe_error_code or "email_delivery_failed")
@@ -356,6 +445,17 @@ class EmailDeliveryJobHandler:
         if setup_error is not None:
             raise PermanentJobError(setup_error)
 
+        # Recheck after materialization. The committed marker lets termination
+        # distinguish a queued message from SMTP whose result is still pending.
+        with self._sessions.begin() as db:
+            delivery, application = _lock_delivery(db, organization_id, delivery_id)
+            if delivery is None or delivery.status != "queued":
+                return
+            if _delivery_obsolete(db, delivery, application, self._clock.current_time()):
+                _cancel_obsolete(db, delivery, self._cipher)
+                return
+            delivery.safe_error_code = "email_smtp_in_flight"
+
         # SMTP is at-least-once: a disconnect after DATA can leave acceptance
         # ambiguous. Retries reuse the deterministic Message-ID for reconciliation.
         try:
@@ -363,7 +463,12 @@ class EmailDeliveryJobHandler:
         except TemporaryMailError as error:
             terminal = False
             with self._sessions.begin() as db:
-                delivery = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == organization_id, EmailDelivery.id == delivery_id).with_for_update())
+                delivery, application = _lock_delivery(db, organization_id, delivery_id)
+                if delivery is not None:
+                    _record_email_fact(db, delivery, application, "unknown")
+                    if _delivery_obsolete(db, delivery, application, self._clock.current_time()):
+                        _cancel_obsolete(db, delivery, self._cipher)
+                        return
                 if delivery is not None and delivery.status == "queued":
                     if delivery.attempts >= 3:
                         mark_delivery_failed(db, delivery, error.safe_code)
@@ -376,16 +481,21 @@ class EmailDeliveryJobHandler:
             raise exception(error.safe_code) from None
         except PermanentMailError as error:
             with self._sessions.begin() as db:
-                delivery = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == organization_id, EmailDelivery.id == delivery_id).with_for_update())
+                delivery, application = _lock_delivery(db, organization_id, delivery_id)
                 if delivery is not None:
+                    _record_email_fact(db, delivery, application, "resolved")
+                    if _delivery_obsolete(db, delivery, application, self._clock.current_time()):
+                        _cancel_obsolete(db, delivery, self._cipher)
+                        return
                     mark_delivery_failed(db, delivery, error.safe_code)
             logger.error("email_delivery_terminal_failure", extra={"context": {"delivery_id": str(delivery_id), "safe_error_code": error.safe_code}})
             raise PermanentJobError(error.safe_code) from None
 
         with self._sessions.begin() as db:
-            delivery = db.scalar(select(EmailDelivery).where(EmailDelivery.organization_id == organization_id, EmailDelivery.id == delivery_id).with_for_update())
-            if delivery is None or delivery.status != "queued":
+            delivery, application = _lock_delivery(db, organization_id, delivery_id)
+            if delivery is None:
                 raise PermanentJobError("email_delivery_state_conflict")
+            _record_email_fact(db, delivery, application, "needs_action", receipt.receipt_id[:255])
             if delivery.resource_type == "offer_access_token":
                 from server.app.offers.service import mark_offer_delivery_sent
                 mark_offer_delivery_sent(db, delivery, now=datetime.now(timezone.utc))

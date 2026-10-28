@@ -48,6 +48,13 @@ class OnboardingNotReady(Exception):
         super().__init__(code)
 
 
+def application_is_terminated(db, organization_id, application_id):
+    # Keep the coordinator dependency lazy: it also coordinates onboarding.
+    from server.app.recruiting.termination import application_is_terminated as check
+
+    return check(db, organization_id, application_id)
+
+
 def lock_onboarding_candidate(db, organization_id, candidate_id):
     """Serialize with governance before taking application/onboarding locks."""
     return lock_candidate(db, organization_id, candidate_id)
@@ -61,6 +68,14 @@ def lock_onboarding_record(db, organization_id, onboarding_id):
     if candidate_id is None:
         return None
     lock_onboarding_candidate(db, organization_id, candidate_id)
+    application_id = db.scalar(select(OnboardingRecord.application_id).where(
+        OnboardingRecord.organization_id == organization_id,
+        OnboardingRecord.id == onboarding_id,
+    ))
+    db.scalar(select(Application).where(
+        Application.organization_id == organization_id,
+        Application.id == application_id,
+    ).with_for_update().execution_options(populate_existing=True))
     # Redaction can remove the row while we wait for Candidate. Re-read it.
     # SQLite has no row-lock wait; preserve its in-memory timezone-aware values.
     return db.scalar(select(OnboardingRecord).where(
@@ -177,6 +192,9 @@ def onboarding_projection(
     deletion_pending = bool(db is not None and subject is not None and candidate_deletion_pending(
         db, subject.organization_id, subject.candidate_id,
     ))
+    terminated = bool(db is not None and subject is not None and application_is_terminated(
+        db, subject.organization_id, record.application_id if record is not None else application.id,
+    ))
     if record is None:
         return {
             "id": str(application.id) if application else None,
@@ -194,15 +212,15 @@ def onboarding_projection(
             "masked_phone": None,
             "masked_email": None,
             "instance_code": None,
-            "allowed_actions": {"update": application is not None and not deletion_pending, "start_onboarding": False},
-            "blocking_reason": "candidate_deletion_pending" if deletion_pending else "onboarding_data_missing",
+            "allowed_actions": {"update": application is not None and not deletion_pending and not terminated, "start_onboarding": False},
+            "blocking_reason": "application_terminated" if terminated else ("candidate_deletion_pending" if deletion_pending else "onboarding_data_missing"),
         }
     pii = cipher.decrypt(record.pii_ciphertext)
     data_blocking_reason = onboarding_data_blocking_reason(pii)
     complete = data_blocking_reason is None
     date_reached = business_date(now) >= record.expected_start_date
-    can_start = complete and date_reached and record.status in {"ready", "failed"} and not deletion_pending
-    can_update = can_update_onboarding(record, data_blocking_reason) and not deletion_pending
+    can_start = complete and date_reached and record.status in {"ready", "failed"} and not deletion_pending and not terminated
+    can_update = can_update_onboarding(record, data_blocking_reason) and not deletion_pending and not terminated
     protected_failure_reason = (
         record.safe_error_code
         if record.status == "failed" and not can_update and data_blocking_reason is not None
@@ -230,7 +248,8 @@ def onboarding_projection(
             "start_onboarding": can_start,
         },
         "blocking_reason": None if can_start else (
-            ("candidate_deletion_pending" if deletion_pending else None)
+            ("application_terminated" if terminated else None)
+            or ("candidate_deletion_pending" if deletion_pending else None)
             or protected_failure_reason
             or data_blocking_reason
             or ("expected_start_date_not_reached" if not date_reached else None)
@@ -245,6 +264,8 @@ def update_onboarding(db, record: OnboardingRecord, payload, *, cipher, expected
     record = lock_onboarding_record(db, record.organization_id, record.id)
     if record is None:
         raise OnboardingNotReady("onboarding_update_not_allowed")
+    if application_is_terminated(db, record.organization_id, record.application_id):
+        raise OnboardingNotReady("application_terminated")
     if record.version != expected_version:
         raise OnboardingVersionConflict
     if candidate_deletion_pending(db, record.organization_id, record.candidate_id):
@@ -303,6 +324,8 @@ def create_onboarding_from_accepted_offer(
     ).with_for_update().execution_options(populate_existing=True))
     if application is None:
         raise OnboardingNotReady("accepted_offer_context_incomplete")
+    if application_is_terminated(db, application.organization_id, application.id):
+        raise OnboardingNotReady("application_terminated")
     if expected_version != 0:
         raise OnboardingVersionConflict
     values = (
@@ -480,6 +503,8 @@ def start_onboarding_submission(
     record = lock_onboarding_record(db, record.organization_id, record.id)
     if record is None:
         raise OnboardingNotReady("onboarding_submission_not_allowed")
+    if application_is_terminated(db, record.organization_id, record.application_id):
+        raise OnboardingNotReady("application_terminated")
     if record.generation == generation and record.status in {"submitting", "submitted"}:
         return record, True
     if record.version != expected_version:

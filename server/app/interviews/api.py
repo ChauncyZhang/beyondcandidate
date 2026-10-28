@@ -28,6 +28,7 @@ from server.app.integrations.feishu.sync import schedule_interview_sync
 from server.app.interviews.domain import CalendarContact, build_calendar_invitation
 from server.app.interviews.availability import INTERNAL_AVAILABILITY_PROVIDER, privacy_safe_availability
 from server.app.interviews.status import effective_status, effective_status_expression
+from server.app.interviews.cancellation import cancel_interview_record
 from server.app.llm.redaction import redact_screening_text
 from server.app.interviews.models import (
     Interview,
@@ -568,6 +569,7 @@ def _enqueue_candidate_interview_email(
     kind: str,
     *,
     actor_user_id: UUID,
+    manual_on_error: bool = False,
 ):
     try:
         delivery = enqueue_interview_message(
@@ -590,6 +592,21 @@ def _enqueue_candidate_interview_email(
             "status": "not_sent",
             "safe_error_code": "email_not_configured",
         }
+    except (CandidateEmailUnavailable, InterviewMessageValidationError) as error:
+        if not manual_on_error:
+            raise
+        delivery = None
+        interview.notification_status = "not_sent"
+        payload = {
+            "kind": kind, "status": "not_sent",
+            "safe_error_code": "candidate_email_unconfirmed" if isinstance(error, CandidateEmailUnavailable) else str(error),
+        }
+    except ValueError:
+        if not manual_on_error:
+            raise
+        delivery = None
+        interview.notification_status = "not_sent"
+        payload = {"kind": kind, "status": "not_sent", "safe_error_code": "interview_email_invalid"}
     db.add(
         InterviewEvent(
             organization_id=interview.organization_id,
@@ -737,7 +754,21 @@ def _lock_application_candidate_retention(db, organization_id, application_id):
     if candidate_id is None:
         raise InvalidStateTransition
     lock_active_candidate(db, organization_id, candidate_id)
+    application = db.scalar(
+        select(Application).where(
+            Application.organization_id == organization_id,
+            Application.id == application_id,
+        ).execution_options(populate_existing=True).with_for_update()
+    )
+    if application is None or application.candidate_id != candidate_id:
+        raise InvalidStateTransition
     return candidate_id
+
+
+def _application_ended(db, organization_id, application_id):
+    from server.app.recruiting.termination import application_is_terminated
+
+    return application_is_terminated(db, organization_id, application_id)
 
 
 def _participant_role_predicate():
@@ -809,7 +840,7 @@ def _assigned_participant(db, principal: Principal, interview_id: UUID, *, for_u
         InterviewParticipant.role == "interviewer",
     )
     if for_update:
-        statement = statement.with_for_update()
+        statement = statement.with_for_update().execution_options(populate_existing=True)
     return db.scalar(statement)
 
 
@@ -1080,6 +1111,7 @@ def create_interview(payload: InterviewCreate, request: Request, idempotency_key
                 if (
                     locked_application is None
                     or locked_application.candidate_id != candidate_id
+                    or _application_ended(db, principal.organization_id, application.id)
                 ):
                     raise InvalidStateTransition
                 active_job = db.scalar(
@@ -1299,9 +1331,12 @@ def patch_interview(interview_id: UUID, payload: InterviewPatch, request: Reques
                 Interview.id == interview_id,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if interview is None or interview.application_id != application_id:
             return _denied(request)
+        if _application_ended(db, principal.organization_id, application_id):
+            return problem(request, 409, "application_terminated", "This application has ended; the interview cannot be rescheduled.")
         if interview.version != expected:
             return problem(request, 409, "resource_version_conflict", "The interview changed. Refresh and retry.")
         if interview.status not in {"draft", "scheduled", "rescheduled", "confirmed"}:
@@ -1587,6 +1622,7 @@ def transition_interview(
                         Interview.id == interview.id,
                     )
                     .with_for_update()
+                    .execution_options(populate_existing=True)
                 )
                 if (
                     locked is None
@@ -1596,11 +1632,21 @@ def transition_interview(
                     raise ResourceVersionConflict
                 source = locked.status
                 target = payload.target
+                if target == "cancelled":
+                    cancel_interview_record(
+                        db, locked, actor_user_id=principal.user_id,
+                        trace_id=request.state.trace_id, reason_text=payload.reason,
+                        notify_candidate=True, request=request,
+                    )
+                    recalculate_candidate_retention(db, principal.organization_id, candidate_id)
+                    return 200, {"data": _interview_data(db, locked)}
+                if _application_ended(db, principal.organization_id, application_id):
+                    raise InvalidStateTransition
                 allowed = {
-                    "draft": {"confirmed", "cancelled"},
-                    "scheduled": {"confirmed", "cancelled", "no_show"},
-                    "rescheduled": {"confirmed", "cancelled", "no_show"},
-                    "confirmed": {"completed", "cancelled", "no_show"},
+                    "draft": {"confirmed"},
+                    "scheduled": {"confirmed", "no_show"},
+                    "rescheduled": {"confirmed", "no_show"},
+                    "confirmed": {"completed", "no_show"},
                 }
                 if target not in allowed.get(source, set()):
                     raise InvalidStateTransition
@@ -1615,7 +1661,7 @@ def transition_interview(
                     locked.status = "pending_feedback" if required is not None else "feedback_completed"
                 else:
                     locked.status = target
-                if target in {"cancelled", "no_show"}:
+                if target == "no_show":
                     locked.calendar_sequence += 1
                     participants = db.scalars(
                         select(InterviewParticipant).where(
@@ -1630,7 +1676,7 @@ def transition_interview(
                 db.flush()
                 application_advanced = False
                 next_round_name = None
-                if locked.status == "feedback_completed" or target in {"cancelled", "no_show"}:
+                if locked.status == "feedback_completed" or target == "no_show":
                     application_advanced, next_round_name = _advance_application_if_interviews_complete(
                         db,
                         principal.organization_id,
@@ -1668,26 +1714,7 @@ def transition_interview(
                 recalculate_candidate_retention(
                     db, principal.organization_id, candidate_id
                 )
-                if target == "cancelled":
-                    _enqueue_candidate_interview_email(
-                        request,
-                        db,
-                        locked,
-                        "interview_cancelled",
-                        actor_user_id=principal.user_id,
-                    )
-                    schedule_interview_sync(db, locked, "cancel")
-                    schedule_feishu_notification(
-                        db,
-                        organization_id=principal.organization_id,
-                        recipient_user_ids=[participant.user_id for participant in participants],
-                        event_type="interview_cancelled",
-                        application_id=locked.application_id,
-                        interview_id=locked.id,
-                        actor_user_id=principal.user_id,
-                        exclude_actor=True,
-                    )
-                elif target == "completed" and locked.status == "pending_feedback":
+                if target == "completed" and locked.status == "pending_feedback":
                     feedback_user_ids = list(
                         db.scalars(
                             select(InterviewParticipant.user_id).where(
@@ -2069,9 +2096,12 @@ def put_my_feedback(interview_id: UUID, payload: FeedbackDraft, request: Request
                 Interview.id == interview_id,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if locked_interview is None or locked_interview.application_id != application_id:
             return _denied(request)
+        if _application_ended(db, principal.organization_id, application_id):
+            return problem(request, 409, "application_terminated", "This application has ended; feedback can no longer be submitted.")
         participant = _assigned_participant(db, principal, interview_id, for_update=True)
         if participant is None:
             return _denied(request)
@@ -2166,10 +2196,12 @@ def submit_my_feedback(interview_id: UUID, request: Request, idempotency_key: st
                         Interview.id == interview_id,
                     )
                     .with_for_update()
+                    .execution_options(populate_existing=True)
                 )
                 if (
                     locked_interview is None
                     or locked_interview.application_id != application_id
+                    or _application_ended(db, principal.organization_id, application_id)
                     or locked_interview.status
                     not in {"scheduled", "rescheduled", "confirmed", "pending_feedback"}
                 ):
@@ -2457,6 +2489,7 @@ def my_tasks(request: Request):
                 InterviewParticipant.role == "interviewer",
                 InterviewParticipant.task_status == "ready",
                 Interview.status.in_(("scheduled", "rescheduled", "confirmed", "pending_feedback")),
+                Application.stage.not_in(("withdrawn", "rejected")),
                 Candidate.deleted_at.is_(None),
             )
             .order_by(Interview.starts_at, Interview.id)

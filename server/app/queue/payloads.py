@@ -233,3 +233,14 @@ DEFAULT_PAYLOAD_POLICIES.register_topic(
         }
     ),
 )
+
+DEFAULT_PAYLOAD_POLICIES.register_topic(
+    "feishu.approval.onboarding.reconcile",
+    PayloadSchema(
+        {
+            "organization_id": OpaqueIdField(),
+            "onboarding_id": OpaqueIdField(),
+            "generation": OpaqueIdField(),
+        }
+    ),
+)

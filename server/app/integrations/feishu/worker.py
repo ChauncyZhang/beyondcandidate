@@ -12,6 +12,7 @@ from sqlalchemy import or_, select
 
 from server.app.communications.interview_messages import AUTO_USABLE_CANDIDATE_EMAIL_SOURCES
 from server.app.communications.models import EmailDelivery
+from server.app.core.branding import ProductBranding, load_product_branding
 from server.app.identity.models import Job, User, UserStatus
 from server.app.integrations.feishu.models import (
     FeishuDepartmentMapping,
@@ -30,6 +31,7 @@ from server.app.onboarding.service import (
     OnboardingNotReady, approval_nodes_snapshot, onboarding_config_blocking_reason,
     onboarding_data_blocking_reason, normalize_stored_field_mapping, resolve_node_approvers, validate_definition,
     lock_onboarding_record,
+    lock_onboarding_candidate, application_is_terminated,
 )
 from server.app.queue.models import OutboxEvent
 from server.app.queue.service import PermanentJobError, RetryableJobError
@@ -39,6 +41,24 @@ from server.app.recruiting.review_assignments import review_notification_user_id
 
 def _aware(value):
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def record_external_fact(db, organization_id, application_id, **fact):
+    from server.app.recruiting.termination import record_external_fact as record
+
+    return record(db, organization_id, application_id, **fact)
+
+
+def _lock_application(db, organization_id, application_id):
+    candidate_id = db.scalar(select(Application.candidate_id).where(
+        Application.organization_id == organization_id, Application.id == application_id,
+    ))
+    if candidate_id is None:
+        return None
+    lock_onboarding_candidate(db, organization_id, candidate_id)
+    return db.scalar(select(Application).where(
+        Application.organization_id == organization_id, Application.id == application_id,
+    ).with_for_update().execution_options(populate_existing=True))
 
 
 class FeishuCalendarOutboxHandler:
@@ -99,6 +119,10 @@ class FeishuCalendarOutboxHandler:
 
         provider_error: FeishuProviderError | None = None
         with self._sessions.begin() as db:
+            application_id = db.scalar(select(Interview.application_id).where(
+                Interview.organization_id == organization_id, Interview.id == interview_id,
+            ))
+            application = _lock_application(db, organization_id, application_id)
             # Keep the interview and its sync row locked until the provider
             # result is persisted. A concurrent reschedule then observes the
             # external event id and queues an update instead of a second create.
@@ -119,12 +143,13 @@ class FeishuCalendarOutboxHandler:
             if config is None or not config.enabled or config.encrypted_app_secret is None:
                 sync.sync_status = "disabled"
                 return
-            application = db.get(Application, interview.application_id)
             candidate = db.get(Candidate, application.candidate_id) if application else None
             job = db.get(Job, application.job_id) if application else None
             if application is None or candidate is None or job is None:
                 raise PermanentJobError("feishu_interview_unavailable")
             action = sync.desired_action
+            if action != "cancel" and application_is_terminated(db, organization_id, application.id):
+                return
             external_event_id = sync.external_event_id
             calendar_id = config.calendar_id
             if action in {"update", "cancel"} and external_event_id and sync.external_calendar_id:
@@ -208,6 +233,10 @@ class FeishuCalendarOutboxHandler:
                 sync.next_retry_at = None
                 if action == "cancel":
                     sync.sync_status = "cancelled"
+                    if external_event_id:
+                        record_external_fact(db, organization_id, application.id,
+                            kind="calendar", resource_id=interview.id, state="resolved",
+                            reference=external_event_id, generation=sync.idempotency_key)
                 else:
                     sync.external_calendar_id = result.calendar_id or credentials.calendar_id
                     sync.external_event_id = result.event_id
@@ -254,7 +283,7 @@ def _escape_lark_md(value: object) -> str:
     return "".join(replacements.get(character, character) for character in str(value))
 
 
-def _notification_card(event_type, *, origin, application, candidate, job, interview, email_delivery=None) -> dict:
+def _notification_card(event_type, *, origin, application, candidate, job, interview, email_delivery=None, product_name=ProductBranding().name) -> dict:
     if event_type == "email_delivery_failed":
         if email_delivery is None:
             raise PermanentJobError("feishu_notification_data_missing")
@@ -370,7 +399,7 @@ def _notification_card(event_type, *, origin, application, candidate, job, inter
         },
         "header": {
             "title": {"tag": "plain_text", "content": title},
-            "subtitle": {"tag": "plain_text", "content": "BeyondCandidate 招聘协作"},
+            "subtitle": {"tag": "plain_text", "content": f"{product_name} 招聘协作"},
             "template": template,
             "icon": {"tag": "standard_icon", "token": icon},
             "text_tag_list": [{
@@ -474,10 +503,11 @@ def _notification_recipient_is_current(
 
 
 class FeishuNotificationOutboxHandler:
-    def __init__(self, sessions, provider, cipher) -> None:
+    def __init__(self, sessions, provider, cipher, product_name=ProductBranding().name) -> None:
         self._sessions = sessions
         self._provider = provider
         self._cipher = cipher
+        self._product_name = product_name
 
     async def __call__(self, event, idempotency_key) -> None:
         try:
@@ -567,6 +597,7 @@ class FeishuNotificationOutboxHandler:
                 card = _notification_card(
                     event_type, origin=origin, application=None, candidate=None, job=None,
                     interview=None, email_delivery=email_delivery,
+                    product_name=self._product_name,
                 )
                 open_id = binding.open_id
             elif event_type == "interview_assignment_removed":
@@ -587,6 +618,7 @@ class FeishuNotificationOutboxHandler:
                     candidate=None,
                     job=None,
                     interview=interview,
+                    product_name=self._product_name,
                 )
                 open_id = binding.open_id
             else:
@@ -632,8 +664,18 @@ class FeishuNotificationOutboxHandler:
                     candidate=candidate,
                     job=job,
                     interview=interview,
+                    product_name=self._product_name,
                 )
                 open_id = binding.open_id
+
+        # A queued forward notice may have outlived the transaction that built it.
+        if application_id is not None and event_type not in {
+            "interview_cancelled", "interview_assignment_removed", "candidate_rejected", "offer_declined",
+        }:
+            with self._sessions.begin() as db:
+                application = _lock_application(db, organization_id, application_id)
+                if application is None or application_is_terminated(db, organization_id, application_id):
+                    return
 
         try:
             self._provider.send_card(
@@ -671,11 +713,173 @@ class FeishuOnboardingOutboxHandler:
         self._feishu_cipher = feishu_cipher
         self._onboarding_cipher = onboarding_cipher
 
+    @staticmethod
+    def _events(db, record, generation):
+        return [event for event in db.scalars(select(OutboxEvent).where(
+            OutboxEvent.organization_id == record.organization_id,
+            OutboxEvent.aggregate_id == record.id,
+            OutboxEvent.topic == "feishu.approval.onboarding.create",
+        )) if event.payload.get("generation") == str(generation)]
+
+    def _termination_fact(self, db, record, generation, *, state=None, reference=None):
+        events = self._events(db, record, generation)
+        reference = reference or (record.feishu_instance_code if record.generation == generation else None) or next((
+            event.payload.get("instance_code") for event in events if event.payload.get("instance_code")
+        ), None)
+        if state is None:
+            state = "needs_action" if reference else (
+                "unknown" if not events or self._attempted(events, generation, None) else "resolved"
+            )
+        record_external_fact(db, record.organization_id, record.application_id,
+            kind="feishu_onboarding", resource_id=record.id, state=state,
+            reference=reference, generation=generation)
+
+    def _stopped(self, organization_id, onboarding_id, generation):
+        with self._sessions.begin() as db:
+            record = lock_onboarding_record(db, organization_id, onboarding_id)
+            if record is None or not application_is_terminated(db, organization_id, record.application_id):
+                return False
+            self._termination_fact(db, record, generation)
+            return True
+
+    @staticmethod
+    def _lookup_context(db, record, generation, events, cipher):
+        snapshots = [event.payload["reconciliation_context"] for event in events
+            if isinstance(event.payload.get("reconciliation_context"), dict)]
+        if not snapshots:
+            raise OnboardingNotReady("feishu_approval_reconciliation_context_missing")
+        snapshot = snapshots[0]
+        try:
+            started_at = datetime.fromisoformat(snapshot["started_at"])
+            valid = (
+                all(value == snapshot for value in snapshots)
+                and snapshot["organization_id"] == str(record.organization_id)
+                and snapshot["application_id"] == str(record.application_id)
+                and snapshot["onboarding_id"] == str(record.id)
+                and snapshot["generation"] == str(generation)
+                and isinstance(snapshot["approval_code"], str) and bool(snapshot["approval_code"].strip())
+                and isinstance(snapshot["app_id"], str) and bool(snapshot["app_id"].strip())
+                and started_at.tzinfo is not None and started_at.utcoffset() is not None
+            )
+            config_id = UUID(snapshot["config_id"])
+        except (AttributeError, KeyError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise OnboardingNotReady("feishu_approval_reconciliation_context_invalid")
+        base = db.scalar(select(FeishuOrganizationConfig).where(
+            FeishuOrganizationConfig.organization_id == record.organization_id,
+        ))
+        if (base is None or base.id != config_id or base.app_id != snapshot["app_id"]
+                or not base.enabled or base.encrypted_app_secret is None):
+            raise OnboardingNotReady("feishu_approval_reconciliation_tenant_changed")
+        binding = db.scalar(select(FeishuIdentityBinding).where(
+            FeishuIdentityBinding.organization_id == record.organization_id,
+            FeishuIdentityBinding.user_id == record.started_by,
+        ))
+        tenant_key = snapshot.get("tenant_key")
+        if tenant_key and binding is not None and binding.tenant_key and binding.tenant_key != tenant_key:
+            raise OnboardingNotReady("feishu_approval_reconciliation_tenant_changed")
+        credentials = FeishuCredentials(base.app_id, cipher.decrypt(base.encrypted_app_secret),
+            base.redirect_uri, base.calendar_id)
+        return credentials, snapshot["approval_code"], started_at
+
+    def _reconciliation_error(self, organization_id, onboarding_id, generation, safe_code):
+        with self._sessions.begin() as db:
+            record = lock_onboarding_record(db, organization_id, onboarding_id)
+            if record is None or not application_is_terminated(db, organization_id, record.application_id):
+                return
+            for original in self._events(db, record, generation):
+                original.payload = {**original.payload, "reconciliation_safe_error_code": safe_code}
+            if record.generation == generation and record.safe_error_code != safe_code:
+                record.safe_error_code = safe_code
+                record.version += 1
+            self._termination_fact(db, record, generation)
+
+    def _attempt_times(self, events, generation):
+        times = set()
+        for event in events:
+            if event.payload.get("generation") != str(generation):
+                continue
+            values = event.payload.get("submission_attempted_at")
+            if values is None or values == []:
+                if self._attempted([event], generation, event.id):
+                    raise OnboardingNotReady("feishu_approval_reconciliation_attempt_times_missing")
+                continue
+            if not isinstance(values, list):
+                raise OnboardingNotReady("feishu_approval_reconciliation_attempt_times_invalid")
+            try:
+                parsed = [datetime.fromisoformat(value) for value in values]
+                if any(value.tzinfo is None or value.utcoffset() != timezone.utc.utcoffset(value) for value in parsed):
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise OnboardingNotReady("feishu_approval_reconciliation_attempt_times_invalid") from None
+            times.update(parsed)
+        return sorted(times)
+
+    def _find_in_attempt_windows(self, credentials, approval_code, generation, attempted_at):
+        if not attempted_at:
+            raise OnboardingNotReady("feishu_approval_reconciliation_attempt_times_missing")
+        for timestamp in attempted_at:
+            result = self._provider.find_approval_instance_by_uuid(credentials, approval_code,
+                str(generation), started_at=timestamp)
+            if result is not None:
+                return result
+        return None
+
+    def _reconcile_generation(self, organization_id, onboarding_id, generation):
+        try:
+            with self._sessions.begin() as db:
+                record = lock_onboarding_record(db, organization_id, onboarding_id)
+                if record is None:
+                    raise OnboardingNotReady("feishu_onboarding_missing")
+                if not application_is_terminated(db, organization_id, record.application_id):
+                    raise OnboardingNotReady("feishu_approval_reconciliation_not_terminated")
+                events = self._events(db, record, generation)
+                if not events:
+                    raise OnboardingNotReady("feishu_approval_reconciliation_context_missing")
+                if not self._attempted(events, generation, None):
+                    self._termination_fact(db, record, generation)
+                    return None
+                known = next((event.payload["instance_code"] for event in events
+                    if event.payload.get("instance_code")), None)
+                if known:
+                    self._termination_fact(db, record, generation, state="needs_action", reference=known)
+                    return None
+                credentials, approval_code, _ = self._lookup_context(
+                    db, record, generation, events, self._feishu_cipher)
+                attempted_at = self._attempt_times(events, generation)
+            # This is the only remote operation on the reconciliation path.
+            result = self._find_in_attempt_windows(credentials, approval_code, generation, attempted_at)
+            if result is None:
+                raise OnboardingNotReady("feishu_approval_reconciliation_not_found")
+        except OnboardingNotReady as error:
+            self._reconciliation_error(organization_id, onboarding_id, generation, error.code)
+            return error.code
+        except FeishuProviderError:
+            code = "feishu_approval_reconciliation_lookup_failed"
+            self._reconciliation_error(organization_id, onboarding_id, generation, code)
+            return code
+        with self._sessions.begin() as db:
+            record = lock_onboarding_record(db, organization_id, onboarding_id)
+            if record is None:
+                return "feishu_onboarding_missing"
+            for original in self._events(db, record, generation):
+                original.payload = {**original.payload, "instance_code": result.instance_code,
+                    "reconciliation_safe_error_code": None}
+            if record.generation == generation:
+                record.feishu_instance_code = result.instance_code
+                record.safe_error_code = None
+                record.version += 1
+            self._termination_fact(db, record, generation, state="needs_action", reference=result.instance_code)
+        return None
+
     def _prepare_request(self, organization_id, onboarding_id, generation, event_id, request, selections, nodes, config_version):
         with self._sessions.begin() as db:
             record = lock_onboarding_record(db, organization_id, onboarding_id)
             if record is None or record.generation != generation or record.status == "submitted":
                 raise FeishuProviderError("feishu_onboarding_state_invalid", retryable=False)
+            if application_is_terminated(db, organization_id, record.application_id):
+                raise FeishuProviderError("application_terminated", retryable=False)
             if candidate_deletion_pending(db, organization_id, record.candidate_id):
                 raise FeishuProviderError("candidate_deletion_pending", retryable=False)
             config = db.scalar(select(FeishuOnboardingConfig).where(
@@ -725,26 +929,52 @@ class FeishuOnboardingOutboxHandler:
                     current = prior
             if current is None:
                 raise FeishuProviderError("feishu_approval_reconciliation_required", retryable=False)
-            current.payload = {**current.payload, "submission_fingerprint": digest, "submission_state": "attempted"}
+            base = db.scalar(select(FeishuOrganizationConfig).where(
+                FeishuOrganizationConfig.organization_id == organization_id,
+            ))
+            if base is None:
+                raise FeishuProviderError("feishu_onboarding_not_configured", retryable=False)
+            tenant_key = db.scalar(select(FeishuIdentityBinding.tenant_key).where(
+                FeishuIdentityBinding.organization_id == organization_id,
+                FeishuIdentityBinding.user_id == record.started_by,
+            ))
+            snapshot = {"organization_id": str(organization_id), "application_id": str(record.application_id),
+                "onboarding_id": str(onboarding_id), "generation": str(generation), "config_id": str(base.id),
+                "app_id": base.app_id, "approval_code": request.approval_code,
+                "started_at": _aware(record.started_at).isoformat(), "tenant_key": tenant_key}
+            original_snapshots = [prior.payload["reconciliation_context"] for prior in events
+                if prior.payload.get("generation") == str(generation) and prior.payload.get("reconciliation_context")]
+            if self._attempted(events, generation, event_id) and not original_snapshots:
+                raise FeishuProviderError("feishu_approval_reconciliation_context_missing", retryable=False)
+            if original_snapshots and any(original != snapshot for original in original_snapshots):
+                raise FeishuProviderError("feishu_approval_reconciliation_tenant_changed", retryable=False)
+            attempted_at = self._attempt_times(events, generation)
+            current.payload = {**current.payload, "submission_fingerprint": digest,
+                "reconciliation_context": snapshot,
+                "submission_attempted_at": [timestamp.isoformat() for timestamp in attempted_at],
+                "submission_state": "attempted" if self._attempted(events, generation, event_id) else "prepared"}
         return request
 
     @staticmethod
     def _attempted(events, generation, event_id):
         return any(
             prior.payload.get("generation") == str(generation) and (
-                prior.payload.get("submission_fingerprint")
-                or (prior.payload.get("submission_state") != "preflight"
+                prior.payload.get("submission_state") in {"attempted", "unknown"}
+                or (prior.payload.get("submission_fingerprint") and prior.payload.get("submission_state") != "prepared")
+                or (prior.payload.get("submission_state") not in {"preflight", "prepared"}
                     and prior.attempts > (1 if prior.id == event_id else 0))
             ) for prior in events
         )
 
     def _create_instance(self, organization_id, onboarding_id, generation, credentials, request, nodes, config_version):
-        # Fingerprint is already durable. Hold Candidate only across this final
-        # checkpoint and bounded create call, never the remote definition read.
+        # Commit the attempt before releasing the local fence. A termination can
+        # then stop locally while the bounded remote call is still in flight.
         with self._sessions.begin() as db:
             record = lock_onboarding_record(db, organization_id, onboarding_id)
             if record is None or record.generation != generation or record.status not in {"submitting", "failed"}:
                 raise FeishuProviderError("feishu_onboarding_state_invalid", retryable=False)
+            if application_is_terminated(db, organization_id, record.application_id):
+                raise FeishuProviderError("application_terminated", retryable=False)
             if candidate_deletion_pending(db, organization_id, record.candidate_id):
                 raise FeishuProviderError("candidate_deletion_pending", retryable=False)
             binding = db.scalar(select(FeishuIdentityBinding.open_id).where(
@@ -762,12 +992,36 @@ class FeishuOnboardingOutboxHandler:
             if (binding != request.initiator_open_id
                     or resolve_node_approvers(db, organization_id, config.node_approvers, nodes) != request.node_approvers):
                 raise FeishuProviderError("feishu_approval_reconciliation_required", retryable=False)
+            events = self._events(db, record, generation)
+            lookup_credentials, _, _ = self._lookup_context(db, record, generation, events, self._feishu_cipher)
+            if lookup_credentials.app_id != credentials.app_id:
+                raise FeishuProviderError("feishu_approval_reconciliation_tenant_changed", retryable=False)
+            attempted_at = [timestamp.isoformat() for timestamp in self._attempt_times(events, generation)]
+            attempted_at.append(datetime.now(timezone.utc).isoformat())
+            for event in events:
+                if event.payload.get("submission_fingerprint"):
+                    event.payload = {**event.payload, "submission_state": "attempted",
+                        "submission_attempted_at": attempted_at}
+            self._termination_fact(db, record, generation, state="in_flight")
+        try:
             return self._provider.create_approval_instance(credentials, request, idempotency_key=str(generation))
+        except Exception:
+            with self._sessions.begin() as db:
+                record = lock_onboarding_record(db, organization_id, onboarding_id)
+                if record is not None:
+                    for event in self._events(db, record, generation):
+                        if event.payload.get("submission_state") == "attempted":
+                            event.payload = {**event.payload, "submission_state": "unknown"}
+                    self._termination_fact(db, record, generation, state="unknown")
+            raise
 
     def _fail(self, organization_id: UUID, onboarding_id: UUID, generation: UUID, safe_code: str) -> None:
         with self._sessions.begin() as db:
             record = lock_onboarding_record(db, organization_id, onboarding_id)
             if record is None or record.generation != generation or record.status == "submitted":
+                return
+            if application_is_terminated(db, organization_id, record.application_id):
+                self._termination_fact(db, record, generation)
                 return
             if candidate_deletion_pending(db, organization_id, record.candidate_id):
                 return
@@ -784,22 +1038,49 @@ class FeishuOnboardingOutboxHandler:
         except (KeyError, TypeError, ValueError):
             raise PermanentJobError("feishu_payload_invalid") from None
 
+        # Route dedicated read-only work before the create-event validator. Both
+        # paths bind the adapter payload to a persisted same-tenant outbox row.
+        with self._sessions.begin() as db:
+            persisted = db.scalar(select(OutboxEvent).where(OutboxEvent.id == idempotency_key))
+            if (persisted is None or persisted.organization_id != organization_id
+                    or persisted.aggregate_id != onboarding_id or persisted.aggregate_type != "feishu_onboarding"
+                    or persisted.payload.get("organization_id") != str(organization_id)
+                    or persisted.payload.get("onboarding_id") != str(onboarding_id)
+                    or persisted.payload.get("generation") != str(generation)
+                    or persisted.topic not in {"feishu.approval.onboarding.create", "feishu.approval.onboarding.reconcile"}):
+                raise PermanentJobError("feishu_payload_invalid")
+            reconcile_only = persisted.topic == "feishu.approval.onboarding.reconcile"
+        if reconcile_only:
+            code = self._reconcile_generation(organization_id, onboarding_id, generation)
+            if code:
+                raise PermanentJobError(code)
+            return
+        if self._stopped(organization_id, onboarding_id, generation):
+            self._reconcile_generation(organization_id, onboarding_id, generation)
+            return
+
         with self._sessions.begin() as db:
             record = lock_onboarding_record(db, organization_id, onboarding_id)
             if record is None:
                 raise PermanentJobError("feishu_onboarding_missing")
+            current_event = db.scalar(select(OutboxEvent).where(OutboxEvent.id == idempotency_key))
+            if (current_event is None or current_event.organization_id != organization_id
+                    or current_event.aggregate_id != onboarding_id
+                    or current_event.topic != "feishu.approval.onboarding.create"
+                    or current_event.payload.get("generation") != str(generation)):
+                raise PermanentJobError("feishu_payload_invalid")
+            if (current_event.attempts <= 1 and not current_event.payload.get("submission_fingerprint")
+                    and current_event.payload.get("submission_state") not in {"attempted", "unknown"}):
+                current_event.payload = {**current_event.payload, "submission_state": "preflight"}
+            if application_is_terminated(db, organization_id, record.application_id):
+                self._termination_fact(db, record, generation)
+                return
             if record.generation != generation or record.status == "submitted":
                 return
             if record.status not in {"submitting", "failed"}:
                 raise PermanentJobError("feishu_onboarding_state_invalid")
             if candidate_deletion_pending(db, organization_id, record.candidate_id):
                 raise PermanentJobError("candidate_deletion_pending")
-            current_event = db.scalar(select(OutboxEvent).where(
-                OutboxEvent.organization_id == organization_id, OutboxEvent.id == idempotency_key,
-            ))
-            if (current_event is not None and current_event.attempts <= 1
-                    and not current_event.payload.get("submission_fingerprint")):
-                current_event.payload = {**current_event.payload, "submission_state": "preflight"}
             config = db.scalar(select(FeishuOnboardingConfig).where(
                 FeishuOnboardingConfig.organization_id == organization_id,
             ))
@@ -912,17 +1193,27 @@ class FeishuOnboardingOutboxHandler:
             request = self._prepare_request(organization_id, onboarding_id, generation, idempotency_key, request, selections, nodes, config_version)
             result = self._create_instance(organization_id, onboarding_id, generation, credentials, request, nodes, config_version)
         except OnboardingNotReady as error:
+            if self._stopped(organization_id, onboarding_id, generation):
+                return
             self._fail(organization_id, onboarding_id, generation, error.code)
             raise PermanentJobError(error.code) from None
         except FeishuProviderError as error:
+            if self._stopped(organization_id, onboarding_id, generation):
+                return
             if error.provider_code == 60012:
                 try:
-                    result = self._provider.find_approval_instance_by_uuid(
-                        credentials,
-                        approval_code,
-                        str(generation),
-                        started_at=record.started_at,
-                    )
+                    with self._sessions.begin() as db:
+                        original = lock_onboarding_record(db, organization_id, onboarding_id)
+                        if original is None:
+                            raise OnboardingNotReady("feishu_onboarding_missing")
+                        events = self._events(db, original, generation)
+                        lookup_credentials, original_code, _ = self._lookup_context(
+                            db, original, generation, events, self._feishu_cipher)
+                        attempted_at = self._attempt_times(events, generation)
+                    result = self._find_in_attempt_windows(lookup_credentials, original_code, generation, attempted_at)
+                except OnboardingNotReady as lookup_error:
+                    self._fail(organization_id, onboarding_id, generation, lookup_error.code)
+                    raise PermanentJobError(lookup_error.code) from None
                 except FeishuProviderError:
                     if event.attempts >= event.max_attempts:
                         self._fail(organization_id, onboarding_id, generation, "feishu_approval_reconciliation_required")
@@ -944,7 +1235,17 @@ class FeishuOnboardingOutboxHandler:
 
         with self._sessions.begin() as db:
             record = lock_onboarding_record(db, organization_id, onboarding_id)
-            if record is None or record.generation != generation or record.status == "submitted":
+            if record is None:
+                return
+            for stored_event in self._events(db, record, generation):
+                stored_event.payload = {**stored_event.payload, "instance_code": result.instance_code}
+            if application_is_terminated(db, organization_id, record.application_id):
+                if record.generation == generation and record.feishu_instance_code != result.instance_code:
+                    record.feishu_instance_code = result.instance_code
+                    record.version += 1
+                self._termination_fact(db, record, generation, state="needs_action", reference=result.instance_code)
+                return
+            if record.generation != generation or record.status == "submitted":
                 return
             if candidate_deletion_pending(db, organization_id, record.candidate_id):
                 return
@@ -957,6 +1258,7 @@ class FeishuOnboardingOutboxHandler:
 
 
 def build_feishu_outbox_handlers(settings):
+    product_branding = load_product_branding(settings.product_branding_file)
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -980,7 +1282,7 @@ def build_feishu_outbox_handlers(settings):
         cipher,
         contact_cipher_from_settings(settings),
     )
-    notification_handler = FeishuNotificationOutboxHandler(sessions, provider, cipher)
+    notification_handler = FeishuNotificationOutboxHandler(sessions, provider, cipher, product_name=product_branding.name)
     contact_key = settings.contact_encryption_key.get_secret_value()
     if contact_key == "change-me":
         contact_key = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
@@ -996,4 +1298,5 @@ def build_feishu_outbox_handlers(settings):
         "feishu.calendar.cancel": handler,
         "feishu.notification.send": notification_handler,
         "feishu.approval.onboarding.create": onboarding_handler,
+        "feishu.approval.onboarding.reconcile": onboarding_handler,
     }
