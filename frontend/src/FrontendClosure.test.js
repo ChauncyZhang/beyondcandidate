@@ -1,6 +1,7 @@
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
 import { createServer } from "vite";
 
@@ -147,6 +148,53 @@ test("empty Offer approval status stays compact and aligned across desktop and m
     } finally { await context.close(); }
   }
 });
+
+for (const width of [1440, 768, 390]) {
+  test(`external cleanup aligns with workbench and keeps refresh beside its heading at ${width}px`, { timeout: 30000 }, async () => {
+    let phase = "empty";
+    const { context, page } = await openPage({ viewport: { width, height: 900 }, workbench: notificationWorkbench(), approvals: [] });
+    await context.route("**/api/v1/application-terminations/pending", route => {
+      if (phase === "error") return route.fulfill({ status: 503, json: { code: "unavailable" } });
+      return route.fulfill({ json: { data: { total: phase === "pending" ? 1 : 0, items: phase === "pending" ? [{
+        application_id: "cleanup-a", candidate_id: "cleanup-c", job_id: "cleanup-j", candidate_name: "待外部收尾的候选人", job_title: "测试招聘职位", version: 1,
+        external_items: [{ kind: "feishu_onboarding", state: "needs_action", reference: "external-approval-instance" }],
+      }] : [] } } });
+    });
+    try {
+      await page.goto(baseUrl);
+      const panel = page.locator(".pending-termination-panel");
+      await panel.getByText("暂无待处理外部事项", { exact: true }).waitFor();
+      const refresh = panel.getByRole("button", { name: "刷新外部收尾", exact: true });
+      assert.match(await refresh.innerText(), /刷新/);
+      const bounds = await panel.boundingBox();
+      const adjacent = await page.locator(".offer-task-section").boundingBox();
+      assert.ok(bounds.x >= 12 && bounds.x + bounds.width <= width - 12);
+      assert.ok(Math.abs(bounds.x - adjacent.x) <= 1 && Math.abs(bounds.width - adjacent.width) <= 1, "Workbench sections must share horizontal gutters");
+      const heading = await panel.getByRole("heading").boundingBox();
+      const button = await refresh.boundingBox();
+      assert.ok(button.x >= heading.x + heading.width && button.x - heading.x - heading.width <= 16, "Refresh must stay next to the heading");
+      assert.ok(button.y < heading.y + heading.height && button.y + button.height > heading.y);
+      assert.ok(button.height >= 32 && button.x + button.width <= bounds.x + bounds.width);
+      assert.ok(await panel.evaluate(el => parseFloat(getComputedStyle(el).paddingLeft) >= 12));
+      await mkdir(fileURLToPath(new URL("../../.tmp/termination-layout/", import.meta.url)), { recursive: true });
+      await page.screenshot({ path: fileURLToPath(new URL(`../../.tmp/termination-layout/empty-${width}.png`, import.meta.url)), fullPage: true });
+      phase = "pending";
+      await refresh.click();
+      await panel.getByText("待外部收尾的候选人 · 测试招聘职位", { exact: true }).waitFor();
+      assert.equal(await panel.getByRole("button", { name: "查看申请历史" }).count(), 1);
+      assert.equal(await panel.evaluate(el => el.scrollWidth <= el.clientWidth + 1), true);
+      await page.screenshot({ path: fileURLToPath(new URL(`../../.tmp/termination-layout/pending-${width}.png`, import.meta.url)), fullPage: true });
+      phase = "error";
+      await refresh.click();
+      await panel.getByRole("alert").waitFor();
+      assert.equal(await panel.getByText("待外部收尾的候选人 · 测试招聘职位", { exact: true }).count(), 1);
+      phase = "empty";
+      await refresh.click();
+      await panel.getByText("暂无待处理外部事项", { exact: true }).waitFor();
+      assert.equal(await panel.getByRole("alert").count(), 0);
+    } finally { await context.close(); }
+  });
+}
 
 test("notification bell opens actionable tasks and candidate navigation", { timeout: 60_000 }, async () => {
   let readRequest;

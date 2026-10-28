@@ -147,7 +147,19 @@ export function PendingTerminationPanel({ role, onOpen, controller = termination
   }, [allowed, controller]);
   useEffect(() => { void load(); window.addEventListener("recruiting-termination-changed", load); return () => window.removeEventListener("recruiting-termination-changed", load); }, [load]);
   if (!allowed) return null;
-  return <section className="pending-termination-panel" aria-labelledby="pending-termination-title"><header><h2 id="pending-termination-title">招聘已终止 · 外部收尾待处理（{state.total}）</h2><button type="button" className="icon-button" aria-label="刷新外部收尾" disabled={state.loading} onClick={() => void load()}><RefreshCw size={16} /></button></header>{state.loading && <p role="status">正在加载外部事项…</p>}{state.error && <p role="alert">{state.error}</p>}{!state.loading && !state.error && !state.items.length && <p>暂无待处理外部事项</p>}{state.items.map((item) => <div className="pending-termination-row" key={item.application_id}><div><strong>{item.candidate_name} · {item.job_title}</strong><p>招聘流程已停止，外部事项仍需处理。</p><ExternalItems items={item.external_items} /></div><div><TerminationEntry applicationId={item.application_id} candidateName={item.candidate_name} jobTitle={item.job_title} stage="withdrawn" role={role} onChanged={load} controller={controller} /><button type="button" className="button secondary" onClick={() => onOpen({ id: item.candidate_id, candidateId: item.candidate_id, applicationId: item.application_id, jobId: item.job_id, name: item.candidate_name, position: item.job_title })}>查看申请历史</button></div></div>)}</section>;
+  return <section className="pending-termination-panel" aria-labelledby="pending-termination-title">
+    <header>
+      <h2 id="pending-termination-title">招聘已终止 · 外部收尾待处理（{state.total}）</h2>
+      <button type="button" className="button secondary pending-termination-refresh" aria-label="刷新外部收尾" title="重新加载外部收尾事项" disabled={state.loading} onClick={() => void load()}><RefreshCw size={16} /><span>刷新</span></button>
+    </header>
+    {state.loading && <p role="status">正在加载外部事项…</p>}
+    {state.error && <p role="alert">{state.error}</p>}
+    {!state.loading && !state.error && !state.items.length && <p>暂无待处理外部事项</p>}
+    {state.items.map((item) => <div className="pending-termination-row" key={item.application_id}>
+      <div><strong>{item.candidate_name} · {item.job_title}</strong><p>招聘流程已停止，外部事项仍需处理。</p><ExternalItems items={item.external_items} /></div>
+      <div><TerminationEntry applicationId={item.application_id} candidateName={item.candidate_name} jobTitle={item.job_title} stage="withdrawn" role={role} onChanged={load} controller={controller} /><button type="button" className="button secondary" onClick={() => onOpen({ id: item.candidate_id, candidateId: item.candidate_id, applicationId: item.application_id, jobId: item.job_id, name: item.candidate_name, position: item.job_title })}>查看申请历史</button></div>
+    </div>)}
+  </section>;
 }
 
 export function InterviewCancellationEntry({ interview, applicationId, candidateName, jobTitle, role, onChanged, onNotify, controller = interviewController }) {

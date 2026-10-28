@@ -18,12 +18,21 @@
 .termination-external-items { padding-left: 20px; margin: 0; overflow-wrap: anywhere; }
 .termination-external-items li { margin: 8px 0; }
 .termination-external-items span, .termination-external-items strong { display: block; }
-.pending-termination-panel { border-top: 1px solid #dce1e5; padding: 20px 0; margin: 16px 0; }
-.pending-termination-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.pending-termination-panel h2 { font-size: 17px; margin: 0; }
+.pending-termination-panel { min-width: 0; border-block: 1px solid var(--line, #dce1e5); padding: 16px; margin: 0 0 14px; background: #fff; }
+.workspace > .pending-termination-panel { margin-inline: 28px; }
+.pending-termination-panel > header { display: flex; align-items: center; justify-content: flex-start; gap: 10px; }
+.pending-termination-panel > header h2 { min-width: 0; font-size: 16px; line-height: 1.5; margin: 0; overflow-wrap: anywhere; }
+.pending-termination-panel .pending-termination-refresh { flex: 0 0 auto; min-height: 34px; padding: 6px 10px; gap: 6px; font-size: 13px; white-space: nowrap; }
+.pending-termination-panel > p { margin: 12px 0 0; color: var(--muted, #66788a); font-size: 13px; line-height: 1.5; }
+.pending-termination-panel > p[role="alert"] { color: #ab2637; }
 .pending-termination-row { display: flex; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e1e4e8; padding: 16px 0; }
 .pending-termination-row > div { min-width: 0; }
+.pending-termination-row > div:first-child { flex: 1; overflow-wrap: anywhere; }
+.pending-termination-row:last-child { border-bottom: 0; padding-bottom: 0; }
 .pending-termination-row > div:last-child { display: flex; gap: 8px; flex-wrap: wrap; align-content: flex-start; }
+@media (max-width: 900px) {
+  .workspace > .pending-termination-panel { margin-inline: 16px; }
+}
 @media (max-width: 600px) {
   .termination-dialog .modal-header, .termination-dialog .modal-body, .termination-dialog .modal-footer { padding: 16px; }
   .termination-dialog .modal-footer { flex-wrap: wrap; }

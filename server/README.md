@@ -101,6 +101,7 @@ creates a new application; it cannot restore old tasks or tokens.
 | Migration/grants/redaction and actual termination-vs-accept/feedback/reschedule/onboarding lock waits | `server/tests/test_application_termination_postgres.py` |
 | Existing calendar serialization, known remote cancellation, old-generation replay | `server/tests/test_feishu_termination_postgres.py` |
 | Preview/reason/prearrival confirmation, conflict/refetch preservation, versioned external resolution, independent pending-external workbench and pending-feedback single cancellation at desktop/mobile widths | `frontend/src/RecruitingTermination.test.js`, `frontend/src/terminationController.test.js` |
+| Pending-external panel gutters, adjacent visible refresh, populated/error/retry states at 1440/768/390px | `frontend/src/FrontendClosure.test.js` (`external cleanup aligns`) |
 | Actual candidate/application/interview and accepted-Offer/onboarding entries, manager history without termination privileges, enabled danger-button hover contrast and modal overflow at 1440/390px | `frontend/src/TerminationEntries.test.js` |
 | Cancelled approval history says cancelled/no approval needed, preserves original assignee/reason, and retains normal approval labels | `frontend/src/OfferTerminationHistory.test.js` |
 
